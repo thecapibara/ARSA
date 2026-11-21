@@ -311,8 +311,12 @@ pub fn apply_procedural_reflexes(
 
     let spine_offset = Quat::from_euler(EulerRot::XYZ, spine_pitch, spine_yaw, spine_roll);
     for jid in [JointId::LowerSpine, JointId::ChestSpine] {
-        let j = &mut joints[ragdoll.joint_indices[jid as usize]];
-        j.motor_target = (j.motor_target * spine_offset).normalize();
+        if matches!(state, BehaviorState::Downed | BehaviorState::Falling) {
+            set_motor_target(ragdoll, joints, jid, spine_offset);
+        } else {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_target = (j.motor_target * spine_offset).normalize();
+        }
     }
 
     // Arm reach-for-wound (skip while actively bracing mid-air)
@@ -446,23 +450,47 @@ fn reach_arm_to_target(
         );
     }
 
-    // Ensure reaching arm has responsive motor authority even while stumbling or downed
+    // Ensure reaching arm has responsive motor authority (softer when Downed so he rests calmly)
+    let arm_downed_scale = if ragdoll.balance.state == BehaviorState::Downed {
+        0.35
+    } else {
+        1.0
+    };
     let sh = &mut joints[ragdoll.joint_indices[shoulder_jid as usize]];
-    sh.motor_stiffness = sh.motor_stiffness.max(85.0 * grav_scale * w);
+    sh.motor_stiffness = sh
+        .motor_stiffness
+        .max(85.0 * grav_scale * w * arm_downed_scale);
     sh.motor_damping = sh.motor_damping.max(1.4 * damp_scale);
-    sh.max_torque = sh.max_torque.max(95.0 * grav_scale * w);
+    sh.max_torque = sh.max_torque.max(95.0 * grav_scale * w * arm_downed_scale);
 
     let el = &mut joints[ragdoll.joint_indices[elbow_jid as usize]];
-    el.motor_stiffness = el.motor_stiffness.max(60.0 * grav_scale * w);
+    el.motor_stiffness = el
+        .motor_stiffness
+        .max(60.0 * grav_scale * w * arm_downed_scale);
     el.motor_damping = el.motor_damping.max(1.2 * damp_scale);
-    el.max_torque = el.max_torque.max(65.0 * grav_scale * w);
+    el.max_torque = el.max_torque.max(65.0 * grav_scale * w * arm_downed_scale);
 
-    // Strictly force-clamped physical reach force on hand with equal-and-opposite reaction on Chest
+    // Strictly force-clamped physical reach force on hand with equal-and-opposite reaction on Chest.
+    // Stop pulling once the hand reaches surface contact radius (~0.095 * s_h) so it rests calmly
+    // on the wound without fighting Hand-vs-Chest self-collision (no downed jitter).
     let hand_idx = ragdoll.body_indices[hand_bid as usize];
-    let err = target_world - bodies[hand_idx].position;
+    let raw_err = target_world - bodies[hand_idx].position;
+    let arrival_radius = 0.095 * s_h;
+    let err_len = raw_err.length();
+    let eff_err = if err_len > arrival_radius {
+        raw_err * ((err_len - arrival_radius) / err_len)
+    } else {
+        Vec3::ZERO
+    };
+    let downed_scale = if ragdoll.balance.state == BehaviorState::Downed {
+        0.45
+    } else {
+        1.0
+    };
     let rel_vel = bodies[hand_idx].linear_velocity - bodies[chest_idx].linear_velocity;
-    let max_force = 45.0 * mass_scale * w;
-    let mut force = err * (160.0 * mass_scale * w) - rel_vel * (14.0 * mass_scale);
+    let max_force = 45.0 * mass_scale * w * downed_scale;
+    let mut force =
+        eff_err * (160.0 * mass_scale * w * downed_scale) - rel_vel * (14.0 * mass_scale);
     let f_len = force.length();
     if f_len > max_force && f_len > 1e-6 {
         force *= max_force / f_len;

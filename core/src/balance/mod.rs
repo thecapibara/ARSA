@@ -609,6 +609,9 @@ pub fn update_ragdoll_balance(
                 joints[j_idx].motor_damping *= 0.45;
                 joints[j_idx].max_torque *= 0.35;
             }
+            // Reset spine targets so reflex offsets never accumulate across substeps
+            set_target(ragdoll, joints, JointId::LowerSpine, Quat::IDENTITY);
+            set_target(ragdoll, joints, JointId::ChestSpine, Quat::IDENTITY);
             // Keep neck mildly stiff to protect head
             joints[ragdoll.joint_indices[JointId::Neck as usize]].motor_stiffness *= 1.8;
             joints[ragdoll.joint_indices[JointId::Head as usize]].motor_stiffness *= 1.8;
@@ -645,6 +648,10 @@ pub fn update_ragdoll_balance(
             ragdoll.balance.step_active = false;
             let is_wounded = ragdoll.reflex.active_wound.is_some();
             for &j_idx in &ragdoll.joint_indices {
+                // Always reset motor_target so reflex offsets never spin/accumulate across substeps!
+                joints[j_idx].motor_target = (joints[j_idx].frame_parent.conjugate()
+                    * joints[j_idx].frame_child)
+                    .normalize();
                 if is_wounded {
                     joints[j_idx].motor_stiffness *= 0.04;
                     joints[j_idx].motor_damping *= 0.25;
