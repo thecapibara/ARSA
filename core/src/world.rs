@@ -42,6 +42,14 @@ pub struct GrabConstraint {
     pub damping: f32,
 }
 
+/// Pendulum / cable distance tether constraint keeping a body within `length` of `anchor_world`.
+#[derive(Debug, Clone)]
+pub struct TetherConstraint {
+    pub anchor_world: Vec3,
+    pub body_idx: usize,
+    pub length: f32,
+}
+
 /// Result of a raycast query against dynamic bodies in `ArsaWorld`.
 #[derive(Debug, Clone, Copy)]
 pub struct RaycastHit {
@@ -60,6 +68,7 @@ pub struct ArsaWorld {
     pub solver_iterations: usize,
     pub bodies: Vec<RigidBody>,
     pub joints: Vec<Joint>,
+    pub tethers: Vec<TetherConstraint>,
     pub static_boxes: Vec<StaticBox>,
     pub ragdolls: Vec<RagdollInstance>,
     pub grab: Option<GrabConstraint>,
@@ -82,6 +91,7 @@ impl ArsaWorld {
             solver_iterations: 4,
             bodies: Vec::new(),
             joints: Vec::new(),
+            tethers: Vec::new(),
             static_boxes: Vec::new(),
             ragdolls: Vec::new(),
             grab: None,
@@ -89,14 +99,42 @@ impl ArsaWorld {
         }
     }
 
-    /// Clears all bodies, joints, static obstacles, ragdolls, and active grabs.
+    /// Clears all bodies, joints, tethers, static obstacles, ragdolls, and active grabs.
     pub fn clear(&mut self) {
         self.bodies.clear();
         self.joints.clear();
+        self.tethers.clear();
         self.static_boxes.clear();
         self.ragdolls.clear();
         self.grab = None;
         self.connected_pairs.clear();
+    }
+
+    /// Adds a distance tether constraint anchoring `body_idx` within `length` meters of `anchor_world`.
+    pub fn add_tether(&mut self, anchor_world: Vec3, body_idx: usize, length: f32) -> usize {
+        let safe_length = if length.is_finite() {
+            length.max(0.0)
+        } else {
+            0.0
+        };
+        if let Some(body) = self.bodies.get_mut(body_idx) {
+            if body.inv_mass > 0.0 {
+                let delta = body.position - anchor_world;
+                let dist = delta.length();
+                if dist > safe_length && dist > 1e-6 {
+                    let clamped_pos = anchor_world + (delta / dist) * safe_length;
+                    body.position = clamped_pos;
+                    body.prev_position = clamped_pos;
+                }
+            }
+        }
+        let idx = self.tethers.len();
+        self.tethers.push(TetherConstraint {
+            anchor_world,
+            body_idx,
+            length: safe_length,
+        });
+        idx
     }
 
     /// Adds a static axis-aligned box obstacle and returns its index.
@@ -311,6 +349,21 @@ impl ArsaWorld {
                     j.solve_position(&mut self.bodies, sub_dt);
                     j.solve_limits(&mut self.bodies, sub_dt);
                 }
+                for tether in &self.tethers {
+                    let Some(body) = self.bodies.get_mut(tether.body_idx) else {
+                        continue;
+                    };
+                    if body.inv_mass == 0.0 {
+                        continue;
+                    }
+                    let delta = body.position - tether.anchor_world;
+                    let dist = delta.length();
+                    if dist > tether.length && dist > 1e-6 {
+                        let n = delta / dist;
+                        let correction = -n * (dist - tether.length);
+                        body.position += correction;
+                    }
+                }
                 solve_contacts_position(&mut self.bodies, &mut contacts);
             }
 
@@ -383,6 +436,61 @@ impl ArsaWorld {
         let dir_n = dir.normalize_or_zero();
         self.apply_impulse_at_point(hit.body_idx, dir_n * strength, hit.point);
         Some(hit)
+    }
+
+    /// Fires a kinetic force wave along `dir` from `origin`, locating an epicenter via
+    /// raycast (or `y = 1.0` plane intersection clamped within `1.5..8.0m` of `origin`) and
+    /// applying a distance-attenuated radial + directional + upward impulse to every dynamic
+    /// body within `radius`. Returns the count of affected dynamic bodies.
+    pub fn apply_force_wave(
+        &mut self,
+        origin: Vec3,
+        dir: Vec3,
+        radius: f32,
+        max_impulse: f32,
+    ) -> usize {
+        let dir_n = dir.normalize_or_zero();
+        if dir_n.length_squared() < 1e-12
+            || !radius.is_finite()
+            || radius <= 0.0
+            || !max_impulse.is_finite()
+        {
+            return 0;
+        }
+
+        let impact_center = if let Some(hit) = self.raycast(origin, dir_n, 100.0) {
+            hit.point
+        } else if dir_n.y.abs() > 1e-5 {
+            let t = (1.0 - origin.y) / dir_n.y;
+            let dist = if t > 0.0 { t.clamp(1.5, 8.0) } else { 4.5 };
+            origin + dir_n * dist
+        } else {
+            origin + dir_n * 4.5
+        };
+
+        let mut affected = 0usize;
+        for idx in 0..self.bodies.len() {
+            if self.bodies[idx].inv_mass == 0.0 {
+                continue;
+            }
+            let pos = self.bodies[idx].position;
+            let offset = pos - impact_center;
+            let dist = offset.length();
+            if dist >= radius {
+                continue;
+            }
+            let falloff = (1.0 - dist / radius).powi(2);
+            let radial = if dist > 1e-4 {
+                offset / dist
+            } else {
+                Vec3::ZERO
+            };
+            let impulse_dir = (radial * 0.55 + dir_n * 0.45 + Vec3::Y * 0.25).normalize_or_zero();
+            let impulse = impulse_dir * (max_impulse * falloff);
+            self.apply_impulse_at_point(idx, impulse, pos);
+            affected += 1;
+        }
+        affected
     }
 
     /// Fires a ballistic weapon (`Pistol`, `Shotgun`, or `Rifle`) from `origin` along `dir`,
@@ -584,6 +692,24 @@ impl ArsaWorld {
             }
             out.push(b.ragdoll_id.map(|id| id as f32).unwrap_or(-1.0));
             out.push(b.bone_id.map(|id| id as f32).unwrap_or(-1.0));
+        }
+    }
+
+    /// Writes active tether segments into `out` (6 floats per tether:
+    /// `ax, ay, az, bx, by, bz`).
+    pub fn write_tethers(&self, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve(self.tethers.len() * 6);
+        for t in &self.tethers {
+            let Some(body) = self.bodies.get(t.body_idx) else {
+                continue;
+            };
+            out.push(t.anchor_world.x);
+            out.push(t.anchor_world.y);
+            out.push(t.anchor_world.z);
+            out.push(body.position.x);
+            out.push(body.position.y);
+            out.push(body.position.z);
         }
     }
 

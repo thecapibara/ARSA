@@ -221,6 +221,50 @@ export class TacticalAudio {
     });
   }
 
+  /**
+   * Deep sci-fi/kinetic bass whoosh + crisp air pressure burst for Force Wave.
+   */
+  public playForceWave(): void {
+    const ctx = this.activeContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+
+    // Deep kinetic sub-bass drop
+    this.triggerPitchSweep(ctx, now, 0.34, {
+      wave: 'sine',
+      freqStart: 135,
+      freqEnd: 26,
+      gain: 0.95,
+    });
+
+    // Sci-fi harmonic resonance sweep
+    this.triggerPitchSweep(ctx, now, 0.24, {
+      wave: 'triangle',
+      freqStart: 320,
+      freqEnd: 46,
+      gain: 0.42,
+    });
+
+    // Crisp compressed air pressure burst
+    this.triggerNoiseBurst(ctx, now, 0.22, {
+      filterType: 'bandpass',
+      freqStart: 3400,
+      freqEnd: 380,
+      q: 1.05,
+      gain: 0.78,
+    });
+
+    // Wide kinetic shockwave whoosh tail
+    this.triggerNoiseBurst(ctx, now + 0.018, 0.4, {
+      filterType: 'lowpass',
+      freqStart: 1100,
+      freqEnd: 130,
+      q: 0.75,
+      gain: 0.44,
+    });
+  }
+
   private ensureContext(): AudioContext | null {
     if (this.ctx) return this.ctx;
     if (typeof window === 'undefined') return null;

@@ -21,7 +21,9 @@ pub use skeleton::{
     spawn_humanoid, spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId,
     JointId, RagdollInstance,
 };
-pub use world::{ArsaWorld, GrabConstraint, RaycastHit, WeaponKind, WeaponShotResult};
+pub use world::{
+    ArsaWorld, GrabConstraint, RaycastHit, TetherConstraint, WeaponKind, WeaponShotResult,
+};
 
 #[cfg(test)]
 mod tests {
@@ -473,5 +475,124 @@ mod tests {
             "resized ragdoll expected Balanced, got {:?}",
             r.balance.state
         );
+    }
+
+    #[test]
+    fn test_wrecking_ball_tether_and_impact() {
+        let mut world = ArsaWorld::new();
+        let ragdoll_id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+        world.add_static_box(
+            Vec3::new(0.0, 4.35, 0.0),
+            Vec3::new(1.4, 0.12, 0.18),
+            0.75,
+            0.05,
+        );
+        let anchor = Vec3::new(0.0, 4.25, 0.0);
+        let tether_length = 3.15;
+        let ball_idx = world.spawn_sphere(
+            Vec3::new(-2.75, 2.35, 0.0),
+            0.42,
+            85.0,
+            Vec3::new(1.8, 0.0, 0.0),
+        );
+        world.add_tether(anchor, ball_idx, tether_length);
+
+        let pelvis_idx = world.ragdolls[ragdoll_id].body_indices[BoneId::Pelvis as usize];
+        let initial_pelvis = world.bodies[pelvis_idx].position;
+
+        // Step 1.5s (90 frames at 1/60s)
+        for frame in 0..90 {
+            world.step(1.0 / 60.0);
+            let dist = (world.bodies[ball_idx].position - anchor).length();
+            assert!(
+                dist <= tether_length + 0.02,
+                "tether length exceeded at frame {frame}: dist={dist}, limit={tether_length}"
+            );
+        }
+
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf in wrecking ball test"
+            );
+        }
+
+        let disp = (world.bodies[pelvis_idx].position - initial_pelvis).length();
+        assert!(
+            disp > 0.35,
+            "mannequin was not significantly displaced by wrecking ball impact: disp={disp}"
+        );
+    }
+
+    #[test]
+    fn test_force_wave_affects_crowd() {
+        let mut world = ArsaWorld::new();
+        let crowd = [
+            (
+                Vec3::new(0.0, 0.02, 0.75),
+                BodyProfile {
+                    height_m: 1.78,
+                    mass_kg: 75.0,
+                    muscle_ratio: 1.0,
+                },
+            ),
+            (
+                Vec3::new(-0.75, 0.02, -0.05),
+                BodyProfile {
+                    height_m: 1.65,
+                    mass_kg: 60.0,
+                    muscle_ratio: 0.9,
+                },
+            ),
+            (
+                Vec3::new(0.75, 0.02, -0.05),
+                BodyProfile {
+                    height_m: 1.90,
+                    mass_kg: 70.0,
+                    muscle_ratio: 1.0,
+                },
+            ),
+            (
+                Vec3::new(0.0, 0.02, -0.95),
+                BodyProfile {
+                    height_m: 2.17,
+                    mass_kg: 135.0,
+                    muscle_ratio: 1.35,
+                },
+            ),
+        ];
+
+        for (pos, profile) in crowd {
+            world.spawn_ragdoll_with_profile(pos, profile);
+        }
+
+        let affected = world.apply_force_wave(
+            Vec3::new(0.0, 1.8, 3.5),
+            Vec3::new(0.0, -0.22, -1.0),
+            3.2,
+            42.0,
+        );
+        assert!(
+            affected > 17,
+            "expected force wave to affect multiple crowd bodies (>17), got {affected}"
+        );
+
+        // Step 0.5s (30 frames at 1/60s)
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf after force wave on crowd"
+            );
+        }
     }
 }

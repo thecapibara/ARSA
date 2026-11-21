@@ -33,6 +33,8 @@ impl ArsaSim {
     /// - `1`: Staircase Test
     /// - `2`: Drop Platform
     /// - `3`: Trip Test
+    /// - `4`: Wrecking Ball
+    /// - `5`: Crowd (4x Diverse Builds)
     pub fn reset_lab_scene(&mut self, scenario: u32) {
         self.reset_lab_scene_with_profile(scenario, 1.78, 75.0, 1.0);
     }
@@ -42,6 +44,8 @@ impl ArsaSim {
     /// - `1`: Staircase Test
     /// - `2`: Drop Platform
     /// - `3`: Trip Test (standing mannequin + low obstacle box behind heels)
+    /// - `4`: Wrecking Ball (standing mannequin + gantry beam + tethered 85kg wrecking ball)
+    /// - `5`: Crowd (4x diverse builds in tight staggered formation facing +Z)
     pub fn reset_lab_scene_with_profile(
         &mut self,
         scenario: u32,
@@ -100,6 +104,60 @@ impl ArsaSim {
                     .spawn_ragdoll_with_profile(Vec3::new(0.0, 0.02, 0.0), profile);
                 self.world.place_obstacle_box(0.0, -0.52, 0.45, 0.14, 0.16, 35.0);
             }
+            4 => {
+                // Wrecking Ball: standing mannequin + overhead gantry + tethered 85kg steel ball
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 0.02, 0.0), profile);
+                self.world.add_static_box(
+                    Vec3::new(0.0, 4.35, 0.0),
+                    Vec3::new(1.4, 0.12, 0.18),
+                    0.75,
+                    0.05,
+                );
+                let ball_idx = self.world.spawn_sphere(
+                    Vec3::new(-2.75, 2.35, 0.0),
+                    0.42,
+                    85.0,
+                    Vec3::new(1.8, 0.0, 0.0),
+                );
+                self.world
+                    .add_tether(Vec3::new(0.0, 4.25, 0.0), ball_idx, 3.15);
+            }
+            5 => {
+                // Crowd (4x Diverse Builds) in tight staggered formation facing +Z
+                self.world.spawn_ragdoll_with_profile(
+                    Vec3::new(0.0, 0.02, 0.75),
+                    BodyProfile {
+                        height_m: 1.78,
+                        mass_kg: 75.0,
+                        muscle_ratio: 1.0,
+                    },
+                );
+                self.world.spawn_ragdoll_with_profile(
+                    Vec3::new(-0.75, 0.02, -0.05),
+                    BodyProfile {
+                        height_m: 1.65,
+                        mass_kg: 60.0,
+                        muscle_ratio: 0.9,
+                    },
+                );
+                self.world.spawn_ragdoll_with_profile(
+                    Vec3::new(0.75, 0.02, -0.05),
+                    BodyProfile {
+                        height_m: 1.90,
+                        mass_kg: 70.0,
+                        muscle_ratio: 1.0,
+                    },
+                );
+                self.world.spawn_ragdoll_with_profile(
+                    Vec3::new(0.0, 0.02, -0.95),
+                    BodyProfile {
+                        height_m: 2.17,
+                        mass_kg: 135.0,
+                        muscle_ratio: 1.35,
+                    },
+                );
+            }
             _ => {
                 // 0: Flat Lab
                 self.world
@@ -144,6 +202,13 @@ impl ArsaSim {
             out.push(sb.half_extents.y);
             out.push(sb.half_extents.z);
         }
+        out
+    }
+
+    /// Returns packed active tether segments (6 floats per tether: `ax, ay, az, bx, by, bz`).
+    pub fn get_tethers(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.world.write_tethers(&mut out);
         out
     }
 
@@ -350,6 +415,25 @@ impl ArsaSim {
             Some(hit) => hit.body_idx as i32,
             None => -1,
         }
+    }
+
+    /// Fires a kinetic force wave from `(ox, oy, oz)` along `(dx, dy, dz)` with
+    /// `radius = 3.2` m and `max_impulse = 42.0` N*s. Returns the count of affected bodies.
+    pub fn apply_force_wave(
+        &mut self,
+        ox: f32,
+        oy: f32,
+        oz: f32,
+        dx: f32,
+        dy: f32,
+        dz: f32,
+    ) -> usize {
+        self.world.apply_force_wave(
+            Vec3::new(ox, oy, oz),
+            Vec3::new(dx, dy, dz),
+            3.2,
+            42.0,
+        )
     }
 
     /// Fires a ballistic weapon (`0 = Pistol`, `1 = Shotgun`, `2 = Rifle`) from `(ox, oy, oz)`

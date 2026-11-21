@@ -9,21 +9,16 @@ import {
   LabScene,
 } from './scene.ts';
 
-type ArsaSimPhase3 = ArsaSim & {
-  fire_weapon?: (
+type ArsaSimPhase4 = ArsaSim & {
+  get_tethers?: () => Float32Array;
+  apply_force_wave?: (
     ox: number,
     oy: number,
     oz: number,
     dx: number,
     dy: number,
-    dz: number,
-    weapon_kind: number
-  ) => Float32Array;
-  update_all_ragdolls_profile?: (
-    height_m: number,
-    mass_kg: number,
-    muscle_ratio: number
-  ) => void;
+    dz: number
+  ) => number;
 };
 
 type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
@@ -34,7 +29,8 @@ type ToolMode =
   | WeaponToolMode
   | 'place_box'
   | 'box'
-  | 'sphere';
+  | 'sphere'
+  | 'force_wave';
 type ProfilePresetKey = 'light' | 'standard' | 'tall' | 'heavy';
 
 interface BodyProfile {
@@ -76,6 +72,7 @@ const TOOL_LABELS: Record<ToolMode, string> = {
   place_box: 'TOOL: PLACE BOX',
   box: 'TOOL: THROW BOX',
   sphere: 'TOOL: THROW SPHERE',
+  force_wave: 'TOOL: FORCE WAVE',
 };
 
 const STATE_BADGES: Array<{ label: string; cls: string }> = [
@@ -101,7 +98,7 @@ class PlaygroundApp {
   private readonly canvas: HTMLCanvasElement;
   private readonly lab: LabScene;
   private readonly audio = new TacticalAudio();
-  private sim: ArsaSimPhase3 | null = null;
+  private sim: ArsaSimPhase4 | null = null;
 
   private activeTool: ToolMode = 'grab';
   private activeScenario = 0;
@@ -180,7 +177,7 @@ class PlaygroundApp {
   public async start(): Promise<void> {
     try {
       await init();
-      this.sim = new ArsaSim() as ArsaSimPhase3;
+      this.sim = new ArsaSim() as ArsaSimPhase4;
       this.loadScenario(0);
       this.banner.classList.add('hidden');
       this.lastFrameTime = performance.now();
@@ -216,6 +213,10 @@ class PlaygroundApp {
 
     this.lab.syncStaticBoxes(this.sim.get_static_boxes());
     this.syncSimulationView();
+
+    if (scenario === 4 || scenario === 5) {
+      this.lab.frameCamera([0, 2.1, 5.4], [0, 1.1, 0]);
+    }
 
     document
       .querySelectorAll<HTMLButtonElement>('[data-scenario]')
@@ -410,6 +411,11 @@ class PlaygroundApp {
     const descriptors = this.sim.get_body_descriptors();
 
     this.lab.syncBodies(transforms, descriptors, count, forceRebuild);
+    this.lab.syncTethers(
+      typeof this.sim.get_tethers === 'function'
+        ? this.sim.get_tethers()
+        : new Float32Array(0)
+    );
 
     if (this.grabbedBodyIndex >= 0 && this.grabbedBodyIndex < count) {
       const tOff = this.grabbedBodyIndex * 7;
@@ -943,6 +949,30 @@ class PlaygroundApp {
           vel.z
         );
         this.syncSimulationView();
+      } else if (this.activeTool === 'force_wave') {
+        if (typeof this.sim.apply_force_wave === 'function') {
+          this.sim.apply_force_wave(
+            ray.origin.x,
+            ray.origin.y,
+            ray.origin.z,
+            ray.direction.x,
+            ray.direction.y,
+            ray.direction.z
+          );
+        } else {
+          this.sim.apply_ray_impulse(
+            ray.origin.x,
+            ray.origin.y,
+            ray.origin.z,
+            ray.direction.x,
+            ray.direction.y,
+            ray.direction.z,
+            65.0
+          );
+        }
+        this.lab.spawnForceWaveEffect(ray.origin, ray.direction);
+        this.audio.playForceWave();
+        this.syncSimulationView();
       }
     });
 
@@ -1011,64 +1041,66 @@ class PlaygroundApp {
 
       this.lab.setFlyKey(e.code, true);
 
-      switch (e.key) {
-        case '1':
+      if (e.ctrlKey || e.metaKey || e.altKey) {
+        return;
+      }
+
+      switch (e.code) {
+        case 'Digit1':
           this.setTool('grab');
           break;
-        case '2':
+        case 'Digit2':
           this.setTool('shove');
           break;
-        case '3':
+        case 'Digit3':
           this.setTool('punch');
           break;
-        case '4':
+        case 'Digit4':
           this.setTool('pistol');
           break;
-        case '5':
+        case 'Digit5':
           this.setTool('shotgun');
           break;
-        case '6':
+        case 'Digit6':
           this.setTool('rifle');
           break;
-        case '7':
+        case 'Digit7':
           this.setTool('place_box');
           break;
-        case '8':
+        case 'Digit8':
           this.setTool('box');
           break;
-        case '9':
+        case 'Digit9':
           this.setTool('sphere');
           break;
-        case 'f':
-        case 'F':
+        case 'Digit0':
+          this.setTool('force_wave');
+          break;
+        case 'KeyF':
           this.setCameraMode(
             this.lab.getCameraMode() === 'orbit' ? 'fly' : 'orbit'
           );
           break;
-        case 'm':
-        case 'M':
+        case 'KeyM':
           this.setActiveMuscleMode(!this.activeMuscleMode);
           break;
-        case 'd':
-        case 'D':
+        case 'KeyD':
           this.setDebugTelemetry(!this.debugTelemetry);
           break;
-        case 'p':
-        case 'P':
+        case 'KeyP':
           this.setPaused(!this.paused);
           break;
-        case ' ':
+        case 'Space':
           e.preventDefault();
           if (this.lab.getCameraMode() === 'orbit') {
             this.setPaused(!this.paused);
           }
           break;
-        case 'r':
-        case 'R':
+        case 'KeyR':
           this.loadScenario(this.activeScenario);
           break;
-        case '+':
-        case '=':
+        case 'Equal':
+        case 'NumpadAdd':
           this.spawnRagdoll();
           break;
       }

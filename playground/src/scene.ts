@@ -57,6 +57,27 @@ interface SparkParticle {
   duration: number;
 }
 
+interface ForceWaveFx {
+  mesh: THREE.Mesh;
+  origin: THREE.Vector3;
+  dir: THREE.Vector3;
+  age: number;
+  delay: number;
+  duration: number;
+  travelDist: number;
+  startScale: number;
+  endScale: number;
+  maxOpacity: number;
+}
+
+interface CableVisual {
+  group: THREE.Group;
+  cable: THREE.Mesh;
+  shackle: THREE.Group;
+}
+
+const UP_AXIS = new THREE.Vector3(0, 1, 0);
+
 interface TelemetryVisual {
   group: THREE.Group;
   comMarker: THREE.Mesh;
@@ -112,9 +133,20 @@ export class LabScene {
 
   private readonly tracerEffects: TracerFx[] = [];
   private readonly sparkParticles: SparkParticle[] = [];
+  private readonly forceWaveEffects: ForceWaveFx[] = [];
   private readonly tracerBeamGeo: THREE.CylinderGeometry;
   private readonly sparkGeo: THREE.BoxGeometry;
+  private readonly forceWaveRingGeo: THREE.RingGeometry;
   private fxTime = 0;
+
+  // Steel Cable / Tether Renderer (Wrecking Ball)
+  private readonly tetherCableGroup = new THREE.Group();
+  private readonly cablePool: CableVisual[] = [];
+  private readonly cableGeo: THREE.CylinderGeometry;
+  private readonly cableMat: THREE.MeshStandardMaterial;
+  private readonly shacklePlateGeo: THREE.CylinderGeometry;
+  private readonly shackleRingGeo: THREE.TorusGeometry;
+  private readonly shackleMat: THREE.MeshStandardMaterial;
 
   // Debug Telemetry Overlay (CoM + plumb line + Capture Point + Wound markers)
   private readonly telemetryGroup = new THREE.Group();
@@ -278,6 +310,23 @@ export class LabScene {
     this.tracerBeamGeo = new THREE.CylinderGeometry(0.0035, 0.006, 1, 6);
     this.tracerBeamGeo.rotateX(Math.PI / 2);
     this.sparkGeo = new THREE.BoxGeometry(0.007, 0.007, 0.065);
+    this.forceWaveRingGeo = new THREE.RingGeometry(0.14, 0.195, 36);
+
+    // Steel cable & gunmetal anchor shackle shared assets
+    this.cableGeo = new THREE.CylinderGeometry(0.015, 0.015, 1, 10);
+    this.cableMat = new THREE.MeshStandardMaterial({
+      color: 0x8b95a5,
+      roughness: 0.3,
+      metalness: 0.88,
+    });
+    this.shacklePlateGeo = new THREE.CylinderGeometry(0.075, 0.09, 0.045, 16);
+    this.shackleRingGeo = new THREE.TorusGeometry(0.042, 0.014, 10, 20);
+    this.shackleMat = new THREE.MeshStandardMaterial({
+      color: 0x353d4a,
+      roughness: 0.42,
+      metalness: 0.85,
+    });
+    this.scene.add(this.tetherCableGroup);
 
     // Debug Telemetry shared resources
     this.comGeo = new THREE.SphereGeometry(0.044, 14, 12);
@@ -453,6 +502,17 @@ export class LabScene {
 
   public applyCameraPreset(name: CameraPresetName): void {
     const preset = CAMERA_PRESETS[name];
+    this.frameCamera(preset.position, preset.target);
+  }
+
+  /**
+   * Smoothly transitions the camera position and focus target.
+   */
+  public frameCamera(
+    position: [number, number, number],
+    target: [number, number, number],
+    duration = 0.35
+  ): void {
     let startTarget: THREE.Vector3;
 
     if (this.cameraMode === 'orbit') {
@@ -466,11 +526,11 @@ export class LabScene {
 
     this.presetTransition = {
       startPos: this.camera.position.clone(),
-      endPos: new THREE.Vector3(...preset.position),
+      endPos: new THREE.Vector3(...position),
       startTarget,
-      endTarget: new THREE.Vector3(...preset.target),
+      endTarget: new THREE.Vector3(...target),
       elapsed: 0,
-      duration: 0.35,
+      duration,
     };
   }
 
@@ -624,6 +684,78 @@ export class LabScene {
 
       this.staticGroup.add(mesh);
     }
+  }
+
+  /**
+   * Renders metallic steel cables and gunmetal anchor shackles from `get_tethers()`.
+   * Expects 6 floats per tether: `[ax, ay, az, bx, by, bz]`.
+   */
+  public syncTethers(tethers: Float32Array): void {
+    const count = Math.floor(tethers.length / 6);
+
+    if (count <= 0) {
+      while (this.cablePool.length > 0) {
+        const removed = this.cablePool.pop()!;
+        this.tetherCableGroup.remove(removed.group);
+      }
+      return;
+    }
+
+    while (this.cablePool.length > count) {
+      const removed = this.cablePool.pop()!;
+      this.tetherCableGroup.remove(removed.group);
+    }
+
+    while (this.cablePool.length < count) {
+      this.cablePool.push(this.createCableVisual());
+    }
+
+    for (let i = 0; i < count; i++) {
+      const o = i * 6;
+      const entry = this.cablePool[i];
+
+      this.tempVecA.set(tethers[o], tethers[o + 1], tethers[o + 2]);
+      this.tempVecB.set(tethers[o + 3], tethers[o + 4], tethers[o + 5]);
+      this.tempVecC.subVectors(this.tempVecB, this.tempVecA);
+      const len = this.tempVecC.length();
+
+      if (len < 1e-4) {
+        entry.group.visible = false;
+        continue;
+      }
+
+      entry.group.visible = true;
+      entry.shackle.position.copy(this.tempVecA);
+
+      entry.cable.position
+        .addVectors(this.tempVecA, this.tempVecB)
+        .multiplyScalar(0.5);
+      this.tempVecC.divideScalar(len);
+      entry.cable.quaternion.setFromUnitVectors(UP_AXIS, this.tempVecC);
+      entry.cable.scale.set(1, len, 1);
+    }
+  }
+
+  private createCableVisual(): CableVisual {
+    const group = new THREE.Group();
+
+    const cable = new THREE.Mesh(this.cableGeo, this.cableMat);
+    cable.castShadow = true;
+    cable.receiveShadow = true;
+    group.add(cable);
+
+    const shackle = new THREE.Group();
+    const plate = new THREE.Mesh(this.shacklePlateGeo, this.shackleMat);
+    plate.castShadow = true;
+    plate.receiveShadow = true;
+    const ring = new THREE.Mesh(this.shackleRingGeo, this.shackleMat);
+    ring.position.y = -0.032;
+    ring.castShadow = true;
+    shackle.add(plate, ring);
+    group.add(shackle);
+
+    this.tetherCableGroup.add(group);
+    return { group, cable, shackle };
   }
 
   /**
@@ -1070,6 +1202,50 @@ export class LabScene {
     }
   }
 
+  /**
+   * Spawns 3 expanding cyan-white concentric shockwave rings rushing along `dir`.
+   */
+  public spawnForceWaveEffect(origin: THREE.Vector3, dir: THREE.Vector3): void {
+    const normDir = dir.clone();
+    if (normDir.lengthSq() > 1e-6) {
+      normDir.normalize();
+    } else {
+      normDir.set(0, 0, -1);
+    }
+
+    const baseOrigin = origin.clone().addScaledVector(normDir, 0.75);
+    const ringColors = [0xe0faff, 0x67e8f9, 0x22d3ee];
+
+    for (let i = 0; i < 3; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: ringColors[i],
+        transparent: true,
+        opacity: 0,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.forceWaveRingGeo, mat);
+      mesh.position.copy(baseOrigin);
+      mesh.lookAt(this.tempVecA.copy(baseOrigin).add(normDir));
+      mesh.visible = false;
+      this.scene.add(mesh);
+
+      this.forceWaveEffects.push({
+        mesh,
+        origin: baseOrigin.clone(),
+        dir: normDir.clone(),
+        age: 0,
+        delay: i * 0.045,
+        duration: 0.36,
+        travelDist: 6.2 - i * 0.55,
+        startScale: 0.9 + i * 0.28,
+        endScale: 7.4 + i * 1.4,
+        maxOpacity: 0.95 - i * 0.14,
+      });
+    }
+  }
+
   public updateEffects(dt: number): void {
     this.fxTime += dt;
 
@@ -1146,6 +1322,34 @@ export class LabScene {
         this.scene.remove(spark.mesh);
         (spark.mesh.material as THREE.Material).dispose();
         this.sparkParticles.splice(i, 1);
+      }
+    }
+
+    for (let i = this.forceWaveEffects.length - 1; i >= 0; i--) {
+      const fx = this.forceWaveEffects[i];
+      fx.age += dt;
+      if (fx.age < fx.delay) {
+        fx.mesh.visible = false;
+        continue;
+      }
+
+      const t = Math.min(1, (fx.age - fx.delay) / fx.duration);
+      const easeOut = 1 - Math.pow(1 - t, 2.2);
+
+      fx.mesh.visible = true;
+      fx.mesh.position
+        .copy(fx.origin)
+        .addScaledVector(fx.dir, easeOut * fx.travelDist);
+      fx.mesh.scale.setScalar(
+        THREE.MathUtils.lerp(fx.startScale, fx.endScale, easeOut)
+      );
+      (fx.mesh.material as THREE.MeshBasicMaterial).opacity =
+        (1 - t) * (1 - t * 0.35) * fx.maxOpacity;
+
+      if (t >= 1) {
+        this.scene.remove(fx.mesh);
+        (fx.mesh.material as THREE.Material).dispose();
+        this.forceWaveEffects.splice(i, 1);
       }
     }
   }
