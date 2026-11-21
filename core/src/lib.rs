@@ -595,4 +595,88 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_extreme_dense_profile_no_helicopter_or_slide() {
+        let extreme_profile = BodyProfile {
+            height_m: 1.66,
+            mass_kg: 160.0,
+            muscle_ratio: 1.80,
+        };
+
+        // Part A: Standing — no helicopter spinning/flying explosion
+        let mut world_stand = ArsaWorld::new();
+        let id = world_stand.spawn_ragdoll_with_profile(Vec3::ZERO, extreme_profile);
+        let pelvis_idx = world_stand.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+
+        let mut max_pelvis_y = 0.0_f32;
+        let mut max_ang_vel = 0.0_f32;
+        for _ in 0..180 {
+            world_stand.step(1.0 / 60.0);
+            max_pelvis_y = max_pelvis_y.max(world_stand.bodies[pelvis_idx].position.y);
+            for (i, b) in world_stand.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "body {i} produced NaN/Inf in extreme standing profile"
+                );
+                max_ang_vel = max_ang_vel.max(b.angular_velocity.length());
+            }
+        }
+
+        assert!(
+            max_pelvis_y < 1.35,
+            "extreme dense profile pelvis flew too high: max_pelvis_y={max_pelvis_y}"
+        );
+        assert!(
+            max_ang_vel < 15.0,
+            "extreme dense profile exhibited excessive angular velocity: max_ang_vel={max_ang_vel}"
+        );
+        assert_eq!(
+            world_stand.ragdolls[id].balance.state,
+            BehaviorState::Balanced,
+            "extreme dense profile failed to stay Balanced: {:?}",
+            world_stand.ragdolls[id].balance.state
+        );
+
+        // Part B: Downed on ground — no floor sliding/drifting
+        let mut world_down = ArsaWorld::new();
+        let down_id = world_down.spawn_ragdoll_with_profile(Vec3::new(0.0, 0.2, 0.0), extreme_profile);
+        world_down.set_ragdoll_active(down_id, false);
+        let down_chest = world_down.ragdolls[down_id].body_indices[BoneId::Chest as usize];
+        let down_pelvis = world_down.ragdolls[down_id].body_indices[BoneId::Pelvis as usize];
+        // Tip the passive mannequin onto the floor
+        let chest_pos = world_down.bodies[down_chest].position;
+        world_down.apply_impulse_at_point(down_chest, Vec3::new(0.0, 0.0, -450.0), chest_pos);
+        for _ in 0..90 {
+            world_down.step(1.0 / 60.0);
+        }
+
+        // Re-enable active control while lying downed and let settle for 2.0s
+        world_down.set_ragdoll_active(down_id, true);
+        for _ in 0..120 {
+            world_down.step(1.0 / 60.0);
+        }
+
+        assert_eq!(
+            world_down.ragdolls[down_id].balance.state,
+            BehaviorState::Downed,
+            "expected knocked mannequin to be in Downed state, got {:?}",
+            world_down.ragdolls[down_id].balance.state
+        );
+
+        let start_pos = world_down.bodies[down_pelvis].position;
+        // Measure horizontal drift over the final 1.0 second (60 frames)
+        for _ in 0..60 {
+            world_down.step(1.0 / 60.0);
+        }
+        let end_pos = world_down.bodies[down_pelvis].position;
+        let horiz_drift = Vec3::new(end_pos.x - start_pos.x, 0.0, end_pos.z - start_pos.z).length();
+        assert!(
+            horiz_drift < 0.05,
+            "downed extreme dense profile slid across floor: horiz_drift={horiz_drift}"
+        );
+    }
 }

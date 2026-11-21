@@ -413,7 +413,7 @@ pub fn update_ragdoll_balance(
 
                 // Gentle vertical gravity-compensation support when near standing height
                 let rel_frac = pelvis_rel_y / ragdoll.standing_pelvis_y.max(0.2);
-                if (0.72..=1.08).contains(&rel_frac) {
+                if (0.72..=1.08).contains(&rel_frac) && bodies[pelvis_idx].linear_velocity.y < 0.8 {
                     let height_fade = ((rel_frac - 0.72) / 0.12).clamp(0.0, 1.0);
                     let target_y = foot_ground_y + 0.96 * ragdoll.standing_pelvis_y;
                     let height_err = target_y - pelvis_pos.y;
@@ -423,7 +423,7 @@ pub fn update_ragdoll_balance(
                         - pelvis.linear_velocity.y * (total_mass * 4.5))
                         * strength_scale
                         * height_fade;
-                    let fy = fy_raw.clamp(0.0, total_mass * gravity_mag * 1.15 * strength_scale);
+                    let fy = fy_raw.clamp(0.0, total_mass * gravity_mag * 1.12);
                     pelvis.linear_velocity.y += (fy * dt) * pelvis.inv_mass;
                 }
 
@@ -494,10 +494,17 @@ pub fn update_ragdoll_balance(
         }
         BehaviorState::Downed => {
             ragdoll.balance.step_active = false;
+            let is_wounded = ragdoll.reflex.active_wound.is_some();
             for &j_idx in &ragdoll.joint_indices {
-                joints[j_idx].motor_stiffness *= 0.08;
-                joints[j_idx].motor_damping *= 0.30;
-                joints[j_idx].max_torque *= 0.15;
+                if is_wounded {
+                    joints[j_idx].motor_stiffness *= 0.04;
+                    joints[j_idx].motor_damping *= 0.25;
+                    joints[j_idx].max_torque *= 0.08;
+                } else {
+                    joints[j_idx].motor_stiffness = 0.0;
+                    joints[j_idx].motor_damping *= 0.25;
+                    joints[j_idx].max_torque *= 0.08;
+                }
             }
         }
         BehaviorState::Passive | BehaviorState::Unconscious => {}
@@ -585,14 +592,15 @@ fn apply_upright_pd(
     }
 
     let dir = raw_tau / raw_mag;
-    let mut tau_mag = raw_mag.min(max_torque);
     let w_ang = body.generalized_angular_inv_mass(dir);
     if w_ang < 1e-12 {
         return;
     }
+    let denom = 1.0 + w_ang * dt * (damping + dt * stiffness);
+    let mut tau_mag = (raw_mag / denom).min(max_torque);
     let delta_omega = tau_mag * dt * w_ang;
-    if delta_omega > 4.0 {
-        tau_mag = 4.0 / (dt * w_ang);
+    if delta_omega > 2.0 {
+        tau_mag = 2.0 / (dt * w_ang);
     }
 
     let impulse = dir * (tau_mag * dt);

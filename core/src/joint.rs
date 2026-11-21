@@ -357,16 +357,15 @@ impl Joint {
         };
 
         let rel_omega = bodies[self.child].angular_velocity - bodies[self.parent].angular_velocity;
-        let raw_tau =
-            (err_vec * self.motor_stiffness - rel_omega * self.motor_damping) * self.damage_scale;
+        let k_eff = self.motor_stiffness * self.damage_scale;
+        let d_eff = self.motor_damping * self.damage_scale;
+        let raw_tau = err_vec * k_eff - rel_omega * d_eff;
 
         let raw_mag = raw_tau.length();
         if raw_mag < 1e-9 {
             return;
         }
         let dir = raw_tau / raw_mag;
-        let max_t = self.max_torque * self.damage_scale;
-        let mut tau_mag = raw_mag.min(max_t);
 
         let w_ang = bodies[self.parent].generalized_angular_inv_mass(dir)
             + bodies[self.child].generalized_angular_inv_mass(dir);
@@ -374,10 +373,15 @@ impl Joint {
             return;
         }
 
-        // Stability guard: prevent light bones (Hand/Foot) from exceeding 8.0 rad/s per substep.
+        // Implicit / Stable-PD denominator along `dir` prevents stiffness/damping overshoot.
+        let denom = 1.0 + w_ang * dt * (d_eff + dt * k_eff);
+        let max_t = self.max_torque * self.damage_scale;
+        let mut tau_mag = (raw_mag / denom).min(max_t);
+
+        // Stability guard: prevent light bones (Hand/Foot) from exceeding 2.5 rad/s per substep.
         let delta_omega = tau_mag * dt * w_ang;
-        if delta_omega > 8.0 {
-            tau_mag = 8.0 / (dt * w_ang);
+        if delta_omega > 2.5 {
+            tau_mag = 2.5 / (dt * w_ang);
         }
 
         let impulse = dir * (tau_mag * dt);

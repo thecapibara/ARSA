@@ -115,6 +115,9 @@ pub fn detect_contacts(
             if connected_pairs.contains(&(i, j)) {
                 continue;
             }
+            if a.ragdoll_id.is_some() && a.ragdoll_id == b.ragdoll_id {
+                continue;
+            }
             detect_dynamic_pair(bodies, i, j, &mut contacts);
         }
     }
@@ -260,7 +263,12 @@ pub fn solve_contacts_velocity(
                 let w_t = w_a_t + w_b_t;
                 if w_t > 1e-12 {
                     let max_j_f = c.friction * (c.normal_lambda / dt);
-                    let j_f_mag = (v_t_len / w_t).min(max_j_f);
+                    let j_f_mag = if c.body_b.is_none() && c.normal.y > 0.5 && v_t_len < 0.08 {
+                        // Static friction stiction on ground contacts so resting bodies stop cleanly
+                        v_t_len / w_t
+                    } else {
+                        (v_t_len / w_t).min(max_j_f)
+                    };
                     let j_f = -t_dir * j_f_mag;
                     apply_velocity_impulse(bodies, a, c.body_b, j_f, r_a, r_b);
                 }
