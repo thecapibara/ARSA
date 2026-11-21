@@ -234,12 +234,27 @@
           <div class="dock-divider"></div>
 
           <div class="dock-group">
-            <span class="dock-label">TIME</span>
-            <div class="btn-row" role="group" aria-label="Time Scale">
+            <span class="dock-label">SIM SPEED <span id="val-sim-speed" class="speed-val">1.00×</span></span>
+            <div class="btn-row" role="group" aria-label="Simulation Speed">
               <button class="hud-btn" data-timescale="0.1">0.1x</button>
               <button class="hud-btn" data-timescale="0.25">0.25x</button>
               <button class="hud-btn" data-timescale="0.5">0.5x</button>
               <button class="hud-btn active" data-timescale="1">1.0x</button>
+              <button class="hud-btn" data-timescale="2">2.0x</button>
+              <input
+                type="range"
+                id="slider-sim-speed"
+                class="speed-slider"
+                min="0.05"
+                max="2.0"
+                step="0.05"
+                value="1.0"
+                title="Continuous Simulation Speed (0.05x – 2.0x) — [ / ] or T for Bullet-Time"
+                aria-label="Simulation Speed"
+              />
+              <button class="hud-btn" id="btn-slowmo" title="Toggle Bullet-Time 0.15x [T]">
+                Slow-Mo <span class="key-cap">T</span>
+              </button>
               <button class="hud-btn" id="btn-pause" title="Toggle pause [Space / P]">
                 Pause <span class="key-cap">P</span>
               </button>

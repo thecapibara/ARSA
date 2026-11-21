@@ -159,6 +159,13 @@ class PlaygroundApp {
   private readonly valHeight = document.getElementById('val-height')!;
   private readonly valMass = document.getElementById('val-mass')!;
   private readonly valStrength = document.getElementById('val-strength')!;
+  private readonly sliderSimSpeed = document.getElementById(
+    'slider-sim-speed'
+  ) as HTMLInputElement;
+  private readonly valSimSpeed = document.getElementById('val-sim-speed')!;
+  private readonly slowmoBtn = document.getElementById(
+    'btn-slowmo'
+  ) as HTMLButtonElement;
 
   constructor() {
     this.canvas = document.getElementById('viewport') as HTMLCanvasElement;
@@ -330,6 +337,15 @@ class PlaygroundApp {
           Math.abs(Number(btn.dataset.timescale) - scale) < 1e-4
         );
       });
+    if (this.sliderSimSpeed) {
+      this.sliderSimSpeed.value = scale.toFixed(2);
+    }
+    if (this.valSimSpeed) {
+      this.valSimSpeed.textContent = `${scale.toFixed(2)}×`;
+    }
+    if (this.slowmoBtn) {
+      this.slowmoBtn.classList.toggle('active', scale < 0.5);
+    }
   }
 
   private setPaused(paused: boolean): void {
@@ -635,15 +651,24 @@ class PlaygroundApp {
     this.lab.updateCamera(rawDt);
 
     if (this.sim && !this.paused) {
-      this.accumulator += rawDt * this.timeScale;
-      let steps = 0;
-      while (this.accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
-        this.sim.step(FIXED_DT);
-        this.accumulator -= FIXED_DT;
-        steps++;
-      }
-      if (steps === MAX_STEPS_PER_FRAME && this.accumulator > FIXED_DT) {
+      if (this.timeScale < 1.0) {
+        // Silky-smooth 60 FPS cinematic bullet-time stepping
+        const subStep = Math.min(FIXED_DT, rawDt * this.timeScale);
+        if (subStep > 1e-6) {
+          this.sim.step(subStep);
+        }
         this.accumulator = 0;
+      } else {
+        this.accumulator += rawDt * this.timeScale;
+        let steps = 0;
+        while (this.accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
+          this.sim.step(FIXED_DT);
+          this.accumulator -= FIXED_DT;
+          steps++;
+        }
+        if (steps === MAX_STEPS_PER_FRAME && this.accumulator > FIXED_DT) {
+          this.accumulator = 0;
+        }
       }
       this.syncSimulationView();
     } else if (this.sim && this.grabbedBodyIndex >= 0) {
@@ -684,6 +709,20 @@ class PlaygroundApp {
           btn.blur();
         });
       });
+
+    if (this.sliderSimSpeed) {
+      this.sliderSimSpeed.addEventListener('input', () => {
+        const scale = Number(this.sliderSimSpeed.value);
+        if (!Number.isNaN(scale)) this.setTimeScale(scale);
+      });
+    }
+
+    if (this.slowmoBtn) {
+      this.slowmoBtn.addEventListener('click', () => {
+        this.setTimeScale(this.timeScale < 0.5 ? 1.0 : 0.15);
+        this.slowmoBtn.blur();
+      });
+    }
 
     document
       .querySelectorAll<HTMLButtonElement>('[data-cam-preset]')
@@ -1089,6 +1128,16 @@ class PlaygroundApp {
           break;
         case 'KeyP':
           this.setPaused(!this.paused);
+          break;
+        case 'KeyT':
+          this.setTimeScale(this.timeScale < 0.5 ? 1.0 : 0.15);
+          break;
+        case 'BracketLeft':
+        case 'Minus':
+          this.setTimeScale(Math.max(0.05, Number((this.timeScale - 0.1).toFixed(2))));
+          break;
+        case 'BracketRight':
+          this.setTimeScale(Math.min(2.0, Number((this.timeScale + 0.1).toFixed(2))));
           break;
         case 'Space':
           e.preventDefault();

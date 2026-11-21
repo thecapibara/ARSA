@@ -734,3 +734,20 @@ kbd,
     display: none;
   }
 }
+
+/* Continuous Simulation Speed slider in bottom dock */
+.speed-val {
+  color: var(--accent);
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  margin-left: 4px;
+}
+
+.speed-slider {
+  width: 82px;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0 4px;
+  align-self: center;
+}
