@@ -6,6 +6,7 @@ pub mod collision;
 pub mod joint;
 pub mod math;
 pub mod reflex;
+pub mod retarget;
 pub mod skeleton;
 pub mod world;
 
@@ -20,6 +21,10 @@ pub use joint::{Joint, JointKind};
 pub use math::{inertia_box, inertia_capsule, inertia_sphere, swing_twist_decomposition};
 pub use reflex::{
     apply_procedural_reflexes, HandGrab, IncomingThreat, ReflexState, WoundEvent, WoundRegion,
+};
+pub use retarget::{
+    BoneRetargetConfig, CoordinateSpace, RetargetPreset, SkeletonRetargeter, JOINT_BONE_PAIRS,
+    MIXAMO_BONE_NAMES, UE5_MANNY_BONE_NAMES, UNITY_HUMANOID_BONE_NAMES,
 };
 pub use skeleton::{
     spawn_humanoid, spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId,

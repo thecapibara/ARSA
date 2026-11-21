@@ -45,6 +45,17 @@ typedef struct ArsaTransform {
     float qw;
 } ArsaTransform;
 
+/** Retargeted single-bone world transform (7 floats: position + XYZW quaternion). */
+typedef struct ArsaBoneTransform {
+    float px;
+    float py;
+    float pz;
+    float qx;
+    float qy;
+    float qz;
+    float qw;
+} ArsaBoneTransform;
+
 /** Joint muscle motor target for Host-Physics Control Mode (8 floats). */
 typedef struct ArsaJointMotorTarget {
     float qx;           /**< Target local orientation X. */
@@ -107,6 +118,14 @@ typedef enum ArsaWeaponKind {
     ARSA_WEAPON_SHOTGUN = 1,
     ARSA_WEAPON_RIFLE = 2
 } ArsaWeaponKind;
+
+/** Universal skeleton retargeting presets for cross-engine bone conversion. */
+typedef enum ArsaRetargetPreset {
+    ARSA_RETARGET_NATIVE = 0,
+    ARSA_RETARGET_MIXAMO_TPOSE = 1,
+    ARSA_RETARGET_UNITY_HUMANOID = 2,
+    ARSA_RETARGET_UNREAL_MANNY = 3
+} ArsaRetargetPreset;
 
 /**
  * Host engine ground-height query callback.
@@ -386,6 +405,31 @@ size_t arsa_world_get_joint_motor_targets(
     ArsaWorldHandle *handle,
     float *out_buf,
     size_t max_floats);
+
+/**
+ * Reads all 17 bone transforms of ragdoll_id retargeted into the target engine's coordinate space,
+ * unit scale, and bind pose (ArsaRetargetPreset).
+ * Returns false if handle or out_bones_17 is NULL, ragdoll_id is invalid, or preset is unknown.
+ */
+bool arsa_world_get_retargeted_bones(
+    const ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    uint32_t preset,
+    ArsaBoneTransform *out_bones_17);
+
+/**
+ * Converts 17 world-space bone orientations (68 floats in XYZW order) from the target engine's
+ * coordinate space and bind pose (ArsaRetargetPreset) into 16 ARSA joint targets and blends them
+ * onto ragdoll_id by blend_weight (0.0 .. 1.0).
+ * Returns false if handle or target_world_quats_17x4 is NULL, ragdoll_id or preset is invalid,
+ * or any quaternion/weight is non-finite or zero.
+ */
+bool arsa_world_set_retargeted_target_pose(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    uint32_t preset,
+    const float *target_world_quats_17x4,
+    float blend_weight);
 
 #ifdef __cplusplus
 }

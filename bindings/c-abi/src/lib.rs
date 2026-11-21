@@ -2,8 +2,8 @@
 
 use arsa_core::glam::{Quat, Vec3};
 use arsa_core::{
-    ArsaWorld, BodyProfile, GroundHeightFn, Heightfield, RaycastWorldFn, WeaponKind,
-    WorldQueryHooks,
+    ArsaWorld, BodyProfile, GroundHeightFn, Heightfield, RaycastWorldFn, RetargetPreset,
+    SkeletonRetargeter, WeaponKind, WorldQueryHooks,
 };
 
 /// Opaque handle owning an `ArsaWorld` simulation instance and a reusable scratch buffer.
@@ -35,6 +35,19 @@ impl From<ArsaBodyProfile> for BodyProfile {
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArsaTransform {
+    pub px: f32,
+    pub py: f32,
+    pub pz: f32,
+    pub qx: f32,
+    pub qy: f32,
+    pub qz: f32,
+    pub qw: f32,
+}
+
+/// C-compatible retargeted single-bone world transform (7 floats: position + XYZW quaternion).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArsaBoneTransform {
     pub px: f32,
     pub py: f32,
     pub pz: f32,
@@ -717,6 +730,103 @@ pub unsafe extern "C" fn arsa_world_get_joint_motor_targets(
     unsafe { copy_floats_to_out(&h.scratch, out_buf, max_floats) }
 }
 
+/// Reads all 17 bone transforms of `ragdoll_id` retargeted into the target engine's coordinate space,
+/// unit scale, and bind pose (`ArsaRetargetPreset`: `0=Native`, `1=MixamoTPose`, `2=UnityHumanoid`, `3=UnrealManny`).
+/// Returns `false` if `handle` or `out_bones_17` is null, `ragdoll_id` is out of range, or `preset` is invalid.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+/// If `out_bones_17` is non-null, it must be valid for writes of 17 [`ArsaBoneTransform`] elements.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_get_retargeted_bones(
+    handle: *const ArsaWorldHandle,
+    ragdoll_id: usize,
+    preset: u32,
+    out_bones_17: *mut ArsaBoneTransform,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_ref() }) else {
+        return false;
+    };
+    if out_bones_17.is_null() {
+        return false;
+    }
+    let Some(preset_enum) = RetargetPreset::from_u32(preset) else {
+        return false;
+    };
+    let Some(ragdoll) = h.world.ragdolls.get(ragdoll_id) else {
+        return false;
+    };
+
+    let mut arsa_pos = [Vec3::ZERO; 17];
+    let mut arsa_rot = [Quat::IDENTITY; 17];
+    for (i, &b_idx) in ragdoll.body_indices.iter().enumerate() {
+        let Some(body) = h.world.bodies.get(b_idx) else {
+            return false;
+        };
+        arsa_pos[i] = body.position;
+        arsa_rot[i] = body.orientation;
+    }
+
+    let retargeter = SkeletonRetargeter::from_preset(preset_enum);
+    let (out_pos, out_rot) = retargeter.retarget_bones_to_target(&arsa_pos, &arsa_rot);
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_bones_17, 17) };
+    for i in 0..17 {
+        out_slice[i] = ArsaBoneTransform {
+            px: out_pos[i].x,
+            py: out_pos[i].y,
+            pz: out_pos[i].z,
+            qx: out_rot[i].x,
+            qy: out_rot[i].y,
+            qz: out_rot[i].z,
+            qw: out_rot[i].w,
+        };
+    }
+    true
+}
+
+/// Converts 17 world-space bone orientations (`68` floats in XYZW order) from the target engine's
+/// coordinate space and bind pose (`ArsaRetargetPreset`) into 16 ARSA joint targets and blends them
+/// onto `ragdoll_id` by `blend_weight` (`0.0..=1.0`).
+/// Returns `false` if `handle` or `target_world_quats_17x4` is null, `ragdoll_id` or `preset` is invalid,
+/// or any quaternion / weight is non-finite or zero.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+/// If `target_world_quats_17x4` is non-null, it must be valid for reads of `17 * 4` `f32` elements.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_retargeted_target_pose(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    preset: u32,
+    target_world_quats_17x4: *const f32,
+    blend_weight: f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    if target_world_quats_17x4.is_null() || !blend_weight.is_finite() {
+        return false;
+    }
+    let Some(preset_enum) = RetargetPreset::from_u32(preset) else {
+        return false;
+    };
+    let raw = unsafe { std::slice::from_raw_parts(target_world_quats_17x4, 17 * 4) };
+    let mut target_quats = [Quat::IDENTITY; 17];
+    for (i, dst) in target_quats.iter_mut().enumerate() {
+        let base = i * 4;
+        let q = Quat::from_xyzw(raw[base], raw[base + 1], raw[base + 2], raw[base + 3]);
+        if !q.is_finite() || q.length_squared() < 1e-12 {
+            return false;
+        }
+        *dst = q.normalize();
+    }
+
+    let retargeter = SkeletonRetargeter::from_preset(preset_enum);
+    let joint_targets = retargeter.retarget_world_quats_to_arsa_joint_targets(&target_quats);
+    h.world
+        .set_ragdoll_target_pose(ragdoll_id, &joint_targets, blend_weight)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,6 +838,8 @@ mod tests {
         assert_eq!(align_of::<ArsaBodyProfile>(), 4);
         assert_eq!(size_of::<ArsaTransform>(), 28);
         assert_eq!(align_of::<ArsaTransform>(), 4);
+        assert_eq!(size_of::<ArsaBoneTransform>(), 28);
+        assert_eq!(align_of::<ArsaBoneTransform>(), 4);
         assert_eq!(size_of::<ArsaJointMotorTarget>(), 32);
         assert_eq!(align_of::<ArsaJointMotorTarget>(), 4);
     }
@@ -903,6 +1015,150 @@ mod tests {
             assert_eq!(hit, -1);
 
             arsa_world_set_query_callbacks(world, std::ptr::null_mut(), None, None);
+            arsa_world_destroy(world);
+        }
+    }
+
+    #[test]
+    fn test_c_abi_retargeting_roundtrip() {
+        unsafe {
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+
+            let rid = arsa_world_spawn_ragdoll(world, 0.0, 0.0, 0.0);
+            assert_eq!(rid, 0);
+
+            // Reject invalid pointers, invalid ragdoll IDs, and invalid presets
+            let mut bones = [ArsaBoneTransform {
+                px: 0.0,
+                py: 0.0,
+                pz: 0.0,
+                qx: 0.0,
+                qy: 0.0,
+                qz: 0.0,
+                qw: 1.0,
+            }; 17];
+            assert!(!arsa_world_get_retargeted_bones(
+                std::ptr::null(),
+                rid,
+                0,
+                bones.as_mut_ptr()
+            ));
+            assert!(!arsa_world_get_retargeted_bones(
+                world,
+                rid,
+                0,
+                std::ptr::null_mut()
+            ));
+            assert!(!arsa_world_get_retargeted_bones(
+                world,
+                99,
+                0,
+                bones.as_mut_ptr()
+            ));
+            assert!(!arsa_world_get_retargeted_bones(
+                world,
+                rid,
+                99,
+                bones.as_mut_ptr()
+            ));
+
+            // Check Unreal Manny retargeting: unit scale 100.0 (cm) and Z-up coordinate swap
+            assert!(arsa_world_get_retargeted_bones(
+                world,
+                rid,
+                RetargetPreset::UnrealMannyAPose as u32,
+                bones.as_mut_ptr()
+            ));
+            // Pelvis standing height ~0.94m -> Unreal Z ~ 94 cm
+            assert!(
+                bones[0].pz > 80.0 && bones[0].pz < 110.0,
+                "expected Unreal Manny pelvis Z in cm (~94), got {}",
+                bones[0].pz
+            );
+
+            // Round-trip neutral retargeted orientations for all 4 presets -> identity joint targets
+            for preset in 0..=3 {
+                assert!(arsa_world_get_retargeted_bones(
+                    world,
+                    rid,
+                    preset,
+                    bones.as_mut_ptr()
+                ));
+                let mut quats_17x4 = [0.0_f32; 17 * 4];
+                for (i, b) in bones.iter().enumerate() {
+                    quats_17x4[i * 4] = b.qx;
+                    quats_17x4[i * 4 + 1] = b.qy;
+                    quats_17x4[i * 4 + 2] = b.qz;
+                    quats_17x4[i * 4 + 3] = b.qw;
+                }
+                assert!(arsa_world_set_retargeted_target_pose(
+                    world,
+                    rid,
+                    preset,
+                    quats_17x4.as_ptr(),
+                    1.0
+                ));
+            }
+
+            // Reject non-finite or zero quaternion inputs and invalid preset/ragdoll
+            let mut bad_quats = [0.0_f32; 17 * 4];
+            assert!(!arsa_world_set_retargeted_target_pose(
+                world,
+                rid,
+                1,
+                bad_quats.as_ptr(),
+                1.0
+            ));
+            for i in 0..17 {
+                bad_quats[i * 4 + 3] = 1.0;
+            }
+            assert!(!arsa_world_set_retargeted_target_pose(
+                world,
+                rid,
+                1,
+                bad_quats.as_ptr(),
+                f32::NAN
+            ));
+            assert!(!arsa_world_set_retargeted_target_pose(
+                world,
+                rid,
+                42,
+                bad_quats.as_ptr(),
+                1.0
+            ));
+
+            // Valid Mixamo T-pose input drives ragdoll smoothly without NaN
+            assert!(arsa_world_set_retargeted_target_pose(
+                world,
+                rid,
+                RetargetPreset::MixamoTPose as u32,
+                bad_quats.as_ptr(),
+                1.0
+            ));
+            for _ in 0..30 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+
+            assert!(arsa_world_get_retargeted_bones(
+                world,
+                rid,
+                RetargetPreset::UnityHumanoidTPose as u32,
+                bones.as_mut_ptr()
+            ));
+            for (i, b) in bones.iter().enumerate() {
+                assert!(
+                    b.px.is_finite()
+                        && b.py.is_finite()
+                        && b.pz.is_finite()
+                        && b.qx.is_finite()
+                        && b.qy.is_finite()
+                        && b.qz.is_finite()
+                        && b.qw.is_finite(),
+                    "retargeted bone {i} produced NaN/Inf"
+                );
+            }
+
             arsa_world_destroy(world);
         }
     }

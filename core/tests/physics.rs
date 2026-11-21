@@ -2084,3 +2084,241 @@ fn test_host_world_query_callbacks_ground_and_occlusion() {
         .expect("raycast should hit dynamic box when host occlusion is disabled");
     assert_eq!(hit.body_idx, box_idx);
 }
+
+#[test]
+fn test_retarget_coordinate_and_preset_roundtrip() {
+    use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+
+    let sample_pos = Vec3::new(0.25, 1.42, -0.37);
+    let sample_quat = Quat::from_euler(glam::EulerRot::YXZ, 0.65, -0.42, 0.88).normalize();
+    let scales = [
+        (CoordinateSpace::ArsaRightHandedYUp, 1.0_f32),
+        (CoordinateSpace::UnityLeftHandedYUp, 1.0_f32),
+        (CoordinateSpace::UnrealLeftHandedZUp, 100.0_f32),
+    ];
+
+    for (space, scale) in scales {
+        let p_target = SkeletonRetargeter::convert_pos_to_target(space, scale, sample_pos);
+        let p_back = SkeletonRetargeter::convert_pos_from_target(space, scale, p_target);
+        assert!(
+            (p_back - sample_pos).length() < 1e-5,
+            "position roundtrip mismatch for {space:?}: expected {sample_pos:?}, got {p_back:?}"
+        );
+
+        let q_target = SkeletonRetargeter::convert_quat_to_target(space, sample_quat);
+        let q_back = SkeletonRetargeter::convert_quat_from_target(space, q_target);
+        assert!(
+            q_back.dot(sample_quat).abs() > 1.0 - 1e-5,
+            "quat roundtrip mismatch for {space:?}: expected {sample_quat:?}, got {q_back:?}"
+        );
+    }
+
+    // Verify neutral standing pose -> Quat::IDENTITY joint targets across all 4 presets
+    let mut world = ArsaWorld::new();
+    let rid = world.spawn_ragdoll(Vec3::ZERO);
+    let mut neutral_pos = [Vec3::ZERO; 17];
+    let mut neutral_rot = [Quat::IDENTITY; 17];
+    for (i, &b_idx) in world.ragdolls[rid].body_indices.iter().enumerate() {
+        neutral_pos[i] = world.bodies[b_idx].position;
+        neutral_rot[i] = world.bodies[b_idx].orientation;
+    }
+
+    let presets = [
+        RetargetPreset::ArsaNative,
+        RetargetPreset::MixamoTPose,
+        RetargetPreset::UnityHumanoidTPose,
+        RetargetPreset::UnrealMannyAPose,
+    ];
+
+    for preset in presets {
+        let retargeter = SkeletonRetargeter::from_preset(preset);
+        let (target_pos, target_rot) =
+            retargeter.retarget_bones_to_target(&neutral_pos, &neutral_rot);
+
+        // Verify expected position conversion on Pelvis
+        let expected_pelvis_pos = SkeletonRetargeter::convert_pos_to_target(
+            retargeter.space,
+            retargeter.unit_scale,
+            neutral_pos[BoneId::Pelvis as usize],
+        );
+        assert!(
+            (target_pos[BoneId::Pelvis as usize] - expected_pelvis_pos).length() < 1e-4,
+            "pelvis position mismatch for {preset:?}"
+        );
+
+        let joint_targets = retargeter.retarget_world_quats_to_arsa_joint_targets(&target_rot);
+        for (j_idx, &jt) in joint_targets.iter().enumerate() {
+            assert!(
+                jt.dot(Quat::IDENTITY).abs() > 1.0 - 1e-4,
+                "neutral pose joint {j_idx} not identity for {preset:?}: {jt:?}"
+            );
+        }
+    }
+
+    // Verify non-trivial posed skeleton (bent spine, shoulders, elbows, hips, knees) round-trips
+    let mut posed_rot = [Quat::IDENTITY; 17];
+    posed_rot[BoneId::Pelvis as usize] = Quat::from_rotation_y(0.35);
+    posed_rot[BoneId::LowerSpine as usize] =
+        posed_rot[BoneId::Pelvis as usize] * Quat::from_rotation_x(0.18);
+    posed_rot[BoneId::Chest as usize] = posed_rot[BoneId::LowerSpine as usize]
+        * Quat::from_euler(glam::EulerRot::XYZ, 0.12, -0.2, 0.08);
+    posed_rot[BoneId::Neck as usize] =
+        posed_rot[BoneId::Chest as usize] * Quat::from_rotation_x(-0.1);
+    posed_rot[BoneId::Head as usize] =
+        posed_rot[BoneId::Neck as usize] * Quat::from_rotation_y(0.25);
+
+    // Raise & flex arms
+    posed_rot[BoneId::LeftUpperArm as usize] =
+        posed_rot[BoneId::Chest as usize] * Quat::from_rotation_z(FRAC_PI_2);
+    posed_rot[BoneId::LeftForearm as usize] =
+        posed_rot[BoneId::LeftUpperArm as usize] * Quat::from_rotation_x(-1.1);
+    posed_rot[BoneId::LeftHand as usize] =
+        posed_rot[BoneId::LeftForearm as usize] * Quat::from_rotation_z(0.2);
+
+    posed_rot[BoneId::RightUpperArm as usize] =
+        posed_rot[BoneId::Chest as usize] * Quat::from_rotation_z(-FRAC_PI_4);
+    posed_rot[BoneId::RightForearm as usize] =
+        posed_rot[BoneId::RightUpperArm as usize] * Quat::from_rotation_x(-0.85);
+    posed_rot[BoneId::RightHand as usize] =
+        posed_rot[BoneId::RightForearm as usize] * Quat::from_rotation_y(-0.15);
+
+    // Bend legs
+    posed_rot[BoneId::LeftThigh as usize] =
+        posed_rot[BoneId::Pelvis as usize] * Quat::from_rotation_x(-0.55);
+    posed_rot[BoneId::LeftShin as usize] =
+        posed_rot[BoneId::LeftThigh as usize] * Quat::from_rotation_x(1.05);
+    posed_rot[BoneId::LeftFoot as usize] =
+        posed_rot[BoneId::LeftShin as usize] * Quat::from_rotation_x(-0.35);
+
+    posed_rot[BoneId::RightThigh as usize] =
+        posed_rot[BoneId::Pelvis as usize] * Quat::from_rotation_x(0.25);
+    posed_rot[BoneId::RightShin as usize] =
+        posed_rot[BoneId::RightThigh as usize] * Quat::from_rotation_x(0.45);
+    posed_rot[BoneId::RightFoot as usize] =
+        posed_rot[BoneId::RightShin as usize] * Quat::from_rotation_x(-0.15);
+
+    let expected_joint_targets: [Quat; 16] = std::array::from_fn(|j| {
+        let (p, c) = JOINT_BONE_PAIRS[j];
+        (posed_rot[p as usize].conjugate() * posed_rot[c as usize]).normalize()
+    });
+
+    for preset in presets {
+        let retargeter = SkeletonRetargeter::from_preset(preset);
+        let (_, target_rot) = retargeter.retarget_bones_to_target(&neutral_pos, &posed_rot);
+        let roundtrip_joints = retargeter.retarget_world_quats_to_arsa_joint_targets(&target_rot);
+        for (j_idx, (&got, &expected)) in roundtrip_joints
+            .iter()
+            .zip(expected_joint_targets.iter())
+            .enumerate()
+        {
+            let dot = got.dot(expected).abs();
+            assert!(
+                dot > 1.0 - 1e-4,
+                "posed joint {j_idx} roundtrip mismatch for {preset:?}: dot={dot}, got={got:?}, expected={expected:?}"
+            );
+        }
+    }
+
+    // Verify custom bind pose constructor matches MixamoTPose when given equivalent bind poses
+    let mixamo_bind_quats: [Quat; 17] = std::array::from_fn(|i| {
+        SkeletonRetargeter::from_preset(RetargetPreset::MixamoTPose).bones[i].bind_offset
+    });
+    let custom = SkeletonRetargeter::from_custom_bind_poses(
+        CoordinateSpace::ArsaRightHandedYUp,
+        1.0,
+        &mixamo_bind_quats,
+    );
+    let mixamo_preset = SkeletonRetargeter::from_preset(RetargetPreset::MixamoTPose);
+    assert_eq!(custom.space, mixamo_preset.space);
+    assert_eq!(custom.unit_scale, mixamo_preset.unit_scale);
+    for i in 0..17 {
+        assert!(
+            custom.bones[i]
+                .bind_offset
+                .dot(mixamo_preset.bones[i].bind_offset)
+                .abs()
+                > 1.0 - 1e-6,
+            "custom bind pose mismatch at bone {i}"
+        );
+    }
+}
+
+#[test]
+fn test_retarget_drives_ragdoll_via_target_pose() {
+    // Mixamo T-pose animation: target_world_quats = [Quat::IDENTITY; 17] (arms horizontal in Mixamo)
+    {
+        let mut world = ArsaWorld::new();
+        let rid = world.spawn_ragdoll(Vec3::ZERO);
+        let mixamo = SkeletonRetargeter::from_preset(RetargetPreset::MixamoTPose);
+        let mixamo_tpose_quats = [Quat::IDENTITY; 17];
+        let joint_targets = mixamo.retarget_world_quats_to_arsa_joint_targets(&mixamo_tpose_quats);
+
+        assert!(world.set_ragdoll_target_pose(rid, &joint_targets, 1.0));
+        for _ in 0..45 {
+            world.step(1.0 / 60.0);
+            for (i, b) in world.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "Mixamo T-pose retargeting caused NaN/Inf on body {i}"
+                );
+            }
+        }
+
+        // Arms should abduct upward toward horizontal T-pose (+X for Left, -X for Right)
+        let chest_pos =
+            world.bodies[world.ragdolls[rid].body_indices[BoneId::Chest as usize]].position;
+        let left_hand_pos =
+            world.bodies[world.ragdolls[rid].body_indices[BoneId::LeftHand as usize]].position;
+        let right_hand_pos =
+            world.bodies[world.ragdolls[rid].body_indices[BoneId::RightHand as usize]].position;
+        assert!(
+            left_hand_pos.x > chest_pos.x + 0.40,
+            "LeftHand did not raise toward Mixamo T-pose (+X): left_hand={left_hand_pos:?}, chest={chest_pos:?}"
+        );
+        assert!(
+            right_hand_pos.x < chest_pos.x - 0.40,
+            "RightHand did not raise toward Mixamo T-pose (-X): right_hand={right_hand_pos:?}, chest={chest_pos:?}"
+        );
+    }
+
+    // Unreal Manny A-pose animation: target_world_quats = [Quat::IDENTITY; 17] (arms angled 45 deg in UE5)
+    {
+        let mut world = ArsaWorld::new();
+        let rid = world.spawn_ragdoll(Vec3::ZERO);
+        let manny = SkeletonRetargeter::from_preset(RetargetPreset::UnrealMannyAPose);
+        let manny_apose_quats = [Quat::IDENTITY; 17];
+        let joint_targets = manny.retarget_world_quats_to_arsa_joint_targets(&manny_apose_quats);
+
+        assert!(world.set_ragdoll_target_pose(rid, &joint_targets, 1.0));
+        for _ in 0..45 {
+            world.step(1.0 / 60.0);
+            for (i, b) in world.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "Unreal Manny A-pose retargeting caused NaN/Inf on body {i}"
+                );
+            }
+        }
+
+        let chest_pos =
+            world.bodies[world.ragdolls[rid].body_indices[BoneId::Chest as usize]].position;
+        let left_hand_pos =
+            world.bodies[world.ragdolls[rid].body_indices[BoneId::LeftHand as usize]].position;
+        let right_hand_pos =
+            world.bodies[world.ragdolls[rid].body_indices[BoneId::RightHand as usize]].position;
+        assert!(
+            left_hand_pos.x > chest_pos.x + 0.30,
+            "LeftHand did not abduct toward Manny A-pose: left_hand={left_hand_pos:?}, chest={chest_pos:?}"
+        );
+        assert!(
+            right_hand_pos.x < chest_pos.x - 0.30,
+            "RightHand did not abduct toward Manny A-pose: right_hand={right_hand_pos:?}, chest={chest_pos:?}"
+        );
+    }
+}

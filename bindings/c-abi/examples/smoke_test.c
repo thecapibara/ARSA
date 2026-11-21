@@ -150,6 +150,27 @@ int main(void) {
         return 1;
     }
 
+    /* Verify universal skeleton retargeting C ABI (Unreal Manny A-pose). */
+    ArsaBoneTransform manny_bones[ARSA_BONE_COUNT];
+    if (!arsa_world_get_retargeted_bones(world, ragdoll_id, ARSA_RETARGET_UNREAL_MANNY, manny_bones)) {
+        fprintf(stderr, "FAIL: arsa_world_get_retargeted_bones failed\n");
+        arsa_world_destroy(world);
+        return 1;
+    }
+    float manny_quats[ARSA_BONE_COUNT * 4];
+    for (int i = 0; i < ARSA_BONE_COUNT; ++i) {
+        manny_quats[i * 4 + 0] = manny_bones[i].qx;
+        manny_quats[i * 4 + 1] = manny_bones[i].qy;
+        manny_quats[i * 4 + 2] = manny_bones[i].qz;
+        manny_quats[i * 4 + 3] = manny_bones[i].qw;
+    }
+    if (!arsa_world_set_retargeted_target_pose(
+            world, ragdoll_id, ARSA_RETARGET_UNREAL_MANNY, manny_quats, 0.5f)) {
+        fprintf(stderr, "FAIL: arsa_world_set_retargeted_target_pose failed\n");
+        arsa_world_destroy(world);
+        return 1;
+    }
+
     printf("PASS: Heavy Brute (2.17m/135kg) Balanced (pelvis_y=%.3fm), "
            "LeftArm wound=%d, health=%.1f, motors=%zu floats\n",
            pelvis_y, wound_region, post_health, m_written);
