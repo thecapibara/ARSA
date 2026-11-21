@@ -637,6 +637,7 @@ pub fn update_humanoid_profile(
         body.inv_mass = if mass > 0.0 { 1.0 / mass } else { 0.0 };
         body.local_inertia = inertia;
         body.inv_local_inertia = Vec3::ONE / inertia;
+        body.update_world_inertia();
     }
 
     // 2. Update each of the 16 joints' local anchors in place

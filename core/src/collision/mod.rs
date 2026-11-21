@@ -152,7 +152,7 @@ pub fn detect_contacts(
     const GROUND_RESTITUTION: f32 = 0.05;
 
     for (idx, body) in bodies.iter().enumerate() {
-        if body.inv_mass == 0.0 {
+        if body.inv_mass == 0.0 || body.is_sleeping {
             continue;
         }
         let (b_min, b_max) = body_aabbs[idx];
@@ -181,7 +181,7 @@ pub fn detect_contacts(
         let (a_min, a_max) = body_aabbs[i];
         for j in (i + 1)..n {
             let b = &bodies[j];
-            if a.inv_mass == 0.0 && b.inv_mass == 0.0 {
+            if (a.inv_mass == 0.0 || a.is_sleeping) && (b.inv_mass == 0.0 || b.is_sleeping) {
                 continue;
             }
             if (a.collision_group & b.collision_mask) == 0

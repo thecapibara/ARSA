@@ -246,6 +246,13 @@ impl ArsaWorld {
         } else {
             0.0
         };
+        if self.earthquake_magnitude > 0.1 {
+            for b in &mut self.bodies {
+                if b.is_sleeping {
+                    b.wake_up();
+                }
+            }
+        }
     }
 
     /// Updates the anthropometric body profile of all ragdolls in-place without resetting the scene.
@@ -433,6 +440,7 @@ impl ArsaWorld {
             let mass_scale = (b.mass / 6.0).sqrt().clamp(0.25, 2.5);
             let impulse_mag = max_impulse * falloff * mass_scale;
             let dv = (impulse_mag * b.inv_mass).min(MAX_BLAST_DV);
+            b.wake_up();
             b.linear_velocity += blast_dir * dv;
             affected += 1;
 
@@ -503,6 +511,7 @@ impl ArsaWorld {
                     body.inv_mass = 0.0;
                     body.local_inertia = Vec3::ZERO;
                     body.inv_local_inertia = Vec3::ZERO;
+                    body.update_world_inertia();
                     body.linear_velocity = Vec3::ZERO;
                     body.angular_velocity = Vec3::ZERO;
                     body.collision_group = 0;
@@ -528,6 +537,22 @@ impl ArsaWorld {
         let sub_dt = clamped_dt / (substeps as f32);
         let inv_dt = 1.0 / sub_dt;
         let gravity_mag = self.gravity.length();
+
+        if self.earthquake_magnitude > 0.1 {
+            for b in &mut self.bodies {
+                if b.is_sleeping {
+                    b.wake_up();
+                }
+            }
+        }
+        if let Some(grab) = &self.grab {
+            if let Some(body) = self.bodies.get_mut(grab.body_idx) {
+                if body.is_sleeping {
+                    body.wake_up();
+                }
+            }
+        }
+
         self.foot_contacts_buf.clear();
         self.foot_contacts_buf.extend(
             self.ragdolls
@@ -540,7 +565,7 @@ impl ArsaWorld {
             for b in &mut self.bodies {
                 b.prev_position = b.position;
                 b.prev_orientation = b.orientation;
-                if b.inv_mass > 0.0 {
+                if b.inv_mass > 0.0 && !b.is_sleeping {
                     b.linear_velocity += self.gravity * sub_dt;
                 }
             }
@@ -622,13 +647,14 @@ impl ArsaWorld {
 
             // Predict positions and orientations
             for b in &mut self.bodies {
-                if b.inv_mass == 0.0 {
+                if b.inv_mass == 0.0 || b.is_sleeping {
                     continue;
                 }
                 b.position += b.linear_velocity * sub_dt;
                 let w = b.angular_velocity;
                 let dq = Quat::from_xyzw(w.x, w.y, w.z, 0.0) * b.orientation;
                 b.orientation = (b.orientation + dq * (0.5 * sub_dt)).normalize();
+                b.update_world_inertia();
             }
 
             // 2. Collision detection
@@ -639,6 +665,22 @@ impl ArsaWorld {
                 &mut self.body_aabbs_buf,
                 &mut self.contacts_buf,
             );
+
+            // Wake sleeping bodies contacted by an awake body
+            for c in &self.contacts_buf {
+                if let Some(b_idx) = c.body_b {
+                    let a_sleep = self.bodies[c.body_a].is_sleeping;
+                    let b_sleep = self.bodies[b_idx].is_sleeping;
+                    if a_sleep != b_sleep {
+                        if a_sleep {
+                            self.bodies[c.body_a].wake_up();
+                        }
+                        if b_sleep {
+                            self.bodies[b_idx].wake_up();
+                        }
+                    }
+                }
+            }
 
             // Track per-ragdoll foot grounding from detected contacts
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
@@ -691,7 +733,7 @@ impl ArsaWorld {
             const MAX_DEPENETRATION_DV: f32 = 6.0;
             const MAX_DEPENETRATION_DW: f32 = 25.0;
             for (b_idx, b) in self.bodies.iter_mut().enumerate() {
-                if b.inv_mass == 0.0 {
+                if b.inv_mass == 0.0 || b.is_sleeping {
                     continue;
                 }
                 let pre_solve_vel = self.pre_solve_vels_buf[b_idx];
@@ -730,6 +772,34 @@ impl ArsaWorld {
             }
             solve_contacts_velocity(&mut self.bodies, &self.contacts_buf, sub_dt, gravity_mag);
         }
+
+        // Put calm non-ragdoll, non-dynamite dynamic props to sleep when no earthquake is active
+        if self.earthquake_magnitude <= 0.1 {
+            let grabbed_idx = self.grab.as_ref().map(|g| g.body_idx);
+            for (idx, b) in self.bodies.iter_mut().enumerate() {
+                if b.ragdoll_id.is_none()
+                    && b.bone_id != Some(250)
+                    && b.inv_mass > 0.0
+                    && grabbed_idx != Some(idx)
+                {
+                    if b.is_sleeping {
+                        continue;
+                    }
+                    if b.linear_velocity.length_squared() < 0.0025
+                        && b.angular_velocity.length_squared() < 0.01
+                    {
+                        b.sleep_timer += clamped_dt;
+                        if b.sleep_timer >= 0.75 {
+                            b.is_sleeping = true;
+                            b.linear_velocity = Vec3::ZERO;
+                            b.angular_velocity = Vec3::ZERO;
+                        }
+                    } else {
+                        b.sleep_timer = 0.0;
+                    }
+                }
+            }
+        }
     }
 
     #[inline]
@@ -754,6 +824,7 @@ impl ArsaWorld {
         if body.inv_mass == 0.0 {
             return;
         }
+        body.wake_up();
         let r = world_point - body.position;
         body.linear_velocity += impulse * body.inv_mass;
         let dw = body.inv_inertia_world_mul(r.cross(impulse));
@@ -1127,6 +1198,7 @@ impl ArsaWorld {
         body.prev_position = pos;
         body.orientation = q;
         body.prev_orientation = q;
+        body.update_world_inertia();
         body.linear_velocity = lin_vel;
         body.angular_velocity = ang_vel;
         true
@@ -1137,7 +1209,8 @@ impl ArsaWorld {
         if !local_point.is_finite() || !target.is_finite() {
             return;
         }
-        if let Some(body) = self.bodies.get(body_idx) {
+        if let Some(body) = self.bodies.get_mut(body_idx) {
+            body.wake_up();
             let m = body.mass.max(1.0);
             self.grab = Some(GrabConstraint {
                 body_idx,

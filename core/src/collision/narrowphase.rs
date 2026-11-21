@@ -378,11 +378,13 @@ fn detect_obb_vs_obb(
     ];
     let delta = a.position - b.position;
 
-    // 1. Test the 6 face axes (A.x, A.y, A.z, B.x, B.y, B.z) for minimum penetration.
+    // 1. Test the 6 face axes (A.x, A.y, A.z, B.x, B.y, B.z) and 9 edge-edge cross axes
+    //    for minimum penetration.
     let mut best_pen = f32::MAX;
     let mut best_axis = Vec3::Y;
     let mut best_local_idx = 1usize;
     let mut ref_is_b = false;
+    let mut best_edge: Option<(usize, usize)> = None;
 
     for (idx, &axis) in axes_a.iter().enumerate() {
         let ra = ha.x * axes_a[0].dot(axis).abs()
@@ -424,10 +426,74 @@ fn detect_obb_vs_obb(
         }
     }
 
+    for (p, &ax_a) in axes_a.iter().enumerate() {
+        for (q, &ax_b) in axes_b.iter().enumerate() {
+            let cross = ax_a.cross(ax_b);
+            let len_sq = cross.length_squared();
+            if len_sq < 1e-6 {
+                continue;
+            }
+            let axis = cross / len_sq.sqrt();
+            let ra = ha.x * axes_a[0].dot(axis).abs()
+                + ha.y * axes_a[1].dot(axis).abs()
+                + ha.z * axes_a[2].dot(axis).abs();
+            let rb = hb.x * axes_b[0].dot(axis).abs()
+                + hb.y * axes_b[1].dot(axis).abs()
+                + hb.z * axes_b[2].dot(axis).abs();
+            let dist = delta.dot(axis).abs();
+            let overlap = ra + rb - dist;
+            if overlap <= 0.0 {
+                return;
+            }
+            let better = if best_edge.is_some() {
+                overlap < best_pen
+            } else {
+                overlap * 1.02 < best_pen
+            };
+            if better {
+                best_pen = overlap;
+                best_axis = axis;
+                best_edge = Some((p, q));
+            }
+        }
+    }
+
     // Orient normal from B to A.
     let mut normal = best_axis;
     if delta.dot(normal) < 0.0 {
         normal = -normal;
+    }
+
+    if let Some((p, q)) = best_edge {
+        let mut c_a = a.position;
+        for (k, &ax) in axes_a.iter().enumerate() {
+            if k != p {
+                let sign = if (-normal).dot(ax) >= 0.0 { 1.0 } else { -1.0 };
+                c_a += ax * (sign * ha[k]);
+            }
+        }
+        let a0 = c_a - axes_a[p] * ha[p];
+        let a1 = c_a + axes_a[p] * ha[p];
+
+        let mut c_b = b.position;
+        for (k, &ax) in axes_b.iter().enumerate() {
+            if k != q {
+                let sign = if normal.dot(ax) >= 0.0 { 1.0 } else { -1.0 };
+                c_b += ax * (sign * hb[k]);
+            }
+        }
+        let b0 = c_b - axes_b[q] * hb[q];
+        let b1 = c_b + axes_b[q] * hb[q];
+
+        let (pa, pb) = closest_points_segment_segment(a0, a1, b0, b1);
+        out.push(Contact::new(
+            bodies,
+            i,
+            Some(j),
+            (pa, pb, normal, best_pen),
+            mat,
+        ));
+        return;
     }
 
     // 2. Identify reference & incident boxes and clip incident face against reference side planes.

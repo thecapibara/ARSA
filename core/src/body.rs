@@ -1,6 +1,6 @@
 //! Rigid body representation, collider shapes, and XPBD generalized inertia helpers.
 
-use glam::{Quat, Vec3};
+use glam::{Mat3, Quat, Vec3};
 
 use crate::math::{inertia_box, inertia_capsule, inertia_sphere};
 
@@ -42,6 +42,7 @@ pub struct RigidBody {
     pub inv_mass: f32,
     pub local_inertia: Vec3,
     pub inv_local_inertia: Vec3,
+    pub inv_inertia_world: Mat3,
     pub collider: ColliderShape,
     pub friction: f32,
     pub restitution: f32,
@@ -49,6 +50,8 @@ pub struct RigidBody {
     pub collision_mask: u32,
     pub ragdoll_id: Option<usize>,
     pub bone_id: Option<u8>,
+    pub is_sleeping: bool,
+    pub sleep_timer: f32,
 }
 
 impl RigidBody {
@@ -73,7 +76,7 @@ impl RigidBody {
                 (0.0, 0.0, Vec3::ZERO, Vec3::ZERO)
             };
 
-        Self {
+        let mut rb = Self {
             position: safe_pos,
             orientation: q,
             prev_position: safe_pos,
@@ -84,6 +87,7 @@ impl RigidBody {
             inv_mass,
             local_inertia,
             inv_local_inertia,
+            inv_inertia_world: Mat3::ZERO,
             collider,
             friction: 0.65,
             restitution: 0.05,
@@ -91,17 +95,40 @@ impl RigidBody {
             collision_mask: u32::MAX,
             ragdoll_id: None,
             bone_id: None,
+            is_sleeping: false,
+            sleep_timer: 0.0,
+        };
+        rb.update_world_inertia();
+        rb
+    }
+
+    /// Recomputes the cached world-space inverse inertia tensor `R * I^-1_local * R^T`.
+    #[inline]
+    pub fn update_world_inertia(&mut self) {
+        if self.inv_mass == 0.0 {
+            self.inv_inertia_world = Mat3::ZERO;
+            return;
         }
+        let r = Mat3::from_quat(self.orientation);
+        let scaled = Mat3::from_cols(
+            r.x_axis * self.inv_local_inertia.x,
+            r.y_axis * self.inv_local_inertia.y,
+            r.z_axis * self.inv_local_inertia.z,
+        );
+        self.inv_inertia_world = scaled * r.transpose();
+    }
+
+    /// Wakes a sleeping body and resets its sleep accumulation timer.
+    #[inline]
+    pub fn wake_up(&mut self) {
+        self.is_sleeping = false;
+        self.sleep_timer = 0.0;
     }
 
     /// Multiplies a world-space vector `v` by the world-space inverse inertia tensor `I^-1_world`.
     #[inline]
     pub fn inv_inertia_world_mul(&self, v: Vec3) -> Vec3 {
-        if self.inv_mass == 0.0 {
-            return Vec3::ZERO;
-        }
-        let local_v = self.orientation.conjugate() * v;
-        self.orientation * (local_v * self.inv_local_inertia)
+        self.inv_inertia_world * v
     }
 
     /// Generalized inverse mass `w = 1/m + (r x n)^T I^-1 (r x n)` for positional constraints
@@ -148,6 +175,7 @@ impl RigidBody {
         }
         let dq = Quat::from_scaled_axis(delta_rot);
         self.orientation = (dq * self.orientation).normalize();
+        self.update_world_inertia();
     }
 
     /// Transforms a body-local point into world space.

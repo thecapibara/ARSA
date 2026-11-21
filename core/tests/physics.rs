@@ -1123,3 +1123,101 @@ fn test_sync_bone_pose_host_physics() {
     assert_eq!(b_after.position, new_pos);
     assert_eq!(b_after.linear_velocity, lin_vel);
 }
+
+#[test]
+fn test_obb_edge_edge_sat_separation() {
+    let mut world = ArsaWorld::new();
+    world.gravity = Vec3::ZERO;
+
+    let half = Vec3::splat(0.5);
+    let pos_b = Vec3::new(0.0, 2.0, 0.0);
+    // Axis (1, -1, 1) / sqrt(3) is the cross product of A's X-axis (rot_z(45°)) and B's Y-axis (rot_x(45°)).
+    // Combined half-projection along this cross axis is (1 + sqrt(2)) / sqrt(3) ≈ 1.39385.
+    // At distance 1.42, all 6 face axes still overlap (>= 0.19m) while the edge-edge axis separates them.
+    let sep_axis = Vec3::new(1.0, -1.0, 1.0).normalize();
+    let pos_a = pos_b + sep_axis * 1.42;
+
+    let idx_a = world.spawn_box(pos_a, half, 5.0, Vec3::ZERO);
+    let idx_b = world.spawn_box(pos_b, half, 5.0, Vec3::ZERO);
+
+    let rot_a = Quat::from_rotation_z(std::f32::consts::FRAC_PI_4);
+    let rot_b = Quat::from_rotation_x(std::f32::consts::FRAC_PI_4);
+    world.bodies[idx_a].orientation = rot_a;
+    world.bodies[idx_a].prev_orientation = rot_a;
+    world.bodies[idx_a].update_world_inertia();
+    world.bodies[idx_b].orientation = rot_b;
+    world.bodies[idx_b].prev_orientation = rot_b;
+    world.bodies[idx_b].update_world_inertia();
+
+    for _ in 0..10 {
+        world.step(1.0 / 60.0);
+    }
+
+    let a = &world.bodies[idx_a];
+    let b = &world.bodies[idx_b];
+    assert!(
+        a.linear_velocity.length() < 1e-5 && b.linear_velocity.length() < 1e-5,
+        "separated angled boxes emitted phantom linear repulsion: va={:?}, vb={:?}",
+        a.linear_velocity,
+        b.linear_velocity
+    );
+    assert!(
+        a.angular_velocity.length() < 1e-5 && b.angular_velocity.length() < 1e-5,
+        "separated angled boxes emitted phantom angular repulsion: wa={:?}, wb={:?}",
+        a.angular_velocity,
+        b.angular_velocity
+    );
+    assert!(
+        (a.position - pos_a).length() < 1e-5 && (b.position - pos_b).length() < 1e-5,
+        "separated angled boxes moved unexpectedly: pa={:?}, pb={:?}",
+        a.position,
+        b.position
+    );
+}
+
+#[test]
+fn test_prop_sleeping_and_wakeup() {
+    let mut world = ArsaWorld::new();
+    let half = Vec3::splat(0.25);
+    let box_a = world.spawn_box(Vec3::new(0.0, 0.25, 0.0), half, 2.0, Vec3::ZERO);
+    let box_b = world.spawn_box(Vec3::new(2.0, 0.25, 0.0), half, 2.0, Vec3::ZERO);
+
+    // Step 2.0s (120 frames at 1/60s): both props should settle and sleep
+    for _ in 0..120 {
+        world.step(1.0 / 60.0);
+    }
+
+    assert!(
+        world.bodies[box_a].is_sleeping,
+        "box_a did not enter sleep after 2.0s: vel={:?}, ang_vel={:?}, timer={}",
+        world.bodies[box_a].linear_velocity,
+        world.bodies[box_a].angular_velocity,
+        world.bodies[box_a].sleep_timer
+    );
+    assert!(world.bodies[box_b].is_sleeping);
+
+    // Wake box_a with an impulse and verify it wakes up and moves
+    let pos_a_before = world.bodies[box_a].position;
+    world.apply_impulse_at_point(box_a, Vec3::new(6.0, 0.0, 0.0), pos_a_before);
+    assert!(!world.bodies[box_a].is_sleeping);
+    assert!(world.bodies[box_b].is_sleeping);
+
+    for _ in 0..12 {
+        world.step(1.0 / 60.0);
+    }
+    assert!(!world.bodies[box_a].is_sleeping);
+    assert!(
+        world.bodies[box_a].position.x - pos_a_before.x > 0.05,
+        "woken box_a did not move as expected: before={:?}, after={:?}",
+        pos_a_before,
+        world.bodies[box_a].position
+    );
+
+    // Wake remaining sleeping box_b with an earthquake
+    world.set_earthquake(6.0);
+    world.step(1.0 / 60.0);
+    assert!(
+        !world.bodies[box_b].is_sleeping,
+        "earthquake failed to wake box_b"
+    );
+}
