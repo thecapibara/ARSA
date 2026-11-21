@@ -7,7 +7,8 @@ use glam::{Quat, Vec3};
 use crate::balance::{update_ragdoll_balance, BehaviorState, RecoveryStage};
 use crate::body::{ColliderShape, RigidBody};
 use crate::collision::{
-    detect_contacts, solve_contacts_position, solve_contacts_velocity, Contact, StaticBox,
+    body_world_aabb, detect_contacts, solve_contacts_position, solve_contacts_velocity, Contact,
+    StaticBox,
 };
 use crate::joint::Joint;
 use crate::reflex::{apply_procedural_reflexes, WoundRegion};
@@ -197,6 +198,11 @@ impl ArsaWorld {
             restitution,
         });
         idx
+    }
+
+    /// Samples the highest static or heavy-dynamic support surface `y <= max_y` at `(x, z)`.
+    pub fn sample_support_height(&self, x: f32, z: f32, max_y: f32) -> f32 {
+        sample_support_height_parts(&self.static_boxes, &self.bodies, x, z, max_y)
     }
 
     /// Spawns a 17-bone humanoid ragdoll at `origin` with the default profile and returns its ragdoll ID.
@@ -659,16 +665,32 @@ impl ArsaWorld {
 
             // 1b. Update active balance controllers, procedural reflexes & apply PD muscle motors
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
+                let pelvis_idx = ragdoll.body_indices[BoneId::Pelvis as usize];
+                let pelvis_y = self.bodies[pelvis_idx].position.y;
+                let step_target_ground_y = sample_support_height_parts(
+                    &self.static_boxes,
+                    &self.bodies,
+                    ragdoll.balance.step_target_xz.x,
+                    ragdoll.balance.step_target_xz.z,
+                    pelvis_y,
+                );
                 update_ragdoll_balance(
                     ragdoll,
                     &mut self.bodies,
                     &mut self.joints,
                     self.foot_contacts_buf[r_idx],
+                    step_target_ground_y,
                     gravity_mag,
                     self.earthquake_magnitude,
                     sub_dt,
                 );
-                apply_procedural_reflexes(ragdoll, &mut self.bodies, &mut self.joints, sub_dt);
+                apply_procedural_reflexes(
+                    ragdoll,
+                    &mut self.bodies,
+                    &mut self.joints,
+                    &self.static_boxes,
+                    sub_dt,
+                );
             }
             for j in &self.joints {
                 j.apply_muscle_motor(&mut self.bodies, sub_dt);
@@ -1568,4 +1590,44 @@ fn ray_capsule(
     } else {
         None
     }
+}
+
+fn sample_support_height_parts(
+    static_boxes: &[StaticBox],
+    bodies: &[RigidBody],
+    x: f32,
+    z: f32,
+    max_y: f32,
+) -> f32 {
+    let mut best_y = 0.0_f32;
+    for sb in static_boxes {
+        if (x - sb.center.x).abs() <= sb.half_extents.x + 0.05
+            && (z - sb.center.z).abs() <= sb.half_extents.z + 0.05
+        {
+            let top = sb.center.y + sb.half_extents.y;
+            if top <= max_y && top > best_y {
+                best_y = top;
+            }
+        }
+    }
+    for b in bodies {
+        if b.ragdoll_id.is_none()
+            && b.mass >= 15.0
+            && b.bone_id != Some(250)
+            && matches!(b.collider, ColliderShape::Box { .. })
+        {
+            let (b_min, b_max) = body_world_aabb(b);
+            if x >= b_min.x - 0.05
+                && x <= b_max.x + 0.05
+                && z >= b_min.z - 0.05
+                && z <= b_max.z + 0.05
+            {
+                let top = b_max.y;
+                if top <= max_y && top > best_y {
+                    best_y = top;
+                }
+            }
+        }
+    }
+    best_y
 }

@@ -18,7 +18,7 @@ pub use body::{ColliderShape, RigidBody};
 pub use collision::{Contact, StaticBox};
 pub use joint::{Joint, JointKind};
 pub use math::{inertia_box, inertia_capsule, inertia_sphere, swing_twist_decomposition};
-pub use reflex::{apply_procedural_reflexes, ReflexState, WoundEvent, WoundRegion};
+pub use reflex::{apply_procedural_reflexes, HandGrab, ReflexState, WoundEvent, WoundRegion};
 pub use skeleton::{
     spawn_humanoid, spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId,
     JointId, RagdollInstance,

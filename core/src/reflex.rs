@@ -5,6 +5,7 @@ use glam::{EulerRot, Quat, Vec3};
 
 use crate::balance::{BehaviorState, RecoveryStage};
 use crate::body::RigidBody;
+use crate::collision::StaticBox;
 use crate::joint::Joint;
 use crate::skeleton::{BoneId, JointId, RagdollInstance};
 
@@ -47,6 +48,14 @@ pub struct WoundEvent {
     pub time_since_hit: f32,
 }
 
+/// Active environmental hand grab latched onto a static ledge/edge point.
+#[derive(Debug, Clone, Copy)]
+pub struct HandGrab {
+    pub world_point: Vec3,
+    pub hold_time: f32,
+    pub max_hold_time: f32,
+}
+
 /// Per-ragdoll trauma, health, consciousness, and procedural reflex state.
 #[derive(Debug, Clone)]
 pub struct ReflexState {
@@ -56,6 +65,8 @@ pub struct ReflexState {
     pub bracing: bool,
     pub unconscious: bool,
     pub writhe_time: f32,
+    pub left_grab: Option<HandGrab>,
+    pub right_grab: Option<HandGrab>,
 }
 
 impl Default for ReflexState {
@@ -67,6 +78,8 @@ impl Default for ReflexState {
             bracing: false,
             unconscious: false,
             writhe_time: 0.0,
+            left_grab: None,
+            right_grab: None,
         }
     }
 }
@@ -93,6 +106,17 @@ impl RagdollInstance {
         if (bone == BoneId::Head && sev >= 0.72) || self.reflex.health <= 10.0 {
             self.reflex.unconscious = true;
         }
+        if matches!(
+            bone,
+            BoneId::LeftUpperArm | BoneId::LeftForearm | BoneId::LeftHand
+        ) {
+            self.reflex.left_grab = None;
+        } else if matches!(
+            bone,
+            BoneId::RightUpperArm | BoneId::RightForearm | BoneId::RightHand
+        ) {
+            self.reflex.right_grab = None;
+        }
 
         self.reflex.active_wound = Some(WoundEvent {
             bone,
@@ -112,13 +136,14 @@ impl RagdollInstance {
     }
 }
 
-/// Applies procedural trauma, vestibular head stabilization, brace-for-impact, and
-/// reach-for-wound reflexes after [`crate::balance::update_ragdoll_balance`] and before
-/// [`Joint::apply_muscle_motor`].
+/// Applies procedural trauma, vestibular head stabilization, environmental hand grabbing,
+/// brace-for-impact, and reach-for-wound reflexes after [`crate::balance::update_ragdoll_balance`]
+/// and before [`Joint::apply_muscle_motor`].
 pub fn apply_procedural_reflexes(
     ragdoll: &mut RagdollInstance,
     bodies: &mut [RigidBody],
     joints: &mut [Joint],
+    static_boxes: &[StaticBox],
     dt: f32,
 ) {
     if dt <= 0.0 {
@@ -128,12 +153,16 @@ pub fn apply_procedural_reflexes(
     // 1. Unconscious / Passive check
     if !ragdoll.active_enabled {
         ragdoll.reflex.bracing = false;
+        ragdoll.reflex.left_grab = None;
+        ragdoll.reflex.right_grab = None;
         return;
     }
 
     if ragdoll.reflex.unconscious {
         ragdoll.balance.state = BehaviorState::Unconscious;
         ragdoll.reflex.bracing = false;
+        ragdoll.reflex.left_grab = None;
+        ragdoll.reflex.right_grab = None;
         for &j_idx in &ragdoll.joint_indices {
             joints[j_idx].motor_stiffness = 0.0;
             joints[j_idx].motor_damping = 0.0;
@@ -193,8 +222,64 @@ pub fn apply_procedural_reflexes(
         }
     }
 
-    // 4. Brace-for-Impact & Airborne Flail
-    if state == BehaviorState::Falling && ragdoll.balance.com_vel.y < -0.5 {
+    // 4. Environmental Hand Grabbing (Ledge, Wall & Platform Edge Catch)
+    let total_mass: f32 = ragdoll
+        .body_indices
+        .iter()
+        .map(|&idx| bodies[idx].mass)
+        .sum();
+    let (left_grab_active, right_grab_active) = if ragdoll.reflex.health <= 18.0
+        || matches!(
+            state,
+            BehaviorState::Balanced
+                | BehaviorState::Recovering
+                | BehaviorState::Downed
+                | BehaviorState::Passive
+                | BehaviorState::Unconscious
+        ) {
+        ragdoll.reflex.left_grab = None;
+        ragdoll.reflex.right_grab = None;
+        (false, false)
+    } else if matches!(state, BehaviorState::Falling | BehaviorState::Stumbling)
+        && ragdoll.reflex.health > 20.0
+    {
+        let left_active = update_hand_grab(
+            ragdoll,
+            bodies,
+            joints,
+            static_boxes,
+            true,
+            total_mass,
+            s_h,
+            grav_scale,
+            damp_scale,
+            dt,
+        );
+        let right_active = update_hand_grab(
+            ragdoll,
+            bodies,
+            joints,
+            static_boxes,
+            false,
+            total_mass,
+            s_h,
+            grav_scale,
+            damp_scale,
+            dt,
+        );
+        (left_active, right_active)
+    } else {
+        (
+            ragdoll.reflex.left_grab.is_some(),
+            ragdoll.reflex.right_grab.is_some(),
+        )
+    };
+
+    // 5. Brace-for-Impact & Airborne Flail (suppressed per-hand while grabbing/reaching a ledge)
+    if state == BehaviorState::Falling
+        && ragdoll.balance.com_vel.y < -0.5
+        && (!left_grab_active || !right_grab_active)
+    {
         ragdoll.reflex.bracing = true;
 
         let fall_world = ragdoll.balance.com_vel.normalize_or_zero();
@@ -211,44 +296,50 @@ pub fn apply_procedural_reflexes(
                 .normalize_or_zero();
         }
 
-        if dir_l.length_squared() > 0.5 {
+        if !left_grab_active {
+            if dir_l.length_squared() > 0.5 {
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    JointId::LeftShoulder,
+                    Quat::from_rotation_arc(-Vec3::Y, dir_l),
+                );
+            }
             set_motor_target(
                 ragdoll,
                 joints,
-                JointId::LeftShoulder,
-                Quat::from_rotation_arc(-Vec3::Y, dir_l),
+                JointId::LeftElbow,
+                Quat::from_rotation_x(-0.35),
             );
+            let sh = &mut joints[ragdoll.joint_indices[JointId::LeftShoulder as usize]];
+            sh.motor_stiffness = sh.motor_stiffness.max(58.0 * grav_scale);
+            sh.max_torque = sh.max_torque.max(65.0 * grav_scale);
+            let el = &mut joints[ragdoll.joint_indices[JointId::LeftElbow as usize]];
+            el.motor_stiffness = el.motor_stiffness.max(36.0 * grav_scale);
+            el.max_torque = el.max_torque.max(40.0 * grav_scale);
         }
-        if dir_r.length_squared() > 0.5 {
-            set_motor_target(
-                ragdoll,
-                joints,
-                JointId::RightShoulder,
-                Quat::from_rotation_arc(-Vec3::Y, dir_r),
-            );
-        }
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::LeftElbow,
-            Quat::from_rotation_x(-0.35),
-        );
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::RightElbow,
-            Quat::from_rotation_x(-0.35),
-        );
 
-        for (jid, base_k, base_t) in [
-            (JointId::LeftShoulder, 58.0, 65.0),
-            (JointId::RightShoulder, 58.0, 65.0),
-            (JointId::LeftElbow, 36.0, 40.0),
-            (JointId::RightElbow, 36.0, 40.0),
-        ] {
-            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
-            j.motor_stiffness = j.motor_stiffness.max(base_k * grav_scale);
-            j.max_torque = j.max_torque.max(base_t * grav_scale);
+        if !right_grab_active {
+            if dir_r.length_squared() > 0.5 {
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    JointId::RightShoulder,
+                    Quat::from_rotation_arc(-Vec3::Y, dir_r),
+                );
+            }
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightElbow,
+                Quat::from_rotation_x(-0.35),
+            );
+            let sh = &mut joints[ragdoll.joint_indices[JointId::RightShoulder as usize]];
+            sh.motor_stiffness = sh.motor_stiffness.max(58.0 * grav_scale);
+            sh.max_torque = sh.max_torque.max(65.0 * grav_scale);
+            let el = &mut joints[ragdoll.joint_indices[JointId::RightElbow as usize]];
+            el.motor_stiffness = el.motor_stiffness.max(36.0 * grav_scale);
+            el.max_torque = el.max_torque.max(40.0 * grav_scale);
         }
     } else {
         ragdoll.reflex.bracing = false;
@@ -334,6 +425,9 @@ pub fn apply_procedural_reflexes(
     }
 
     let mut reach = |is_left: bool, is_leg_reach: bool| {
+        if (is_left && left_grab_active) || (!is_left && right_grab_active) {
+            return;
+        }
         reach_arm_to_target(
             ragdoll,
             bodies,
@@ -510,6 +604,277 @@ fn reach_arm_to_target(
     let inv_m_chest = bodies[chest_idx].inv_mass;
     bodies[hand_idx].linear_velocity += impulse * inv_m_hand;
     bodies[chest_idx].linear_velocity -= impulse * inv_m_chest;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_hand_grab(
+    ragdoll: &mut RagdollInstance,
+    bodies: &mut [RigidBody],
+    joints: &mut [Joint],
+    static_boxes: &[StaticBox],
+    is_left: bool,
+    total_mass: f32,
+    s_h: f32,
+    grav_scale: f32,
+    damp_scale: f32,
+    dt: f32,
+) -> bool {
+    let (shoulder_jid, elbow_jid, forearm_bid, hand_bid) = if is_left {
+        (
+            JointId::LeftShoulder,
+            JointId::LeftElbow,
+            BoneId::LeftForearm,
+            BoneId::LeftHand,
+        )
+    } else {
+        (
+            JointId::RightShoulder,
+            JointId::RightElbow,
+            BoneId::RightForearm,
+            BoneId::RightHand,
+        )
+    };
+
+    let healthy = ragdoll.reflex.bone_damage[forearm_bid as usize] < 0.5
+        && ragdoll.reflex.bone_damage[hand_bid as usize] < 0.5;
+    if !healthy {
+        if is_left {
+            ragdoll.reflex.left_grab = None;
+        } else {
+            ragdoll.reflex.right_grab = None;
+        }
+        return false;
+    }
+
+    let chest_idx = ragdoll.body_indices[BoneId::Chest as usize];
+    let pelvis_idx = ragdoll.body_indices[BoneId::Pelvis as usize];
+    let hand_idx = ragdoll.body_indices[hand_bid as usize];
+    let shoulder_j_idx = ragdoll.joint_indices[shoulder_jid as usize];
+    let shoulder_world = bodies[chest_idx].world_point(joints[shoulder_j_idx].anchor_parent);
+    let hand_pos = bodies[hand_idx].position;
+    let pelvis_pos = bodies[pelvis_idx].position;
+    let chest_pos = bodies[chest_idx].position;
+
+    let profile = ragdoll.profile.sanitized();
+    let current_grab = if is_left {
+        ragdoll.reflex.left_grab
+    } else {
+        ragdoll.reflex.right_grab
+    };
+
+    if let Some(mut grab) = current_grab {
+        grab.hold_time += dt;
+        let err = grab.world_point - hand_pos;
+        let dist = err.length();
+        if grab.hold_time >= grab.max_hold_time || dist > 0.34 * s_h {
+            if is_left {
+                ragdoll.reflex.left_grab = None;
+            } else {
+                ragdoll.reflex.right_grab = None;
+            }
+            return false;
+        }
+
+        let max_grip_force = (total_mass
+            * 9.81
+            * 0.92
+            * profile.muscle_ratio
+            * (ragdoll.reflex.health / 100.0).clamp(0.4, 1.0))
+        .max(200.0);
+        let k = total_mass * 85.0;
+        let c = total_mass * 10.0;
+        let hand = &mut bodies[hand_idx];
+        let c_eff = c / (1.0 + hand.inv_mass * dt * c);
+        let mut force = err * k - hand.linear_velocity * c_eff;
+        let f_len = force.length();
+        if f_len > max_grip_force && f_len > 1e-6 {
+            force *= max_grip_force / f_len;
+        }
+        hand.linear_velocity += force * (dt * hand.inv_mass);
+
+        drive_arm_toward_ledge(
+            ragdoll,
+            bodies,
+            joints,
+            chest_idx,
+            hand_idx,
+            shoulder_world,
+            shoulder_jid,
+            elbow_jid,
+            grab.world_point,
+            true,
+            total_mass,
+            s_h,
+            grav_scale,
+            damp_scale,
+            dt,
+        );
+
+        if is_left {
+            ragdoll.reflex.left_grab = Some(grab);
+        } else {
+            ragdoll.reflex.right_grab = Some(grab);
+        }
+        return true;
+    }
+
+    let max_reach = 0.78 * s_h;
+    let min_ledge_y = (pelvis_pos.y - 0.35 * s_h).max(0.35);
+    let max_ledge_y = chest_pos.y + 0.65 * s_h;
+    let mut best_point: Option<Vec3> = None;
+    let mut best_dist_sq = f32::MAX;
+
+    for sb in static_boxes {
+        let top_y = sb.center.y + sb.half_extents.y;
+        if top_y < min_ledge_y || top_y > max_ledge_y {
+            continue;
+        }
+        let pt = closest_top_perimeter_point(sb, hand_pos);
+        if shoulder_world.distance(pt) <= max_reach {
+            let d_sq = hand_pos.distance_squared(pt);
+            if d_sq < best_dist_sq {
+                best_dist_sq = d_sq;
+                best_point = Some(pt);
+            }
+        }
+    }
+
+    let Some(ledge_point) = best_point else {
+        return false;
+    };
+
+    drive_arm_toward_ledge(
+        ragdoll,
+        bodies,
+        joints,
+        chest_idx,
+        hand_idx,
+        shoulder_world,
+        shoulder_jid,
+        elbow_jid,
+        ledge_point,
+        false,
+        total_mass,
+        s_h,
+        grav_scale,
+        damp_scale,
+        dt,
+    );
+
+    if hand_pos.distance(ledge_point) <= 0.18 * s_h {
+        let max_hold_time =
+            (2.6 * profile.muscle_ratio / (profile.mass_kg / 75.0).sqrt()).clamp(1.0, 4.0);
+        let grab = HandGrab {
+            world_point: ledge_point,
+            hold_time: 0.0,
+            max_hold_time,
+        };
+        if is_left {
+            ragdoll.reflex.left_grab = Some(grab);
+        } else {
+            ragdoll.reflex.right_grab = Some(grab);
+        }
+        return true;
+    }
+
+    true
+}
+
+#[inline]
+fn closest_top_perimeter_point(sb: &StaticBox, p: Vec3) -> Vec3 {
+    let min_x = sb.center.x - sb.half_extents.x;
+    let max_x = sb.center.x + sb.half_extents.x;
+    let min_z = sb.center.z - sb.half_extents.z;
+    let max_z = sb.center.z + sb.half_extents.z;
+    let top_y = sb.center.y + sb.half_extents.y;
+
+    let mut cx = p.x.clamp(min_x, max_x);
+    let mut cz = p.z.clamp(min_z, max_z);
+
+    if p.x > min_x && p.x < max_x && p.z > min_z && p.z < max_z {
+        let dx_min = p.x - min_x;
+        let dx_max = max_x - p.x;
+        let dz_min = p.z - min_z;
+        let dz_max = max_z - p.z;
+        let min_d = dx_min.min(dx_max).min(dz_min).min(dz_max);
+        if min_d == dx_min {
+            cx = min_x;
+        } else if min_d == dx_max {
+            cx = max_x;
+        } else if min_d == dz_min {
+            cz = min_z;
+        } else {
+            cz = max_z;
+        }
+    }
+
+    Vec3::new(cx, top_y, cz)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_arm_toward_ledge(
+    ragdoll: &RagdollInstance,
+    bodies: &mut [RigidBody],
+    joints: &mut [Joint],
+    chest_idx: usize,
+    hand_idx: usize,
+    shoulder_world: Vec3,
+    shoulder_jid: JointId,
+    elbow_jid: JointId,
+    target_world: Vec3,
+    is_holding: bool,
+    total_mass: f32,
+    s_h: f32,
+    grav_scale: f32,
+    damp_scale: f32,
+    dt: f32,
+) {
+    let to_target_world = target_world - shoulder_world;
+    let dist = to_target_world.length();
+    let mut to_target_chest =
+        (bodies[chest_idx].orientation.conjugate() * to_target_world).normalize_or_zero();
+    if to_target_chest.length_squared() > 0.25 {
+        if to_target_chest.y > 0.7 {
+            to_target_chest = (to_target_chest + Vec3::new(0.0, 0.0, 0.2)).normalize_or_zero();
+        }
+        let q_shoulder = Quat::from_rotation_arc(-Vec3::Y, to_target_chest);
+        let arm_len = (0.58 * s_h).max(0.2);
+        let flex = if is_holding {
+            -0.85 * (1.0 - (dist / arm_len).clamp(0.0, 1.0)).max(0.25)
+        } else {
+            -0.25
+        };
+        set_motor_target(ragdoll, joints, shoulder_jid, q_shoulder);
+        set_motor_target(ragdoll, joints, elbow_jid, Quat::from_rotation_x(flex));
+    }
+
+    let sh = &mut joints[ragdoll.joint_indices[shoulder_jid as usize]];
+    sh.motor_stiffness = sh.motor_stiffness.max(95.0 * grav_scale);
+    sh.motor_damping = sh.motor_damping.max(1.6 * damp_scale);
+    sh.max_torque = sh.max_torque.max(105.0 * grav_scale);
+
+    let el = &mut joints[ragdoll.joint_indices[elbow_jid as usize]];
+    el.motor_stiffness = el.motor_stiffness.max(65.0 * grav_scale);
+    el.motor_damping = el.motor_damping.max(1.3 * damp_scale);
+    el.max_torque = el.max_torque.max(70.0 * grav_scale);
+
+    // Gentle internal reach assist (equal-and-opposite hand <-> chest) while reaching for a ledge
+    if !is_holding {
+        let mass_scale = total_mass / 76.5;
+        let hand_err = target_world - bodies[hand_idx].position;
+        let rel_vel = bodies[hand_idx].linear_velocity - bodies[chest_idx].linear_velocity;
+        let max_force = 35.0 * mass_scale;
+        let mut force = hand_err * (140.0 * mass_scale) - rel_vel * (10.0 * mass_scale);
+        let f_len = force.length();
+        if f_len > max_force && f_len > 1e-6 {
+            force *= max_force / f_len;
+        }
+        let impulse = force * dt;
+        let inv_m_hand = bodies[hand_idx].inv_mass;
+        let inv_m_chest = bodies[chest_idx].inv_mass;
+        bodies[hand_idx].linear_velocity += impulse * inv_m_hand;
+        bodies[chest_idx].linear_velocity -= impulse * inv_m_chest;
+    }
 }
 
 #[inline]

@@ -70,6 +70,7 @@ pub struct BalanceState {
     pub swing_left: bool,
     pub step_phase: f32,
     pub step_target_xz: Vec3,
+    pub step_target_ground_y: f32,
     pub idle_time: f32,
 }
 
@@ -96,6 +97,7 @@ impl Default for BalanceState {
             swing_left: false,
             step_phase: 0.0,
             step_target_xz: Vec3::ZERO,
+            step_target_ground_y: 0.0,
             idle_time: 0.0,
         }
     }
@@ -103,11 +105,13 @@ impl Default for BalanceState {
 
 /// Updates active balance state, muscle gains/targets, capture-point stepping, and
 /// torque-limited virtual upright & CoM support for a humanoid ragdoll.
+#[allow(clippy::too_many_arguments)]
 pub fn update_ragdoll_balance(
     ragdoll: &mut RagdollInstance,
     bodies: &mut [RigidBody],
     joints: &mut [Joint],
     foot_contacts: (bool, bool),
+    step_target_ground_y: f32,
     gravity_mag: f32,
     quake_mag: f32,
     dt: f32,
@@ -166,6 +170,7 @@ pub fn update_ragdoll_balance(
         com_pos.z + com_vel.z * t_pend,
     );
     ragdoll.balance.capture_point = cp_xz;
+    ragdoll.balance.step_target_ground_y = step_target_ground_y;
 
     // 4. Passive or unconscious early out
     if !ragdoll.active_enabled || ragdoll.reflex.unconscious {
@@ -467,29 +472,47 @@ pub fn update_ragdoll_balance(
                 let lat_comp = (rel_target.dot(left_xz) / (0.40 * s_h)).clamp(-0.55, 0.55);
 
                 let phase = ragdoll.balance.step_phase;
+                let step_delta_y =
+                    (step_target_ground_y - foot_ground_y).clamp(-0.35 * s_h, 0.42 * s_h);
+                let step_norm = step_delta_y / s_h;
                 let (swing_hip, swing_knee, swing_ankle) = if phase < 0.55 {
                     let lift = (phase / 0.35).clamp(0.0, 1.0);
+                    let (extra_lift_hip, extra_lift_knee) = if step_delta_y > 0.03 {
+                        (-step_norm * 1.45 * lift, step_norm * 2.15 * lift)
+                    } else {
+                        (0.0, 0.0)
+                    };
                     (
                         Quat::from_euler(
                             glam::EulerRot::XYZ,
-                            -fwd_comp * 0.65 * lift,
+                            -fwd_comp * 0.65 * lift + extra_lift_hip,
                             0.0,
                             lat_comp * 0.45 * lift,
                         ),
-                        Quat::from_rotation_x(0.95 * lift),
+                        Quat::from_rotation_x(0.95 * lift + extra_lift_knee),
                         Quat::from_rotation_x(-0.28 * lift),
                     )
                 } else {
                     let reach = ((phase - 0.55) / 0.45).clamp(0.0, 1.0);
+                    let mut hip_x = -fwd_comp * (0.65 - 0.10 * reach);
+                    let mut knee_x = 0.95 * (1.0 - reach) + 0.12 * reach;
+                    let mut ankle_x = -0.28 * (1.0 - reach) - 0.05 * reach;
+                    if step_delta_y > 0.03 {
+                        knee_x += step_norm * 1.1;
+                        hip_x -= step_norm * 0.85;
+                    } else if step_delta_y < -0.03 {
+                        knee_x = (knee_x + step_norm * 0.6).max(0.02);
+                        ankle_x += (-step_norm) * 0.45 * reach;
+                    }
                     (
                         Quat::from_euler(
                             glam::EulerRot::XYZ,
-                            -fwd_comp * (0.65 - 0.10 * reach),
+                            hip_x,
                             0.0,
                             lat_comp * (0.45 - 0.10 * reach),
                         ),
-                        Quat::from_rotation_x(0.95 * (1.0 - reach) + 0.12 * reach),
-                        Quat::from_rotation_x(-0.28 * (1.0 - reach) - 0.05 * reach),
+                        Quat::from_rotation_x(knee_x),
+                        Quat::from_rotation_x(ankle_x),
                     )
                 };
 

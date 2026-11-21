@@ -105,7 +105,7 @@ pub fn should_ragdoll_bones_collide(bone_a: u8, bone_b: u8) -> bool {
 }
 
 #[inline]
-fn body_world_aabb(b: &RigidBody) -> (Vec3, Vec3) {
+pub(crate) fn body_world_aabb(b: &RigidBody) -> (Vec3, Vec3) {
     let ext = match b.collider {
         ColliderShape::Sphere { radius } => Vec3::splat(radius),
         ColliderShape::Capsule {

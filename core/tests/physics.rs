@@ -1431,3 +1431,103 @@ fn test_external_target_pose_blending() {
         "LeftElbow did not release back toward standing pose after clear: angle={released_angle}"
     );
 }
+
+#[test]
+fn test_ledge_grab_catches_platform_edge() {
+    let mut world = ArsaWorld::new();
+    world.add_static_box(
+        Vec3::new(0.0, 2.0, 0.0),
+        Vec3::new(1.1, 0.1, 1.1),
+        0.75,
+        0.05,
+    );
+    // Spawn on the platform brink (right foot on ledge x=1.10, left foot stepping off)
+    let id = world.spawn_ragdoll(Vec3::new(1.15, 2.12, 0.0));
+
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+    let chest_pos = world.bodies[chest_idx].position;
+    world
+        .apply_shove(
+            chest_pos + Vec3::new(-2.0, 0.0, 0.10),
+            Vec3::new(1.0, 0.0, 0.0),
+            10.0,
+        )
+        .expect("shove should hit chest");
+
+    let mut caught_ledge = false;
+    for _ in 0..90 {
+        world.step(1.0 / 60.0);
+        if world.ragdolls[id].reflex.left_grab.is_some()
+            || world.ragdolls[id].reflex.right_grab.is_some()
+        {
+            caught_ledge = true;
+        }
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during ledge grab test"
+            );
+        }
+    }
+
+    assert!(
+        caught_ledge,
+        "ragdoll did not catch platform ledge with either hand during fall (state={:?})",
+        world.ragdolls[id].balance.state
+    );
+}
+
+#[test]
+fn test_terrain_aware_step_lifts_knee_for_stair() {
+    let mut world = ArsaWorld::new();
+    // Low stair right in front (+Z) of the standing ragdoll with top_y = 0.22
+    world.add_static_box(
+        Vec3::new(0.0, 0.11, 0.55),
+        Vec3::new(1.2, 0.11, 0.35),
+        0.75,
+        0.05,
+    );
+    let id = world.spawn_ragdoll(Vec3::ZERO);
+
+    assert!(
+        world.sample_support_height(0.0, 0.55, 1.5) >= 0.20,
+        "sample_support_height did not detect stair"
+    );
+
+    for _ in 0..10 {
+        world.step(1.0 / 60.0);
+    }
+
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+    let chest_pos = world.bodies[chest_idx].position;
+    world
+        .apply_shove(
+            chest_pos + Vec3::new(0.0, 0.0, -2.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            260.0,
+        )
+        .expect("shove should hit chest");
+
+    let mut max_step_ground_y = 0.0_f32;
+    for _ in 0..24 {
+        world.step(1.0 / 60.0);
+        max_step_ground_y = max_step_ground_y.max(world.ragdolls[id].balance.step_target_ground_y);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during stair step test"
+            );
+        }
+    }
+
+    assert!(
+        max_step_ground_y > 0.15,
+        "expected step_target_ground_y > 0.15 on stair, got {max_step_ground_y}"
+    );
+}
