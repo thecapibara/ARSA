@@ -656,6 +656,7 @@ mod tests {
         }
 
         // Re-enable active control while lying downed and let settle for 2.0s
+        world_down.set_all_ragdolls_auto_get_up(false);
         world_down.set_ragdoll_active(down_id, true);
         for _ in 0..120 {
             world_down.step(1.0 / 60.0);
@@ -796,6 +797,139 @@ mod tests {
             horiz_drift < 0.08,
             "top cube drifted horizontally: horiz_drift={horiz_drift}, pos={:?}",
             top.position
+        );
+    }
+
+    #[test]
+    fn test_auto_get_up_after_delay_and_not_when_unconscious() {
+        // Test A: Healthy active ragdoll knocked down recovers after delay
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+        for _ in 0..20 {
+            world.step(1.0 / 60.0);
+        }
+
+        let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+        let chest_pos = world.bodies[chest_idx].position;
+        world
+            .apply_shove(
+                chest_pos + Vec3::new(0.0, 0.0, 2.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                620.0,
+            )
+            .expect("shove should hit chest");
+
+        // After 0.5s, must still be Falling or Downed (does NOT pop up instantly)
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+        let state_after_half_sec = world.ragdolls[id].balance.state;
+        assert!(
+            matches!(
+                state_after_half_sec,
+                BehaviorState::Falling | BehaviorState::Downed
+            ),
+            "expected Falling or Downed after 0.5s, got {state_after_half_sec:?}"
+        );
+
+        // Step 5.0 more seconds; should enter Recovering and stand back up
+        let mut saw_recovering = false;
+        for _ in 0..300 {
+            world.step(1.0 / 60.0);
+            if world.ragdolls[id].balance.state == BehaviorState::Recovering {
+                saw_recovering = true;
+            }
+            for (i, b) in world.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "body {i} produced NaN/Inf during recovery"
+                );
+            }
+        }
+
+        assert!(
+            saw_recovering,
+            "ragdoll never entered Recovering state; final state={:?}",
+            world.ragdolls[id].balance.state
+        );
+        let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+        let pelvis_y = world.bodies[pelvis_idx].position.y;
+        let threshold = 0.72 * world.ragdolls[id].standing_pelvis_y;
+        assert!(
+            pelvis_y > threshold,
+            "ragdoll did not stand back up: pelvis_y={pelvis_y}, threshold={threshold}, state={:?}",
+            world.ragdolls[id].balance.state
+        );
+
+        // Test B: Unconscious ragdoll (headshot with Rifle) NEVER recovers
+        let mut world_unc = ArsaWorld::new();
+        let unc_id = world_unc.spawn_ragdoll(Vec3::ZERO);
+        let head_idx = world_unc.ragdolls[unc_id].body_indices[BoneId::Head as usize];
+        let head_pos = world_unc.bodies[head_idx].position;
+        let res = world_unc.fire_weapon(
+            head_pos + Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            WeaponKind::Rifle,
+        );
+        assert_eq!(res.hit_region, WoundRegion::Head);
+
+        for _ in 0..300 {
+            world_unc.step(1.0 / 60.0);
+            assert_ne!(
+                world_unc.ragdolls[unc_id].balance.state,
+                BehaviorState::Recovering,
+                "unconscious ragdoll must never enter Recovering"
+            );
+        }
+        assert_eq!(
+            world_unc.ragdolls[unc_id].balance.state,
+            BehaviorState::Unconscious
+        );
+    }
+
+    #[test]
+    fn test_earthquake_shakes_ragdoll_and_boxes() {
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+        let half = Vec3::splat(0.24);
+        let _b0 = world.spawn_box(Vec3::new(2.0, 0.24, 0.0), half, 20.0, Vec3::ZERO);
+        let top_box_idx = world.spawn_box(Vec3::new(2.0, 0.722, 0.0), half, 20.0, Vec3::ZERO);
+
+        let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+        let initial_pelvis = world.bodies[pelvis_idx].position;
+        let initial_box = world.bodies[top_box_idx].position;
+
+        world.set_earthquake(8.0);
+
+        let mut max_pelvis_disp = 0.0_f32;
+        let mut max_box_disp = 0.0_f32;
+        for _ in 0..90 {
+            world.step(1.0 / 60.0);
+            max_pelvis_disp =
+                max_pelvis_disp.max((world.bodies[pelvis_idx].position - initial_pelvis).length());
+            max_box_disp =
+                max_box_disp.max((world.bodies[top_box_idx].position - initial_box).length());
+            for (i, b) in world.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "body {i} produced NaN/Inf during earthquake"
+                );
+            }
+        }
+
+        assert!(
+            max_pelvis_disp > 0.05,
+            "earthquake did not shake ragdoll: max_pelvis_disp={max_pelvis_disp}"
+        );
+        assert!(
+            max_box_disp > 0.05,
+            "earthquake did not shake stacked box: max_box_disp={max_box_disp}"
         );
     }
 }

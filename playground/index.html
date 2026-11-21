@@ -152,6 +152,35 @@
                 <span id="muscle-mode-label">Active Muscle</span>
                 <span class="key-cap">M</span>
               </button>
+
+              <button class="hud-btn muscle-toggle active" id="btn-auto-getup" title="Toggle Automatic Get-Up Recovery (RECOVERING state)">
+                <span class="muscle-dot" id="auto-getup-dot"></span>
+                <span id="auto-getup-label">Auto Get-Up</span>
+                <span class="toggle-state" id="auto-getup-state">ON</span>
+              </button>
+            </div>
+          </aside>
+
+          <!-- Earthquake Seismic Control Panel -->
+          <aside class="hud-panel hud-earthquake" id="panel-earthquake" aria-label="Earthquake Generator">
+            <div class="panel-header">
+              <span class="panel-title">EARTHQUAKE</span>
+              <button class="collapse-btn" id="btn-quake-collapse" title="Collapse / Expand Earthquake" aria-expanded="true">▾</button>
+            </div>
+            <div class="quake-body" id="quake-body">
+              <div class="quake-preset-grid" role="group" aria-label="Earthquake Magnitude Presets">
+                <button class="hud-btn hud-btn-sm active" data-quake-preset="0" title="Disable seismic tremor">Off</button>
+                <button class="hud-btn hud-btn-sm" data-quake-preset="4.5" title="Moderate tremor (M 4.5)">M 4.5</button>
+                <button class="hud-btn hud-btn-sm" data-quake-preset="6.5" title="Strong earthquake (M 6.5)">M 6.5</button>
+                <button class="hud-btn hud-btn-sm" data-quake-preset="8.5" title="Catastrophic quake (M 8.5)">M 8.5</button>
+              </div>
+              <label class="slider-row" for="slider-quake">
+                <span class="slider-meta">
+                  <span>Magnitude</span>
+                  <span class="slider-val quake-val" id="val-quake">OFF</span>
+                </span>
+                <input id="slider-quake" type="range" min="0" max="9" step="0.5" value="0" />
+              </label>
             </div>
           </aside>
 

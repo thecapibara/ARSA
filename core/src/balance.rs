@@ -16,6 +16,7 @@ pub enum BehaviorState {
     Downed = 3,
     Passive = 4,
     Unconscious = 5,
+    Recovering = 6,
 }
 
 /// Per-ragdoll balance telemetry and capture-point stepping state.
@@ -29,6 +30,9 @@ pub struct BalanceState {
     pub right_foot_grounded: bool,
     pub airborne_time: f32,
     pub fallen_time: f32,
+    pub downed_still_time: f32,
+    pub recovery_phase: f32,
+    pub recovery_prone: bool,
     pub step_active: bool,
     pub swing_left: bool,
     pub step_phase: f32,
@@ -47,6 +51,9 @@ impl Default for BalanceState {
             right_foot_grounded: false,
             airborne_time: 0.0,
             fallen_time: 0.0,
+            downed_still_time: 0.0,
+            recovery_phase: 0.0,
+            recovery_prone: false,
             step_active: false,
             swing_left: false,
             step_phase: 0.0,
@@ -64,6 +71,7 @@ pub fn update_ragdoll_balance(
     joints: &mut [Joint],
     foot_contacts: (bool, bool),
     gravity_mag: f32,
+    quake_mag: f32,
     dt: f32,
 ) {
     if dt <= 0.0 {
@@ -129,6 +137,8 @@ pub fn update_ragdoll_balance(
             BehaviorState::Unconscious
         };
         ragdoll.balance.step_active = false;
+        ragdoll.balance.downed_still_time = 0.0;
+        ragdoll.balance.recovery_phase = 0.0;
         for &j_idx in &ragdoll.joint_indices {
             joints[j_idx].motor_stiffness = 0.0;
             joints[j_idx].motor_damping = 0.0;
@@ -166,22 +176,80 @@ pub fn update_ragdoll_balance(
     let com_vel_xz = Vec3::new(com_vel.x, 0.0, com_vel.z);
     let cp_offset = Vec3::new(cp_xz.x - mid_feet_xz.x, 0.0, cp_xz.z - mid_feet_xz.z).length();
 
-    let next_state = if pelvis_rel_y < 0.56 * ragdoll.standing_pelvis_y
+    let quake_crouch = if quake_mag >= 3.0 {
+        ((quake_mag - 3.0) / 5.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let can_recover = ragdoll.auto_get_up
+        && ragdoll.active_enabled
+        && !ragdoll.reflex.unconscious
+        && ragdoll.reflex.health > 18.0;
+
+    let next_state = if ragdoll.balance.state == BehaviorState::Recovering {
+        if !can_recover || com_vel.length() > 2.6 {
+            ragdoll.balance.recovery_phase = 0.0;
+            ragdoll.balance.downed_still_time = 0.0;
+            BehaviorState::Falling
+        } else {
+            let recovery_duration =
+                2.1 * s_h.sqrt() * (if ragdoll.reflex.health < 65.0 { 1.35 } else { 1.0 });
+            ragdoll.balance.recovery_phase += dt / recovery_duration;
+            if ragdoll.balance.recovery_phase >= 1.0 {
+                ragdoll.balance.recovery_phase = 0.0;
+                ragdoll.balance.downed_still_time = 0.0;
+                ragdoll.balance.fallen_time = 0.0;
+                let upright_and_high = pelvis_rel_y >= 0.68 * ragdoll.standing_pelvis_y
+                    && chest_up_dot >= 0.65
+                    && up_dot >= 0.65;
+                if upright_and_high && cp_offset <= 0.16 * s_h && com_vel_xz.length() <= 0.45 {
+                    BehaviorState::Balanced
+                } else {
+                    BehaviorState::Stumbling
+                }
+            } else {
+                BehaviorState::Recovering
+            }
+        }
+    } else if pelvis_rel_y < 0.56 * ragdoll.standing_pelvis_y
         || chest_up_dot < 0.45
         || up_dot < 0.35
     {
         ragdoll.balance.fallen_time += dt;
         if pelvis_rel_y < 0.40 * ragdoll.standing_pelvis_y && com_vel.length() < 0.6 {
-            BehaviorState::Downed
+            if ragdoll.balance.state == BehaviorState::Downed && com_vel.length() < 0.40 {
+                ragdoll.balance.downed_still_time += dt;
+            } else {
+                ragdoll.balance.downed_still_time = 0.0;
+            }
+            let required_delay =
+                if ragdoll.reflex.active_wound.is_some() || ragdoll.reflex.health < 75.0 {
+                    2.8
+                } else {
+                    1.5
+                };
+            if can_recover && ragdoll.balance.downed_still_time >= required_delay {
+                ragdoll.balance.recovery_phase = 0.0;
+                ragdoll.balance.recovery_prone = (bodies[chest_idx].orientation * Vec3::Z).y < 0.0;
+                BehaviorState::Recovering
+            } else {
+                BehaviorState::Downed
+            }
         } else {
+            ragdoll.balance.downed_still_time = 0.0;
             BehaviorState::Falling
         }
     } else if grounded_count == 0 && ragdoll.balance.airborne_time > 0.25 {
         ragdoll.balance.fallen_time += dt;
+        ragdoll.balance.downed_still_time = 0.0;
         BehaviorState::Falling
     } else {
         ragdoll.balance.fallen_time = 0.0;
-        if cp_offset > 0.16 * s_h || com_vel_xz.length() > 0.45 {
+        ragdoll.balance.downed_still_time = 0.0;
+        let cp_thresh = (0.16 - 0.08 * quake_crouch) * s_h;
+        let vel_thresh = 0.45 - 0.23 * quake_crouch;
+        if cp_offset > cp_thresh || com_vel_xz.length() > vel_thresh {
             BehaviorState::Stumbling
         } else {
             BehaviorState::Balanced
@@ -208,14 +276,15 @@ pub fn update_ragdoll_balance(
             let counter_pitch = (-local_vel.z * 0.10).clamp(-0.22, 0.22);
             let counter_roll = (local_vel.x * 0.10).clamp(-0.20, 0.20);
 
-            // Spine, chest, neck, head
+            // Spine, chest, neck, head (forward bracing crouch lean during earthquakes)
+            let quake_lean = 0.08 * quake_crouch;
             set_target(
                 ragdoll,
                 joints,
                 JointId::LowerSpine,
                 Quat::from_euler(
                     glam::EulerRot::XYZ,
-                    counter_pitch * 0.5 + sway,
+                    counter_pitch * 0.5 + sway + quake_lean,
                     0.0,
                     counter_roll * 0.5,
                 ),
@@ -226,7 +295,7 @@ pub fn update_ragdoll_balance(
                 JointId::ChestSpine,
                 Quat::from_euler(
                     glam::EulerRot::XYZ,
-                    counter_pitch * 0.6 + sway * 0.5,
+                    counter_pitch * 0.6 + sway * 0.5 + quake_lean,
                     0.0,
                     counter_roll * 0.6,
                 ),
@@ -235,20 +304,25 @@ pub fn update_ragdoll_balance(
                 ragdoll,
                 joints,
                 JointId::Neck,
-                Quat::from_rotation_x(-counter_pitch * 0.4),
+                Quat::from_rotation_x(-counter_pitch * 0.4 - quake_lean * 0.6),
             );
             set_target(
                 ragdoll,
                 joints,
                 JointId::Head,
-                Quat::from_rotation_x(-counter_pitch * 0.3),
+                Quat::from_rotation_x(-counter_pitch * 0.3 - quake_lean * 0.6),
             );
 
-            // Arms: relaxed standing bend, flaring outward/opposite velocity when stumbling
+            // Arms: relaxed standing bend, flaring outward/opposite velocity when stumbling or bracing in quake
             let is_stumbling = next_state == BehaviorState::Stumbling;
-            let flare = if is_stumbling { 0.48 } else { 0.10 };
+            let mut flare = if is_stumbling { 0.48 } else { 0.10 };
+            flare += 0.55 * quake_crouch;
             let arm_pitch_swing = (-local_vel.z * 0.25).clamp(-0.55, 0.55);
-            let elbow_bend = if is_stumbling { -0.55 } else { -0.25 };
+            let elbow_bend = if is_stumbling || quake_mag >= 3.0 {
+                -0.55
+            } else {
+                -0.25
+            };
 
             // Left arm (+X): +Z rotation flares outward
             set_target(
@@ -308,7 +382,7 @@ pub fn update_ragdoll_balance(
 
                 // Update step target in XZ around pelvis
                 let side_sign = if ragdoll.balance.swing_left { 1.0 } else { -1.0 };
-                let lat_offset = left_xz * (side_sign * 0.095 * s_w);
+                let lat_offset = left_xz * (side_sign * (0.095 + 0.06 * quake_crouch) * s_w);
                 let raw_target = cp_xz + com_vel_xz * 0.12 + lat_offset;
                 let pelvis_xz = Vec3::new(pelvis_pos.x, foot_ground_y, pelvis_pos.z);
                 let mut rel_target = raw_target - pelvis_xz;
@@ -349,10 +423,13 @@ pub fn update_ragdoll_balance(
                     )
                 };
 
-                // Stance leg keeps athletic knee bend & slight counter-brace
-                let stance_hip = Quat::from_rotation_x(-0.05);
-                let stance_knee = Quat::from_rotation_x(0.10);
-                let stance_ankle = Quat::from_rotation_x(-0.05);
+                // Stance leg keeps athletic knee bend & slight counter-brace (deepens during earthquakes)
+                let stance_hip_x = -0.05 - 0.28 * quake_crouch;
+                let stance_knee_x = 0.10 + 0.36 * quake_crouch;
+                let stance_ankle_x = -0.05 - 0.08 * quake_crouch;
+                let stance_hip = Quat::from_rotation_x(stance_hip_x);
+                let stance_knee = Quat::from_rotation_x(stance_knee_x);
+                let stance_ankle = Quat::from_rotation_x(stance_ankle_x);
 
                 if ragdoll.balance.swing_left {
                     set_target(ragdoll, joints, JointId::LeftHip, swing_hip);
@@ -377,17 +454,28 @@ pub fn update_ragdoll_balance(
             } else {
                 ragdoll.balance.step_active = false;
                 ragdoll.balance.step_phase = 0.0;
-                let stance_hip = Quat::from_rotation_x(-0.04);
-                let stance_knee = Quat::from_rotation_x(0.08);
-                let stance_ankle = Quat::from_rotation_x(-0.04);
-                for (hip, knee, ankle) in [
-                    (JointId::LeftHip, JointId::LeftKnee, JointId::LeftAnkle),
-                    (JointId::RightHip, JointId::RightKnee, JointId::RightAnkle),
-                ] {
-                    set_target(ragdoll, joints, hip, stance_hip);
-                    set_target(ragdoll, joints, knee, stance_knee);
-                    set_target(ragdoll, joints, ankle, stance_ankle);
-                }
+                let stance_hip_x = -0.04 - 0.28 * quake_crouch;
+                let stance_knee_x = 0.08 + 0.36 * quake_crouch;
+                let stance_ankle_x = -0.04 - 0.08 * quake_crouch;
+                let hip_abduct = 0.08 * quake_crouch;
+                let stance_knee = Quat::from_rotation_x(stance_knee_x);
+                let stance_ankle = Quat::from_rotation_x(stance_ankle_x);
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::LeftHip,
+                    Quat::from_euler(glam::EulerRot::XYZ, stance_hip_x, 0.0, hip_abduct),
+                );
+                set_target(ragdoll, joints, JointId::LeftKnee, stance_knee);
+                set_target(ragdoll, joints, JointId::LeftAnkle, stance_ankle);
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::RightHip,
+                    Quat::from_euler(glam::EulerRot::XYZ, stance_hip_x, 0.0, -hip_abduct),
+                );
+                set_target(ragdoll, joints, JointId::RightKnee, stance_knee);
+                set_target(ragdoll, joints, JointId::RightAnkle, stance_ankle);
             }
 
             // Virtual upright & CoM support ONLY when grounded
@@ -415,7 +503,8 @@ pub fn update_ragdoll_balance(
                 let rel_frac = pelvis_rel_y / ragdoll.standing_pelvis_y.max(0.2);
                 if (0.72..=1.08).contains(&rel_frac) && bodies[pelvis_idx].linear_velocity.y < 0.8 {
                     let height_fade = ((rel_frac - 0.72) / 0.12).clamp(0.0, 1.0);
-                    let target_y = foot_ground_y + 0.96 * ragdoll.standing_pelvis_y;
+                    let target_y =
+                        foot_ground_y + (0.96 - 0.10 * quake_crouch) * ragdoll.standing_pelvis_y;
                     let height_err = target_y - pelvis_pos.y;
                     let pelvis = &mut bodies[pelvis_idx];
                     let fy_raw = (total_mass * gravity_mag * 0.55
@@ -471,9 +560,9 @@ pub fn update_ragdoll_balance(
                 let pelvis = &mut bodies[pelvis_idx];
                 pelvis.linear_velocity += f_horiz * (dt * pelvis.inv_mass);
 
-                // Damp idle yaw spin & plant feet firmly on the floor when Balanced
+                // Damp idle yaw spin & plant feet firmly on the floor when Balanced (disabled during earthquakes >= 3.0)
                 // (prevents "hovercraft" sliding caused by vertical pelvis support unloading foot normal_lambda)
-                if !is_stumbling {
+                if !is_stumbling && quake_mag < 3.0 {
                     let foot_grip = (-35.0 * dt).exp();
                     let foot_yaw_grip = (-25.0 * dt).exp();
                     if foot_contacts.0 {
@@ -556,8 +645,373 @@ pub fn update_ragdoll_balance(
                 }
             }
         }
+        BehaviorState::Recovering => {
+            ragdoll.balance.step_active = false;
+            update_recovering_pose(
+                ragdoll,
+                bodies,
+                joints,
+                foot_contacts,
+                foot_ground_y,
+                total_mass,
+                gravity_mag,
+                s_h,
+                m_ratio,
+                h_ratio,
+                mu,
+                damp_scale,
+                com_pos,
+                com_vel_xz,
+                dt,
+            );
+        }
         BehaviorState::Passive | BehaviorState::Unconscious => {}
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_recovering_pose(
+    ragdoll: &RagdollInstance,
+    bodies: &mut [RigidBody],
+    joints: &mut [Joint],
+    foot_contacts: (bool, bool),
+    foot_ground_y: f32,
+    total_mass: f32,
+    gravity_mag: f32,
+    s_h: f32,
+    m_ratio: f32,
+    h_ratio: f32,
+    mu: f32,
+    damp_scale: f32,
+    com_pos: Vec3,
+    com_vel_xz: Vec3,
+    dt: f32,
+) {
+    let phase = ragdoll.balance.recovery_phase.clamp(0.0, 1.0);
+    let rec_strength = (ragdoll.reflex.health / 100.0).clamp(0.45, 1.0) * mu;
+    let pelvis_idx = ragdoll.body_indices[BoneId::Pelvis as usize];
+    let chest_idx = ragdoll.body_indices[BoneId::Chest as usize];
+    let pelvis_pos = bodies[pelvis_idx].position;
+    let grounded_count = (foot_contacts.0 as u8) + (foot_contacts.1 as u8);
+    let rec_ground_y = if grounded_count > 0 {
+        foot_ground_y
+    } else {
+        (pelvis_pos.y - 0.14 * s_h).min(foot_ground_y).max(0.0)
+    };
+
+    // Determine horizontal facing direction even when torso is lying flat
+    let chest_fwd = bodies[chest_idx].orientation * Vec3::Z;
+    let chest_fwd_xz = Vec3::new(chest_fwd.x, 0.0, chest_fwd.z);
+    let chest_up = bodies[chest_idx].orientation * Vec3::Y;
+    let chest_up_xz = Vec3::new(chest_up.x, 0.0, chest_up.z);
+    let pelvis_fwd = bodies[pelvis_idx].orientation * Vec3::Z;
+    let pelvis_fwd_xz = Vec3::new(pelvis_fwd.x, 0.0, pelvis_fwd.z);
+    let fwd_xz = if chest_fwd_xz.length_squared() > 0.12 {
+        chest_fwd_xz.normalize()
+    } else if pelvis_fwd_xz.length_squared() > 0.12 {
+        pelvis_fwd_xz.normalize()
+    } else if chest_up_xz.length_squared() > 1e-4 {
+        if ragdoll.balance.recovery_prone {
+            chest_up_xz.normalize()
+        } else {
+            -chest_up_xz.normalize()
+        }
+    } else {
+        Vec3::Z
+    };
+
+    let la_j = &joints[ragdoll.joint_indices[JointId::LeftAnkle as usize]];
+    let ra_j = &joints[ragdoll.joint_indices[JointId::RightAnkle as usize]];
+    let la_pos = bodies[la_j.child].world_point(la_j.anchor_child);
+    let ra_pos = bodies[ra_j.child].world_point(ra_j.anchor_child);
+    let mid_ankles_xz = Vec3::new(
+        0.5 * (la_pos.x + ra_pos.x),
+        foot_ground_y,
+        0.5 * (la_pos.z + ra_pos.z),
+    );
+    let support_center = match foot_contacts {
+        (true, true) => mid_ankles_xz,
+        (true, false) => Vec3::new(la_pos.x, foot_ground_y, la_pos.z),
+        (false, true) => Vec3::new(ra_pos.x, foot_ground_y, ra_pos.z),
+        (false, false) => mid_ankles_xz,
+    };
+
+    if phase < 0.38 {
+        // Phase 1 (0.0..0.38): Sit-Up / Push-Up Prep — ZERO pelvis levitation!
+        for &j_idx in &ragdoll.joint_indices {
+            joints[j_idx].motor_stiffness *= 0.75;
+            joints[j_idx].motor_damping *= 0.85;
+            joints[j_idx].max_torque *= 0.80;
+        }
+        for jid in [
+            JointId::LeftShoulder,
+            JointId::RightShoulder,
+            JointId::LeftElbow,
+            JointId::RightElbow,
+        ] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness *= 1.45;
+            j.max_torque *= 1.45;
+        }
+
+        if ragdoll.balance.recovery_prone {
+            set_target(ragdoll, joints, JointId::LowerSpine, Quat::from_rotation_x(-0.20));
+            set_target(ragdoll, joints, JointId::ChestSpine, Quat::from_rotation_x(-0.25));
+            set_target(ragdoll, joints, JointId::Neck, Quat::from_rotation_x(-0.20));
+            set_target(ragdoll, joints, JointId::Head, Quat::from_rotation_x(-0.35));
+
+            set_target(
+                ragdoll,
+                joints,
+                JointId::LeftShoulder,
+                Quat::from_euler(glam::EulerRot::XYZ, -1.05, 0.0, 0.30),
+            );
+            set_target(
+                ragdoll,
+                joints,
+                JointId::RightShoulder,
+                Quat::from_euler(glam::EulerRot::XYZ, -1.05, 0.0, -0.30),
+            );
+            set_target(ragdoll, joints, JointId::LeftElbow, Quat::from_rotation_x(-1.35));
+            set_target(ragdoll, joints, JointId::RightElbow, Quat::from_rotation_x(-1.35));
+
+            set_target(ragdoll, joints, JointId::LeftHip, Quat::from_rotation_x(-1.35));
+            set_target(ragdoll, joints, JointId::LeftKnee, Quat::from_rotation_x(1.75));
+            set_target(ragdoll, joints, JointId::LeftAnkle, Quat::from_rotation_x(-0.35));
+            set_target(ragdoll, joints, JointId::RightHip, Quat::from_rotation_x(-0.65));
+            set_target(ragdoll, joints, JointId::RightKnee, Quat::from_rotation_x(1.10));
+            set_target(ragdoll, joints, JointId::RightAnkle, Quat::from_rotation_x(-0.25));
+        } else {
+            // Supine sit-up curl: tuck knees tightly and reach arms down/back toward floor
+            set_target(ragdoll, joints, JointId::LowerSpine, Quat::from_rotation_x(0.55));
+            set_target(ragdoll, joints, JointId::ChestSpine, Quat::from_rotation_x(0.55));
+            set_target(ragdoll, joints, JointId::Neck, Quat::from_rotation_x(0.15));
+            set_target(ragdoll, joints, JointId::Head, Quat::from_rotation_x(0.35));
+
+            set_target(ragdoll, joints, JointId::LeftHip, Quat::from_rotation_x(-1.45));
+            set_target(ragdoll, joints, JointId::LeftKnee, Quat::from_rotation_x(1.80));
+            set_target(ragdoll, joints, JointId::LeftAnkle, Quat::from_rotation_x(-0.35));
+            set_target(ragdoll, joints, JointId::RightHip, Quat::from_rotation_x(-1.30));
+            set_target(ragdoll, joints, JointId::RightKnee, Quat::from_rotation_x(1.70));
+            set_target(ragdoll, joints, JointId::RightAnkle, Quat::from_rotation_x(-0.35));
+
+            set_target(
+                ragdoll,
+                joints,
+                JointId::LeftShoulder,
+                Quat::from_euler(glam::EulerRot::XYZ, 0.55, 0.0, 0.25),
+            );
+            set_target(
+                ragdoll,
+                joints,
+                JointId::RightShoulder,
+                Quat::from_euler(glam::EulerRot::XYZ, 0.55, 0.0, -0.25),
+            );
+            set_target(ragdoll, joints, JointId::LeftElbow, Quat::from_rotation_x(-0.45));
+            set_target(ragdoll, joints, JointId::RightElbow, Quat::from_rotation_x(-0.45));
+        }
+        set_target(ragdoll, joints, JointId::LeftWrist, Quat::IDENTITY);
+        set_target(ragdoll, joints, JointId::RightWrist, Quat::IDENTITY);
+
+        // Gentle forward-pitch torque on Chest only (no pelvis lift, no full upright on pelvis)
+        let pitch_p1 = 0.45_f32;
+        let target_up_p1 = (Vec3::Y * pitch_p1.cos() + fwd_xz * pitch_p1.sin()).normalize();
+        apply_pitched_upright_pd(
+            &mut bodies[chest_idx],
+            target_up_p1,
+            260.0 * m_ratio * h_ratio * rec_strength * 0.45,
+            18.0 * damp_scale * 0.70,
+            135.0 * m_ratio * h_ratio * rec_strength * 0.45,
+            dt,
+        );
+    } else if phase < 0.74 {
+        // Phase 2 (0.38..0.74): Deep Crouch / Half-Kneel — Torso LEANS FORWARD over feet!
+        let t2 = ((phase - 0.38) / 0.36).clamp(0.0, 1.0);
+        for &j_idx in &ragdoll.joint_indices {
+            joints[j_idx].motor_stiffness *= 0.90;
+            joints[j_idx].motor_damping *= 0.92;
+            joints[j_idx].max_torque *= 0.90;
+        }
+
+        // +0.42 rad total forward crouch lean
+        set_target(ragdoll, joints, JointId::LowerSpine, Quat::from_rotation_x(0.21));
+        set_target(ragdoll, joints, JointId::ChestSpine, Quat::from_rotation_x(0.21));
+        set_target(ragdoll, joints, JointId::Neck, Quat::from_rotation_x(-0.15));
+        set_target(ragdoll, joints, JointId::Head, Quat::from_rotation_x(-0.20));
+
+        // Deep asymmetric crouch/lunge legs
+        set_target(ragdoll, joints, JointId::LeftHip, Quat::from_rotation_x(-1.15));
+        set_target(ragdoll, joints, JointId::LeftKnee, Quat::from_rotation_x(1.45));
+        set_target(ragdoll, joints, JointId::LeftAnkle, Quat::from_rotation_x(-0.35));
+        set_target(ragdoll, joints, JointId::RightHip, Quat::from_rotation_x(-0.75));
+        set_target(ragdoll, joints, JointId::RightKnee, Quat::from_rotation_x(1.15));
+        set_target(ragdoll, joints, JointId::RightAnkle, Quat::from_rotation_x(-0.25));
+
+        // Arms reach forward/outward for counterbalance
+        set_target(
+            ragdoll,
+            joints,
+            JointId::LeftShoulder,
+            Quat::from_euler(glam::EulerRot::XYZ, -0.65, 0.0, 0.35),
+        );
+        set_target(
+            ragdoll,
+            joints,
+            JointId::RightShoulder,
+            Quat::from_euler(glam::EulerRot::XYZ, -0.65, 0.0, -0.35),
+        );
+        set_target(ragdoll, joints, JointId::LeftElbow, Quat::from_rotation_x(-0.65));
+        set_target(ragdoll, joints, JointId::RightElbow, Quat::from_rotation_x(-0.65));
+        set_target(ragdoll, joints, JointId::LeftWrist, Quat::IDENTITY);
+        set_target(ragdoll, joints, JointId::RightWrist, Quat::IDENTITY);
+
+        let pitch_p2 = 0.35_f32;
+        let target_up_p2 = (Vec3::Y * pitch_p2.cos() + fwd_xz * pitch_p2.sin()).normalize();
+        apply_pitched_upright_pd(
+            &mut bodies[pelvis_idx],
+            target_up_p2,
+            320.0 * m_ratio * h_ratio * rec_strength * 0.75,
+            22.0 * damp_scale * 0.85,
+            165.0 * m_ratio * h_ratio * rec_strength * 0.75,
+            dt,
+        );
+        apply_pitched_upright_pd(
+            &mut bodies[chest_idx],
+            target_up_p2,
+            260.0 * m_ratio * h_ratio * rec_strength * 0.75,
+            18.0 * damp_scale * 0.85,
+            135.0 * m_ratio * h_ratio * rec_strength * 0.75,
+            dt,
+        );
+
+        let target_y = rec_ground_y + (0.38 + 0.26 * t2) * ragdoll.standing_pelvis_y;
+        apply_recovery_lift(
+            &mut bodies[pelvis_idx],
+            target_y,
+            total_mass,
+            gravity_mag,
+            rec_strength,
+            dt,
+        );
+
+        // Shift CoM horizontally toward mid_ankles_xz so torso stays over the feet
+        let horiz_err = Vec3::new(mid_ankles_xz.x - com_pos.x, 0.0, mid_ankles_xz.z - com_pos.z);
+        let mut f_horiz =
+            (horiz_err * (total_mass * 9.0) - com_vel_xz * (total_mass * 6.0)) * rec_strength;
+        let max_f = total_mass * 4.5 * rec_strength;
+        let f_len = f_horiz.length();
+        if f_len > max_f && f_len > 1e-6 {
+            f_horiz *= max_f / f_len;
+        }
+        let pelvis = &mut bodies[pelvis_idx];
+        pelvis.linear_velocity += f_horiz * (dt * pelvis.inv_mass);
+    } else {
+        // Phase 3 (0.74..1.0): Rise from Crouch to Standing
+        let t3 = ((phase - 0.74) / 0.26).clamp(0.0, 1.0);
+        let spine_pitch = 0.21 * (1.0 - t3);
+        set_target(ragdoll, joints, JointId::LowerSpine, Quat::from_rotation_x(spine_pitch));
+        set_target(ragdoll, joints, JointId::ChestSpine, Quat::from_rotation_x(spine_pitch));
+        set_target(ragdoll, joints, JointId::Neck, Quat::from_rotation_x(-0.15 * (1.0 - t3)));
+        set_target(ragdoll, joints, JointId::Head, Quat::from_rotation_x(-0.20 * (1.0 - t3)));
+
+        let lh_x = -1.15 * (1.0 - t3) + (-0.05) * t3;
+        let lk_x = 1.45 * (1.0 - t3) + 0.10 * t3;
+        let la_x = -0.35 * (1.0 - t3) + (-0.05) * t3;
+        let rh_x = -0.75 * (1.0 - t3) + (-0.05) * t3;
+        let rk_x = 1.15 * (1.0 - t3) + 0.10 * t3;
+        let ra_x = -0.25 * (1.0 - t3) + (-0.05) * t3;
+
+        set_target(ragdoll, joints, JointId::LeftHip, Quat::from_rotation_x(lh_x));
+        set_target(ragdoll, joints, JointId::LeftKnee, Quat::from_rotation_x(lk_x));
+        set_target(ragdoll, joints, JointId::LeftAnkle, Quat::from_rotation_x(la_x));
+        set_target(ragdoll, joints, JointId::RightHip, Quat::from_rotation_x(rh_x));
+        set_target(ragdoll, joints, JointId::RightKnee, Quat::from_rotation_x(rk_x));
+        set_target(ragdoll, joints, JointId::RightAnkle, Quat::from_rotation_x(ra_x));
+
+        let arm_pitch = -0.65 * (1.0 - t3);
+        let arm_roll = 0.35 * (1.0 - t3) + 0.10 * t3;
+        let elbow_x = -0.65 * (1.0 - t3) + (-0.25) * t3;
+        set_target(
+            ragdoll,
+            joints,
+            JointId::LeftShoulder,
+            Quat::from_euler(glam::EulerRot::XYZ, arm_pitch, 0.0, arm_roll),
+        );
+        set_target(
+            ragdoll,
+            joints,
+            JointId::RightShoulder,
+            Quat::from_euler(glam::EulerRot::XYZ, arm_pitch, 0.0, -arm_roll),
+        );
+        set_target(ragdoll, joints, JointId::LeftElbow, Quat::from_rotation_x(elbow_x));
+        set_target(ragdoll, joints, JointId::RightElbow, Quat::from_rotation_x(elbow_x));
+        set_target(ragdoll, joints, JointId::LeftWrist, Quat::IDENTITY);
+        set_target(ragdoll, joints, JointId::RightWrist, Quat::IDENTITY);
+
+        let pitch_p3 = 0.35 * (1.0 - t3);
+        let target_up_p3 = (Vec3::Y * pitch_p3.cos() + fwd_xz * pitch_p3.sin()).normalize();
+        apply_pitched_upright_pd(
+            &mut bodies[pelvis_idx],
+            target_up_p3,
+            320.0 * m_ratio * h_ratio * rec_strength,
+            22.0 * damp_scale,
+            165.0 * m_ratio * h_ratio * rec_strength,
+            dt,
+        );
+        apply_pitched_upright_pd(
+            &mut bodies[chest_idx],
+            target_up_p3,
+            260.0 * m_ratio * h_ratio * rec_strength,
+            18.0 * damp_scale,
+            135.0 * m_ratio * h_ratio * rec_strength,
+            dt,
+        );
+
+        let target_y = rec_ground_y + (0.64 + 0.30 * t3) * ragdoll.standing_pelvis_y;
+        apply_recovery_lift(
+            &mut bodies[pelvis_idx],
+            target_y,
+            total_mass,
+            gravity_mag,
+            rec_strength,
+            dt,
+        );
+
+        if grounded_count > 0 {
+            let horiz_err =
+                Vec3::new(support_center.x - com_pos.x, 0.0, support_center.z - com_pos.z);
+            let mut f_horiz =
+                (horiz_err * (total_mass * 4.5) - com_vel_xz * (total_mass * 6.5)) * rec_strength;
+            let max_f = total_mass * 2.0 * rec_strength;
+            let f_len = f_horiz.length();
+            if f_len > max_f && f_len > 1e-6 {
+                f_horiz *= max_f / f_len;
+            }
+            let pelvis = &mut bodies[pelvis_idx];
+            pelvis.linear_velocity += f_horiz * (dt * pelvis.inv_mass);
+        }
+    }
+}
+
+fn apply_recovery_lift(
+    pelvis: &mut RigidBody,
+    target_y: f32,
+    total_mass: f32,
+    gravity_mag: f32,
+    rec_strength: f32,
+    dt: f32,
+) {
+    if pelvis.inv_mass == 0.0 || pelvis.linear_velocity.y >= 0.75 {
+        return;
+    }
+    let height_err = target_y - pelvis.position.y;
+    let fy_raw = (total_mass * gravity_mag * 0.75
+        + height_err * (total_mass * 32.0)
+        - pelvis.linear_velocity.y * (total_mass * 6.0))
+        * rec_strength;
+    let max_fy = total_mass * gravity_mag * 1.15 * rec_strength;
+    let fy = fy_raw.clamp(0.0, max_fy);
+    pelvis.linear_velocity.y += (fy * dt) * pelvis.inv_mass;
 }
 
 #[inline]
@@ -609,17 +1063,28 @@ fn apply_upright_pd(
     max_torque: f32,
     dt: f32,
 ) {
+    apply_pitched_upright_pd(body, Vec3::Y, stiffness, damping, max_torque, dt);
+}
+
+fn apply_pitched_upright_pd(
+    body: &mut RigidBody,
+    target_up: Vec3,
+    stiffness: f32,
+    damping: f32,
+    max_torque: f32,
+    dt: f32,
+) {
     if body.inv_mass == 0.0 || stiffness <= 0.0 || max_torque <= 0.0 {
         return;
     }
 
     let current_up = (body.orientation * Vec3::Y).normalize_or_zero();
-    if current_up.length_squared() < 1e-6 {
+    let target_up_n = target_up.normalize_or_zero();
+    if current_up.length_squared() < 1e-6 || target_up_n.length_squared() < 1e-6 {
         return;
     }
 
-    let q_upright = Quat::from_rotation_arc(current_up, Vec3::Y) * body.orientation;
-    let mut q_err = q_upright * body.orientation.conjugate();
+    let mut q_err = Quat::from_rotation_arc(current_up, target_up_n);
     if q_err.w < 0.0 {
         q_err = -q_err;
     }
@@ -631,10 +1096,10 @@ fn apply_upright_pd(
         Vec3::ZERO
     };
 
-    // Correct pitch & roll only so yaw turns freely
-    let err_xz = Vec3::new(err_vec.x, 0.0, err_vec.z);
-    let omega_xz = Vec3::new(body.angular_velocity.x, 0.0, body.angular_velocity.z);
-    let raw_tau = err_xz * stiffness - omega_xz * damping;
+    // Correct tilt perpendicular to target_up so yaw/spin around target axis turns freely
+    let err_perp = err_vec - target_up_n * err_vec.dot(target_up_n);
+    let omega_perp = body.angular_velocity - target_up_n * body.angular_velocity.dot(target_up_n);
+    let raw_tau = err_perp * stiffness - omega_perp * damping;
     let raw_mag = raw_tau.length();
     if raw_mag < 1e-9 {
         return;

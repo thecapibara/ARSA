@@ -22,6 +22,8 @@ type ArsaSimExt = ArsaSim & {
   ) => number;
   place_sphere?: (x: number, z: number, radius: number, mass: number) => number;
   take_explosions?: () => Float32Array;
+  set_auto_get_up?: (enabled: boolean) => void;
+  set_earthquake?: (magnitude: number) => void;
 };
 
 type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
@@ -98,6 +100,7 @@ const STATE_BADGES: Array<{ label: string; cls: string }> = [
   { label: 'DOWNED', cls: 'state-downed' },
   { label: 'PASSIVE', cls: 'state-passive' },
   { label: 'UNCONSCIOUS', cls: 'state-unconscious' },
+  { label: 'RECOVERING', cls: 'state-recovering' },
 ];
 
 const WOUND_LABELS = [
@@ -124,6 +127,8 @@ class PlaygroundApp {
   private timeScale = 1.0;
   private paused = false;
   private activeMuscleMode = true;
+  private autoGetUpEnabled = true;
+  private earthquakeMagnitude = 0;
   private debugTelemetry = true;
 
   private bodyProfile: BodyProfile = { ...PROFILE_PRESETS.standard };
@@ -171,6 +176,13 @@ class PlaygroundApp {
   private readonly debugTelemetryBtn = document.getElementById('btn-debug-telemetry')!;
   private readonly activeModeBtn = document.getElementById('btn-active-mode')!;
   private readonly muscleModeLabel = document.getElementById('muscle-mode-label')!;
+  private readonly autoGetUpBtn = document.getElementById('btn-auto-getup')!;
+  private readonly autoGetUpState = document.getElementById('auto-getup-state')!;
+  private readonly earthquakePanel = document.getElementById('panel-earthquake')!;
+  private readonly sliderQuake = document.getElementById(
+    'slider-quake'
+  ) as HTMLInputElement;
+  private readonly valQuake = document.getElementById('val-quake')!;
 
   private readonly sliderHeight = document.getElementById('slider-height') as HTMLInputElement;
   private readonly sliderMass = document.getElementById('slider-mass') as HTMLInputElement;
@@ -208,6 +220,8 @@ class PlaygroundApp {
     this.setTool('grab');
     this.syncProfileUi();
     this.setActiveMuscleMode(true);
+    this.setAutoGetUp(true);
+    this.setEarthquakeMagnitude(0);
     this.setDebugTelemetry(true);
     this.setCameraMode('orbit');
   }
@@ -247,6 +261,12 @@ class PlaygroundApp {
 
     if (typeof this.sim.set_active_mode === 'function') {
       this.sim.set_active_mode(this.activeMuscleMode);
+    }
+    if (typeof this.sim.set_auto_get_up === 'function') {
+      this.sim.set_auto_get_up(this.autoGetUpEnabled);
+    }
+    if (typeof this.sim.set_earthquake === 'function') {
+      this.sim.set_earthquake(this.earthquakeMagnitude);
     }
 
     this.lab.syncStaticBoxes(this.sim.get_static_boxes());
@@ -363,6 +383,43 @@ class PlaygroundApp {
       : 'Passive Ragdoll';
   }
 
+  private setAutoGetUp(enabled: boolean): void {
+    this.autoGetUpEnabled = enabled;
+    if (this.sim && typeof this.sim.set_auto_get_up === 'function') {
+      this.sim.set_auto_get_up(enabled);
+    }
+    this.autoGetUpBtn.classList.toggle('active', enabled);
+    this.autoGetUpBtn.setAttribute('aria-pressed', String(enabled));
+    this.autoGetUpState.textContent = enabled ? 'ON' : 'OFF';
+  }
+
+  private setEarthquakeMagnitude(magnitude: number): void {
+    const clamped = Math.max(0, Math.min(9, Math.round(magnitude * 2) / 2));
+    this.earthquakeMagnitude = clamped;
+    if (this.sim && typeof this.sim.set_earthquake === 'function') {
+      this.sim.set_earthquake(clamped);
+    }
+
+    this.sliderQuake.value = clamped.toFixed(1);
+    const active = clamped > 0.1;
+    this.valQuake.textContent = active ? `M ${clamped.toFixed(1)}` : 'OFF';
+    this.earthquakePanel.classList.toggle('quake-active', active);
+
+    document
+      .querySelectorAll<HTMLButtonElement>('[data-quake-preset]')
+      .forEach((btn) => {
+        const preset = Number(btn.dataset.quakePreset);
+        btn.classList.toggle('active', Math.abs(preset - clamped) < 0.05);
+      });
+
+    this.syncEarthquakeEffects();
+  }
+
+  private syncEarthquakeEffects(): void {
+    this.lab.setEarthquakeIntensity(this.earthquakeMagnitude);
+    this.audio.setEarthquakeRumble(this.earthquakeMagnitude, !this.paused);
+  }
+
   private applyProfilePreset(key: ProfilePresetKey): void {
     this.bodyProfile = { ...PROFILE_PRESETS[key] };
     this.syncProfileUi();
@@ -437,6 +494,8 @@ class PlaygroundApp {
     this.paused = paused;
     this.pauseBtn.classList.toggle('active', paused);
     this.statusDot.classList.toggle('paused', paused);
+    this.lab.setSimulationPaused(paused);
+    this.syncEarthquakeEffects();
     this.updateTimeReadout();
   }
 
@@ -468,6 +527,9 @@ class PlaygroundApp {
 
     if (typeof this.sim.set_active_mode === 'function') {
       this.sim.set_active_mode(this.activeMuscleMode);
+    }
+    if (typeof this.sim.set_auto_get_up === 'function') {
+      this.sim.set_auto_get_up(this.autoGetUpEnabled);
     }
     this.syncSimulationView();
   }
@@ -815,6 +877,9 @@ class PlaygroundApp {
         if (typeof this.sim.set_active_mode === 'function') {
           this.sim.set_active_mode(this.activeMuscleMode);
         }
+        if (typeof this.sim.set_auto_get_up === 'function') {
+          this.sim.set_auto_get_up(this.autoGetUpEnabled);
+        }
         this.audio.playBoxDrop();
         break;
       }
@@ -1055,6 +1120,28 @@ class PlaygroundApp {
       this.activeModeBtn.blur();
     });
 
+    this.autoGetUpBtn.addEventListener('click', () => {
+      this.setAutoGetUp(!this.autoGetUpEnabled);
+      this.autoGetUpBtn.blur();
+    });
+
+    document
+      .querySelectorAll<HTMLButtonElement>('[data-quake-preset]')
+      .forEach((btn) => {
+        btn.addEventListener('click', () => {
+          this.audio.unlock();
+          const mag = Number(btn.dataset.quakePreset);
+          if (!Number.isNaN(mag)) this.setEarthquakeMagnitude(mag);
+          btn.blur();
+        });
+      });
+
+    this.sliderQuake.addEventListener('input', () => {
+      this.audio.unlock();
+      const mag = Number(this.sliderQuake.value);
+      if (!Number.isNaN(mag)) this.setEarthquakeMagnitude(mag);
+    });
+
     this.audioToggleBtn.addEventListener('click', () => {
       this.audio.unlock();
       const muted = this.audio.toggleMute();
@@ -1090,6 +1177,7 @@ class PlaygroundApp {
     this.sliderStrength.addEventListener('input', onSliderInput);
 
     this.bindCollapsible('btn-profile-collapse', 'profile-body');
+    this.bindCollapsible('btn-quake-collapse', 'quake-body');
     this.bindCollapsible('btn-legend-collapse', 'legend-body');
 
     this.pauseBtn.addEventListener('click', () => {

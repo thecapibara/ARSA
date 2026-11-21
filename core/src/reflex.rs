@@ -107,6 +107,12 @@ impl RagdollInstance {
             severity: sev,
             time_since_hit: 0.0,
         });
+
+        self.balance.downed_still_time = 0.0;
+        if self.balance.state == BehaviorState::Recovering {
+            self.balance.recovery_phase = 0.0;
+            self.balance.state = BehaviorState::Falling;
+        }
     }
 }
 

@@ -241,6 +241,13 @@ body,
   box-shadow: 0 0 10px rgba(190, 24, 93, 0.25);
 }
 
+.state-badge.state-recovering {
+  color: #2dd4bf;
+  background: rgba(45, 212, 191, 0.16);
+  border-color: rgba(45, 212, 191, 0.5);
+  box-shadow: 0 0 10px rgba(45, 212, 191, 0.22);
+}
+
 /* Vital Telemetry: Health Bar & Wound Indicator */
 .vital-telemetry-bar {
   display: flex;
@@ -389,6 +396,7 @@ body,
 }
 
 .hud-profile,
+.hud-earthquake,
 .hud-legend {
   width: 100%;
   padding: 10px 13px;
@@ -532,6 +540,51 @@ input[type='range']::-moz-range-thumb {
 .muscle-toggle.active .muscle-dot {
   background: var(--status-ok);
   box-shadow: 0 0 8px rgba(52, 211, 153, 0.7);
+}
+
+.toggle-state {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  padding: 1px 5px;
+  line-height: 1.3;
+}
+
+.muscle-toggle.active .toggle-state {
+  color: #2dd4bf;
+  background: rgba(45, 212, 191, 0.14);
+  border-color: rgba(45, 212, 191, 0.42);
+}
+
+.quake-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.quake-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.quake-preset-grid .hud-btn {
+  justify-content: center;
+  padding: 4px 3px;
+  font-size: 10.5px;
+}
+
+.hud-earthquake.quake-active {
+  border-color: rgba(232, 148, 44, 0.38);
+}
+
+.hud-earthquake.quake-active .quake-val {
+  color: var(--accent-amber);
 }
 
 .legend-list {

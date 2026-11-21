@@ -205,6 +205,13 @@ export class LabScene {
   private readonly tempVecC = new THREE.Vector3();
   private readonly tempEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 
+  // Earthquake camera shake state (applied transiently around render)
+  private earthquakeMagnitude = 0;
+  private simulationPaused = false;
+  private shakeTime = 0;
+  private readonly shakeOffset = new THREE.Vector3();
+  private readonly preShakeCamPos = new THREE.Vector3();
+
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x14181f);
@@ -1806,8 +1813,19 @@ export class LabScene {
     }
   }
 
+  public setEarthquakeIntensity(magnitude: number): void {
+    this.earthquakeMagnitude = Math.max(0, Math.min(9, magnitude));
+  }
+
+  public setSimulationPaused(paused: boolean): void {
+    this.simulationPaused = paused;
+  }
+
   public updateEffects(dt: number): void {
     this.fxTime += dt;
+    if (this.earthquakeMagnitude > 0.1 && !this.simulationPaused) {
+      this.shakeTime += dt;
+    }
 
     // Flicker active dynamite fuse tips
     for (const tip of this.dynamiteFuseTips) {
@@ -1975,6 +1993,24 @@ export class LabScene {
   }
 
   public render(): void {
+    if (this.earthquakeMagnitude > 0.1 && !this.simulationPaused) {
+      const t = this.shakeTime;
+      const amp =
+        0.0015 + Math.pow(this.earthquakeMagnitude / 9.0, 2.5) * 0.052;
+      this.shakeOffset.set(
+        (Math.sin(t * 47.3) * 0.6 + Math.sin(t * 73.1 + 1.3) * 0.4) * amp,
+        (Math.sin(t * 53.7 + 0.7) * 0.65 + Math.cos(t * 89.2) * 0.35) *
+          amp *
+          0.85,
+        (Math.cos(t * 41.9 + 2.1) * 0.6 + Math.sin(t * 67.4) * 0.4) * amp
+      );
+      this.preShakeCamPos.copy(this.camera.position);
+      this.camera.position.add(this.shakeOffset);
+      this.renderer.render(this.scene, this.camera);
+      this.camera.position.copy(this.preShakeCamPos);
+      return;
+    }
+
     this.renderer.render(this.scene, this.camera);
   }
 }

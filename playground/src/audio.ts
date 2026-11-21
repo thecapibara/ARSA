@@ -10,6 +10,13 @@ export class TacticalAudio {
   private noiseBuffer: AudioBuffer | null = null;
   private muted = false;
 
+  // Continuous seismic rumble graph
+  private quakeMagnitude = 0;
+  private quakeActive = false;
+  private quakeMasterGain: GainNode | null = null;
+  private quakeFilter: BiquadFilterNode | null = null;
+  private quakeSubOsc: OscillatorNode | null = null;
+
   /**
    * Unlocks and resumes the AudioContext on a user gesture.
    */
@@ -18,6 +25,7 @@ export class TacticalAudio {
     if (ctx && ctx.state === 'suspended') {
       void ctx.resume();
     }
+    this.updateEarthquakeRumble();
   }
 
   public isMuted(): boolean {
@@ -32,6 +40,7 @@ export class TacticalAudio {
         this.ctx.currentTime
       );
     }
+    this.updateEarthquakeRumble();
   }
 
   public toggleMute(): boolean {
@@ -319,6 +328,125 @@ export class TacticalAudio {
         gain: 0.34 - i * 0.045,
       });
     }
+  }
+
+  /**
+   * Smoothly fades in/out continuous low-pass seismic rumble (40-75 Hz brown noise
+   * + sub-oscillator) proportional to Richter magnitude, silencing cleanly when
+   * paused, muted, or set to 0.
+   */
+  public setEarthquakeRumble(magnitude: number, active: boolean): void {
+    this.quakeMagnitude = Math.max(0, Math.min(9, magnitude));
+    this.quakeActive = active;
+    this.updateEarthquakeRumble();
+  }
+
+  private updateEarthquakeRumble(): void {
+    const shouldPlay =
+      !this.muted && this.quakeActive && this.quakeMagnitude > 0.1;
+
+    if (!shouldPlay && !this.quakeMasterGain) {
+      return;
+    }
+
+    const ctx = shouldPlay ? this.activeContext() : this.ctx;
+    if (!ctx) return;
+
+    if (shouldPlay && !this.quakeMasterGain) {
+      this.initEarthquakeRumbleNodes(ctx);
+    }
+
+    if (!this.quakeMasterGain || !this.quakeFilter || !this.quakeSubOsc) {
+      return;
+    }
+
+    const now = ctx.currentTime;
+    this.quakeMasterGain.gain.cancelScheduledValues(now);
+    this.quakeFilter.frequency.cancelScheduledValues(now);
+    this.quakeSubOsc.frequency.cancelScheduledValues(now);
+
+    if (shouldPlay) {
+      const norm = Math.pow(this.quakeMagnitude / 9, 1.5);
+      const targetGain = 0.08 + norm * 0.72;
+      const cutoffHz = 40 + norm * 35;
+      const subHz = 28 + norm * 16;
+
+      this.quakeMasterGain.gain.setTargetAtTime(targetGain, now, 0.08);
+      this.quakeFilter.frequency.setTargetAtTime(cutoffHz, now, 0.08);
+      this.quakeSubOsc.frequency.setTargetAtTime(subHz, now, 0.08);
+    } else {
+      this.quakeMasterGain.gain.setTargetAtTime(0, now, 0.05);
+    }
+  }
+
+  private initEarthquakeRumbleNodes(ctx: AudioContext): void {
+    if (!this.compressor) return;
+
+    // 2.5s seamless brown-noise loop buffer for deep tectonic rumble
+    const length = Math.floor(ctx.sampleRate * 2.5);
+    const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let lastOut = 0;
+    for (let i = 0; i < length; i++) {
+      const white = Math.random() * 2 - 1;
+      lastOut = (lastOut + 0.025 * white) / 1.025;
+      data[i] = Math.max(-1, Math.min(1, lastOut * 3.2));
+    }
+    const crossfade = Math.min(512, Math.floor(length / 8));
+    for (let i = 0; i < crossfade; i++) {
+      const alpha = i / crossfade;
+      const tailIdx = length - crossfade + i;
+      data[i] = data[i] * alpha + data[tailIdx] * (1 - alpha);
+    }
+
+    const noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = buffer;
+    noiseSrc.loop = true;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 52;
+    filter.Q.value = 1.35;
+
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.value = 0.85;
+
+    const subOsc = ctx.createOscillator();
+    subOsc.type = 'sine';
+    subOsc.frequency.value = 34;
+
+    const subGain = ctx.createGain();
+    subGain.gain.value = 0.34;
+
+    const lfo = ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 4.2;
+
+    const lfoGain = ctx.createGain();
+    lfoGain.gain.value = 10;
+
+    const master = ctx.createGain();
+    master.gain.value = 0;
+
+    lfo.connect(lfoGain);
+    lfoGain.connect(filter.frequency);
+
+    noiseSrc.connect(filter);
+    filter.connect(noiseGain);
+    noiseGain.connect(master);
+
+    subOsc.connect(subGain);
+    subGain.connect(master);
+
+    master.connect(this.compressor);
+
+    noiseSrc.start();
+    subOsc.start();
+    lfo.start();
+
+    this.quakeMasterGain = master;
+    this.quakeFilter = filter;
+    this.quakeSubOsc = subOsc;
   }
 
   private ensureContext(): AudioContext | null {

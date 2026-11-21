@@ -242,6 +242,21 @@ impl ArsaSim {
         self.world.set_all_ragdolls_active(enabled);
     }
 
+    /// Enables or disables automatic procedural get-up from `Downed` for all ragdolls.
+    pub fn set_auto_get_up(&mut self, enabled: bool) {
+        self.world.set_all_ragdolls_auto_get_up(enabled);
+    }
+
+    /// Sets earthquake seismic magnitude (`0.0..=9.0`, `0.0` disables).
+    pub fn set_earthquake(&mut self, magnitude: f32) {
+        self.world.set_earthquake(magnitude);
+    }
+
+    /// Returns the current earthquake seismic magnitude (`0.0..=9.0`).
+    pub fn get_earthquake(&self) -> f32 {
+        self.world.earthquake_magnitude
+    }
+
     /// Updates the anthropometric body profile of all spawned ragdolls in-place
     /// without resetting the scene.
     pub fn update_all_ragdolls_profile(

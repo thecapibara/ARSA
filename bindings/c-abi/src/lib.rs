@@ -189,6 +189,28 @@ pub unsafe extern "C" fn arsa_world_set_active(handle: *mut ArsaWorldHandle, ena
     }
 }
 
+/// Enables or disables automatic procedural get-up from `Downed` for all ragdolls in the world.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_auto_get_up(handle: *mut ArsaWorldHandle, enabled: bool) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.set_all_ragdolls_auto_get_up(enabled);
+    }
+}
+
+/// Sets the earthquake seismic magnitude (`0.0..=9.0`, `0.0` disables).
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_earthquake(handle: *mut ArsaWorldHandle, magnitude: f32) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.set_earthquake(magnitude);
+    }
+}
+
 /// Spawns a dynamic rigid-body box and returns its body index (`usize::MAX` on null).
 ///
 /// # Safety

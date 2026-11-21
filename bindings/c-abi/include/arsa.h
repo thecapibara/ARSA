@@ -86,7 +86,8 @@ typedef enum ArsaBehaviorState {
     ARSA_STATE_FALLING = 2,
     ARSA_STATE_DOWNED = 3,
     ARSA_STATE_PASSIVE = 4,
-    ARSA_STATE_UNCONSCIOUS = 5
+    ARSA_STATE_UNCONSCIOUS = 5,
+    ARSA_STATE_RECOVERING = 6
 } ArsaBehaviorState;
 
 /** Anatomical wound region reported in telemetry[12]. */
@@ -144,6 +145,12 @@ void arsa_world_update_all_profiles(
 
 /** Enables or disables active balance and muscle motors for all ragdolls in the world. */
 void arsa_world_set_active(ArsaWorldHandle *handle, bool enabled);
+
+/** Enables or disables automatic procedural get-up from Downed for all ragdolls in the world. */
+void arsa_world_set_auto_get_up(ArsaWorldHandle *handle, bool enabled);
+
+/** Sets the earthquake seismic magnitude (0.0 .. 9.0, 0.0 disables). */
+void arsa_world_set_earthquake(ArsaWorldHandle *handle, float magnitude);
 
 /** Spawns a dynamic rigid-body box and returns its body index (SIZE_MAX on null). */
 size_t arsa_world_spawn_box(

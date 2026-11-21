@@ -92,6 +92,8 @@ pub struct ArsaWorld {
     pub grab: Option<GrabConstraint>,
     pub dynamites: Vec<DynamiteTimer>,
     pub pending_explosions: Vec<ExplosionEvent>,
+    pub earthquake_magnitude: f32,
+    earthquake_time: f32,
     connected_pairs: HashSet<(usize, usize)>,
 }
 
@@ -117,6 +119,8 @@ impl ArsaWorld {
             grab: None,
             dynamites: Vec::new(),
             pending_explosions: Vec::new(),
+            earthquake_magnitude: 0.0,
+            earthquake_time: 0.0,
             connected_pairs: HashSet::new(),
         }
     }
@@ -131,6 +135,7 @@ impl ArsaWorld {
         self.grab = None;
         self.dynamites.clear();
         self.pending_explosions.clear();
+        self.earthquake_time = 0.0;
         self.connected_pairs.clear();
     }
 
@@ -210,6 +215,22 @@ impl ArsaWorld {
         for r in &mut self.ragdolls {
             r.active_enabled = active;
         }
+    }
+
+    /// Enables or disables automatic procedural get-up from `Downed` for all ragdolls in the world.
+    pub fn set_all_ragdolls_auto_get_up(&mut self, enabled: bool) {
+        for r in &mut self.ragdolls {
+            r.auto_get_up = enabled;
+        }
+    }
+
+    /// Sets the earthquake seismic magnitude (`0.0..=9.0`, `0.0` disables).
+    pub fn set_earthquake(&mut self, magnitude: f32) {
+        self.earthquake_magnitude = if magnitude.is_finite() {
+            magnitude.clamp(0.0, 9.0)
+        } else {
+            0.0
+        };
     }
 
     /// Updates the anthropometric body profile of all ragdolls in-place without resetting the scene.
@@ -447,6 +468,35 @@ impl ArsaWorld {
                 }
             }
 
+            // Apply seismic ground shaking to near-ground dynamic bodies
+            if self.earthquake_magnitude > 0.1 {
+                self.earthquake_time += sub_dt;
+                let t = self.earthquake_time;
+                let norm = ((self.earthquake_magnitude - 2.0) / 7.0).clamp(0.0, 1.0);
+                let amp = norm * norm * 22.0;
+                let ax = amp
+                    * (0.55 * (t * 3.8).sin()
+                        + 0.30 * (t * 9.7 + 0.7).cos()
+                        + 0.25 * (t * 19.3).sin());
+                let az = amp
+                    * (0.55 * (t * 3.1 + 1.4).cos()
+                        + 0.30 * (t * 8.3).sin()
+                        + 0.25 * (t * 17.1 + 2.1).cos());
+                let ay = amp * 0.28 * (t * 11.5).sin();
+                let base_dv = Vec3::new(ax, ay, az) * sub_dt;
+                for b in &mut self.bodies {
+                    if b.inv_mass > 0.0 && b.position.y < 2.2 {
+                        let horiz_scale = if b.position.y < 0.6 { 1.25 } else { 0.65 };
+                        let vert_scale = if b.position.y < 0.6 { 1.0 } else { 0.65 };
+                        b.linear_velocity += Vec3::new(
+                            base_dv.x * horiz_scale,
+                            base_dv.y * vert_scale,
+                            base_dv.z * horiz_scale,
+                        );
+                    }
+                }
+            }
+
             // Apply interactive grab constraint spring-damper force
             if let Some(grab) = &self.grab {
                 if let Some(body) = self.bodies.get_mut(grab.body_idx) {
@@ -477,6 +527,7 @@ impl ArsaWorld {
                     &mut self.joints,
                     foot_contacts[r_idx],
                     gravity_mag,
+                    self.earthquake_magnitude,
                     sub_dt,
                 );
                 apply_procedural_reflexes(ragdoll, &mut self.bodies, &mut self.joints, sub_dt);
