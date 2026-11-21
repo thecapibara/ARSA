@@ -760,6 +760,71 @@ impl ArsaWorld {
         body.angular_velocity += dw;
     }
 
+    /// Applies an instantaneous world-space `impulse` to a ragdoll bone while capping
+    /// per-bone `delta_v` and `delta_omega` (preventing light bones like `Neck` 1.5kg or
+    /// `Hand` 0.45kg from launching into supersonic backflips). Any clipped excess impulse
+    /// scaled by `overflow_to_torso_ratio` is transferred to the ragdoll's `Chest`.
+    fn apply_clamped_ragdoll_impulse(
+        &mut self,
+        body_idx: usize,
+        impulse: Vec3,
+        world_point: Vec3,
+        max_dv: f32,
+        max_dw: f32,
+        overflow_to_torso_ratio: f32,
+    ) {
+        if !impulse.is_finite() || !world_point.is_finite() {
+            return;
+        }
+        let Some(body) = self.bodies.get(body_idx) else {
+            return;
+        };
+        if body.inv_mass == 0.0 {
+            return;
+        }
+        let ragdoll_id = body.ragdoll_id;
+        let Some(r_id) = ragdoll_id else {
+            self.apply_impulse_at_point(body_idx, impulse, world_point);
+            return;
+        };
+
+        let imp_len = impulse.length();
+        if imp_len < 1e-9 {
+            return;
+        }
+        let max_imp = (body.mass * max_dv).max(1e-4);
+        let (applied_imp, overflow_imp) = if imp_len > max_imp {
+            let capped = impulse * (max_imp / imp_len);
+            (capped, impulse - capped)
+        } else {
+            (impulse, Vec3::ZERO)
+        };
+
+        {
+            let b = &mut self.bodies[body_idx];
+            let r = world_point - b.position;
+            b.linear_velocity += applied_imp * b.inv_mass;
+            let mut dw = b.inv_inertia_world_mul(r.cross(applied_imp));
+            let dw_len = dw.length();
+            if dw_len > max_dw && dw_len > 1e-6 {
+                dw *= max_dw / dw_len;
+            }
+            b.angular_velocity += dw;
+        }
+
+        if overflow_to_torso_ratio > 0.0 && overflow_imp.length_squared() > 1e-8 {
+            let chest_idx = self.ragdolls[r_id].body_indices[BoneId::Chest as usize];
+            if chest_idx != body_idx {
+                let chest_pos = self.bodies[chest_idx].position;
+                self.apply_impulse_at_point(
+                    chest_idx,
+                    overflow_imp * overflow_to_torso_ratio,
+                    chest_pos,
+                );
+            }
+        }
+    }
+
     /// Raycasts from `origin` along `dir` and applies a broad two-handed shove impulse
     /// distributed across the hit bone, Chest, and Pelvis when hitting a ragdoll.
     pub fn apply_shove(&mut self, origin: Vec3, dir: Vec3, strength: f32) -> Option<RaycastHit> {
@@ -776,7 +841,14 @@ impl ArsaWorld {
             let chest_pos = self.bodies[chest_idx].position;
             let pelvis_pos = self.bodies[pelvis_idx].position;
 
-            self.apply_impulse_at_point(hit.body_idx, total_impulse * 0.40, hit.point);
+            self.apply_clamped_ragdoll_impulse(
+                hit.body_idx,
+                total_impulse * 0.40,
+                hit.point,
+                6.5,
+                14.0,
+                0.85,
+            );
             self.apply_impulse_at_point(chest_idx, total_impulse * 0.35, chest_pos);
             self.apply_impulse_at_point(pelvis_idx, total_impulse * 0.25, pelvis_pos);
             if total_impulse.length() > 12.0 {
@@ -797,7 +869,7 @@ impl ArsaWorld {
         let hit = self.raycast(origin, dir, 100.0)?;
         let dir_n = dir.normalize_or_zero();
         let impulse = dir_n * strength;
-        self.apply_impulse_at_point(hit.body_idx, impulse, hit.point);
+        self.apply_clamped_ragdoll_impulse(hit.body_idx, impulse, hit.point, 10.0, 22.0, 0.65);
         if impulse.length() > 12.0 {
             if let Some(ragdoll_id) = self.bodies[hit.body_idx].ragdoll_id {
                 self.interrupt_ragdoll_recovery(ragdoll_id);
@@ -858,7 +930,7 @@ impl ArsaWorld {
             };
             let impulse_dir = (radial * 0.55 + dir_n * 0.45 + Vec3::Y * 0.25).normalize_or_zero();
             let impulse = impulse_dir * (max_impulse * falloff);
-            self.apply_impulse_at_point(idx, impulse, pos);
+            self.apply_clamped_ragdoll_impulse(idx, impulse, pos, 10.0, 18.0, 0.0);
             if impulse.length() > 12.0 {
                 if let Some(ragdoll_id) = self.bodies[idx].ragdoll_id {
                     self.interrupt_ragdoll_recovery(ragdoll_id);
@@ -914,7 +986,14 @@ impl ArsaWorld {
 
         for ray_dir in rays {
             if let Some(hit) = self.raycast(origin, ray_dir, 100.0) {
-                self.apply_impulse_at_point(hit.body_idx, ray_dir * impulse_ns, hit.point);
+                self.apply_clamped_ragdoll_impulse(
+                    hit.body_idx,
+                    ray_dir * impulse_ns,
+                    hit.point,
+                    11.0,
+                    22.0,
+                    0.35,
+                );
 
                 let ragdoll_info = {
                     let b = &self.bodies[hit.body_idx];
