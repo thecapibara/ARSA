@@ -735,11 +735,19 @@ impl ArsaWorld {
                     sub_dt,
                 );
                 ragdoll.reflex.incoming_threat = detect_incoming_threat(&self.bodies, ragdoll);
+                let ground_below_pelvis = sample_support_height_parts(
+                    &self.static_boxes,
+                    &self.bodies,
+                    pelvis_pos.x,
+                    pelvis_pos.z,
+                    pelvis_pos.y,
+                );
                 apply_procedural_reflexes(
                     ragdoll,
                     &mut self.bodies,
                     &mut self.joints,
                     &self.static_boxes,
+                    ground_below_pelvis,
                     sub_dt,
                 );
             }

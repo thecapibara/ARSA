@@ -1662,3 +1662,96 @@ fn test_shot_from_behind_sets_back_flag_and_arches() {
         }
     }
 }
+
+#[test]
+fn test_high_fall_activates_then_transitions_to_brace() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 5.5, 0.0));
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+
+    let mut saw_high_fall = false;
+    let mut saw_brace_near_ground = false;
+
+    // Step up to 2.0 seconds (120 frames at 1/60s)
+    for _ in 0..120 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during high fall test"
+            );
+        }
+
+        let r = &world.ragdolls[id];
+        let pelvis_y = world.bodies[pelvis_idx].position.y;
+        if r.balance.state == BehaviorState::Falling && r.balance.com_vel.y < -2.2 && pelvis_y > 1.8
+        {
+            assert!(
+                r.reflex.high_falling,
+                "expected high_falling == true at pelvis_y={pelvis_y}, com_vel.y={}",
+                r.balance.com_vel.y
+            );
+            saw_high_fall = true;
+        }
+        if saw_high_fall && pelvis_y < 1.3 && r.reflex.bracing {
+            saw_brace_near_ground = true;
+        }
+    }
+
+    assert!(
+        saw_high_fall,
+        "high fall phase never activated during drop from y=5.5"
+    );
+    assert!(
+        saw_brace_near_ground,
+        "high fall did not transition to pre-impact bracing near ground (y < 1.3)"
+    );
+}
+
+#[test]
+fn test_fast_spin_tumble_triggers_fetal_protect() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 1.5, 0.0));
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+    let pivot = world.bodies[pelvis_idx].position;
+    let tumble_tilt = Quat::from_rotation_x(1.25);
+
+    // Pitch ragdoll into a mid-tumble orientation and apply 5.5 rad/s rigid-body tumble spin
+    let spin = Vec3::new(5.5, 0.0, 0.0);
+    for &b_idx in &world.ragdolls[id].body_indices {
+        let b = &mut world.bodies[b_idx];
+        b.position = pivot + tumble_tilt * (b.position - pivot);
+        b.orientation = (tumble_tilt * b.orientation).normalize();
+        b.angular_velocity = spin;
+        b.linear_velocity = spin.cross(b.position - pivot);
+        b.update_world_inertia();
+    }
+
+    // Step 0.15s (9 frames at 1/60s)
+    for _ in 0..9 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during fast spin tumble test"
+            );
+        }
+    }
+
+    let r = &world.ragdolls[id];
+    assert!(
+        r.reflex.tumbling,
+        "expected tumbling == true after fast spin, got state={:?}, chest_w={:?}, pelvis_w={:?}, high_falling={}",
+        r.balance.state,
+        world.bodies[chest_idx].angular_velocity,
+        world.bodies[pelvis_idx].angular_velocity,
+        r.reflex.high_falling
+    );
+}

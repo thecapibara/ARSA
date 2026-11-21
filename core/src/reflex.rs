@@ -73,6 +73,8 @@ pub struct ReflexState {
     pub active_wound: Option<WoundEvent>,
     pub bone_damage: [f32; 17],
     pub bracing: bool,
+    pub high_falling: bool,
+    pub tumbling: bool,
     pub unconscious: bool,
     pub writhe_time: f32,
     pub left_grab: Option<HandGrab>,
@@ -87,6 +89,8 @@ impl Default for ReflexState {
             active_wound: None,
             bone_damage: [0.0; 17],
             bracing: false,
+            high_falling: false,
+            tumbling: false,
             unconscious: false,
             writhe_time: 0.0,
             left_grab: None,
@@ -170,6 +174,7 @@ pub fn apply_procedural_reflexes(
     bodies: &mut [RigidBody],
     joints: &mut [Joint],
     static_boxes: &[StaticBox],
+    ground_below_pelvis: f32,
     dt: f32,
 ) {
     if dt <= 0.0 {
@@ -179,6 +184,8 @@ pub fn apply_procedural_reflexes(
     // 1. Unconscious / Passive check
     if !ragdoll.active_enabled {
         ragdoll.reflex.bracing = false;
+        ragdoll.reflex.high_falling = false;
+        ragdoll.reflex.tumbling = false;
         ragdoll.reflex.left_grab = None;
         ragdoll.reflex.right_grab = None;
         return;
@@ -187,6 +194,8 @@ pub fn apply_procedural_reflexes(
     if ragdoll.reflex.unconscious {
         ragdoll.balance.state = BehaviorState::Unconscious;
         ragdoll.reflex.bracing = false;
+        ragdoll.reflex.high_falling = false;
+        ragdoll.reflex.tumbling = false;
         ragdoll.reflex.left_grab = None;
         ragdoll.reflex.right_grab = None;
         for &j_idx in &ragdoll.joint_indices {
@@ -301,11 +310,231 @@ pub fn apply_procedural_reflexes(
         )
     };
 
-    // 5. Brace-for-Impact & Airborne Flail (suppressed per-hand while grabbing/reaching a ledge)
+    // 5. High Fall (Mid-Air Bicycle & Windmill), Tumble / Fetal Protect, & Brace-for-Impact
+    let pelvis_pos = bodies[pelvis_idx].position;
+    let height_above_ground = (pelvis_pos.y - ground_below_pelvis).max(0.0);
+    let no_hand_grab = !left_grab_active && !right_grab_active;
+    let fast_spin = bodies[chest_idx].angular_velocity.length() > 3.2
+        || bodies[pelvis_idx].angular_velocity.length() > 3.2;
+
     if state == BehaviorState::Falling
+        && ragdoll.reflex.health > 20.0
+        && no_hand_grab
+        && height_above_ground > 1.55 * s_h
+        && ragdoll.balance.com_vel.y < -2.0
+    {
+        ragdoll.reflex.high_falling = true;
+        ragdoll.reflex.bracing = false;
+        ragdoll.reflex.tumbling = false;
+
+        let cyc = (ragdoll.reflex.writhe_time * 10.5).sin();
+        let cyc_c = (ragdoll.reflex.writhe_time * 10.5).cos();
+
+        // Leg Bicycle: alternate hip & knee flexion
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftHip,
+            Quat::from_rotation_x(-0.65 + 0.55 * cyc),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftKnee,
+            Quat::from_rotation_x(0.85 + 0.65 * cyc_c.max(0.0)),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightHip,
+            Quat::from_rotation_x(-0.65 - 0.55 * cyc),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightKnee,
+            Quat::from_rotation_x(0.85 + 0.65 * (-cyc_c).max(0.0)),
+        );
+        for jid in [JointId::LeftHip, JointId::RightHip] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(125.0 * grav_scale);
+            j.max_torque = j.max_torque.max(130.0 * grav_scale);
+        }
+        for jid in [JointId::LeftKnee, JointId::RightKnee] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(95.0 * grav_scale);
+            j.max_torque = j.max_torque.max(100.0 * grav_scale);
+        }
+
+        // Arm Windmill: counter-rotating arms flared outward with boosted motor stiffness
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftShoulder,
+            Quat::from_euler(EulerRot::XYZ, 1.1 * cyc, 0.0, 0.95),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightShoulder,
+            Quat::from_euler(EulerRot::XYZ, -1.1 * cyc, 0.0, -0.95),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftElbow,
+            Quat::from_rotation_x(-0.45),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightElbow,
+            Quat::from_rotation_x(-0.45),
+        );
+        for jid in [JointId::LeftShoulder, JointId::RightShoulder] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(72.0 * grav_scale);
+            j.max_torque = j.max_torque.max(80.0 * grav_scale);
+        }
+        for jid in [JointId::LeftElbow, JointId::RightElbow] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(45.0 * grav_scale);
+            j.max_torque = j.max_torque.max(50.0 * grav_scale);
+        }
+
+        // Self-Righting Pitch: subtle spine curl/arch trying to look down toward ground
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LowerSpine,
+            Quat::from_rotation_x(0.18),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::ChestSpine,
+            Quat::from_rotation_x(0.20),
+        );
+        set_motor_target(ragdoll, joints, JointId::Head, Quat::from_rotation_x(0.30));
+        for jid in [JointId::LowerSpine, JointId::ChestSpine] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(80.0 * grav_scale);
+            j.max_torque = j.max_torque.max(80.0 * grav_scale);
+        }
+    } else if state == BehaviorState::Falling
+        && ragdoll.reflex.health > 20.0
+        && no_hand_grab
+        && fast_spin
+        && ragdoll.balance.com_vel.y > -3.5
+    {
+        // Tumble / Fetal Protect (stair/roll head protection)
+        ragdoll.reflex.high_falling = false;
+        ragdoll.reflex.tumbling = true;
+        ragdoll.reflex.bracing = false;
+
+        // Curl LowerSpine + ChestSpine forward and tuck Neck + Head chin tightly
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LowerSpine,
+            Quat::from_rotation_x(0.42),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::ChestSpine,
+            Quat::from_rotation_x(0.42),
+        );
+        set_motor_target(ragdoll, joints, JointId::Neck, Quat::from_rotation_x(0.40));
+        set_motor_target(ragdoll, joints, JointId::Head, Quat::from_rotation_x(0.40));
+        for jid in [
+            JointId::LowerSpine,
+            JointId::ChestSpine,
+            JointId::Neck,
+            JointId::Head,
+        ] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(85.0 * grav_scale);
+            j.max_torque = j.max_torque.max(85.0 * grav_scale);
+        }
+
+        // Pull knees up into protective tuck
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftHip,
+            Quat::from_rotation_x(-1.15),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightHip,
+            Quat::from_rotation_x(-1.15),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftKnee,
+            Quat::from_rotation_x(1.55),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightKnee,
+            Quat::from_rotation_x(1.55),
+        );
+        for jid in [JointId::LeftHip, JointId::RightHip] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(130.0 * grav_scale);
+            j.max_torque = j.max_torque.max(135.0 * grav_scale);
+        }
+        for jid in [JointId::LeftKnee, JointId::RightKnee] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(110.0 * grav_scale);
+            j.max_torque = j.max_torque.max(115.0 * grav_scale);
+        }
+
+        // Fold elbows tightly with upper arms raised in front of face/temples to shield head
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftShoulder,
+            Quat::from_euler(EulerRot::XYZ, -1.15, 0.35, 0.25),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightShoulder,
+            Quat::from_euler(EulerRot::XYZ, -1.15, -0.35, -0.25),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftElbow,
+            Quat::from_rotation_x(-1.75),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightElbow,
+            Quat::from_rotation_x(-1.75),
+        );
+        for jid in [JointId::LeftShoulder, JointId::RightShoulder] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(75.0 * grav_scale);
+            j.max_torque = j.max_torque.max(85.0 * grav_scale);
+        }
+        for jid in [JointId::LeftElbow, JointId::RightElbow] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(60.0 * grav_scale);
+            j.max_torque = j.max_torque.max(65.0 * grav_scale);
+        }
+    } else if state == BehaviorState::Falling
         && ragdoll.balance.com_vel.y < -0.5
         && (!left_grab_active || !right_grab_active)
     {
+        ragdoll.reflex.high_falling = false;
+        ragdoll.reflex.tumbling = false;
         ragdoll.reflex.bracing = true;
 
         let fall_world = ragdoll.balance.com_vel.normalize_or_zero();
@@ -314,7 +543,7 @@ pub fn apply_procedural_reflexes(
         let mut dir_l = (fall_local + Vec3::new(0.28, 0.0, 0.22)).normalize_or_zero();
         let mut dir_r = (fall_local + Vec3::new(-0.28, 0.0, 0.22)).normalize_or_zero();
 
-        if bodies[pelvis_idx].position.y > 1.45 * ragdoll.standing_pelvis_y {
+        if pelvis_pos.y > 1.45 * ragdoll.standing_pelvis_y {
             let wm = (ragdoll.reflex.writhe_time * 11.0).sin();
             dir_l =
                 (Quat::from_euler(EulerRot::XYZ, wm * 0.55, 0.0, 0.20) * dir_l).normalize_or_zero();
@@ -367,7 +596,37 @@ pub fn apply_procedural_reflexes(
             el.motor_stiffness = el.motor_stiffness.max(36.0 * grav_scale);
             el.max_torque = el.max_torque.max(40.0 * grav_scale);
         }
+
+        // Snap legs toward ground in landing brace when airborne above standing height
+        if height_above_ground > 0.85 * ragdoll.standing_pelvis_y {
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::LeftHip,
+                Quat::from_rotation_x(-0.15),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightHip,
+                Quat::from_rotation_x(-0.15),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::LeftKnee,
+                Quat::from_rotation_x(0.25),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightKnee,
+                Quat::from_rotation_x(0.25),
+            );
+        }
     } else {
+        ragdoll.reflex.high_falling = false;
+        ragdoll.reflex.tumbling = false;
         ragdoll.reflex.bracing = false;
     }
 
@@ -417,10 +676,10 @@ pub fn apply_procedural_reflexes(
         _ => {}
     }
 
-    // Do not hijack healthy arms or spine hunch while actively standing up (`Recovering`);
-    // per-limb `damage_scale` weakening remains active above, and Reach-for-Wound resumes
-    // once back in `Balanced` / `Stumbling`.
-    if state == BehaviorState::Recovering {
+    // Do not hijack healthy arms or spine hunch while actively standing up (`Recovering`)
+    // or while executing High Fall / Tumble aerial protection reflexes.
+    if state == BehaviorState::Recovering || ragdoll.reflex.high_falling || ragdoll.reflex.tumbling
+    {
         return;
     }
 
