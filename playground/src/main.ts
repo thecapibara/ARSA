@@ -7,29 +7,32 @@ import {
   CameraPresetName,
   getTelemetryStride,
   LabScene,
+  PlacerMode,
 } from './scene.ts';
 
-type ArsaSimPhase4 = ArsaSim & {
-  get_tethers?: () => Float32Array;
-  apply_force_wave?: (
-    ox: number,
-    oy: number,
-    oz: number,
-    dx: number,
-    dy: number,
-    dz: number
+type ArsaSimExt = ArsaSim & {
+  spawn_dynamite?: (
+    x: number,
+    y: number,
+    z: number,
+    vx: number,
+    vy: number,
+    vz: number,
+    fuse_secs: number
   ) => number;
+  place_sphere?: (x: number, z: number, radius: number, mass: number) => number;
+  take_explosions?: () => Float32Array;
 };
 
 type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
+type ThrowerMode = 'cube' | 'crate' | 'sphere';
 type ToolMode =
   | 'grab'
   | 'shove'
   | 'punch'
   | WeaponToolMode
-  | 'place_box'
-  | 'box'
-  | 'sphere'
+  | 'placer'
+  | 'thrower'
   | 'force_wave';
 type ProfilePresetKey = 'light' | 'standard' | 'tall' | 'heavy';
 
@@ -69,10 +72,23 @@ const TOOL_LABELS: Record<ToolMode, string> = {
   pistol: 'TOOL: PISTOL (9MM)',
   shotgun: 'TOOL: SHOTGUN (12GA)',
   rifle: 'TOOL: RIFLE (5.56)',
-  place_box: 'TOOL: PLACE BOX',
-  box: 'TOOL: THROW BOX',
-  sphere: 'TOOL: THROW SPHERE',
+  placer: 'TOOL: PLACER',
+  thrower: 'TOOL: THROWER',
   force_wave: 'TOOL: FORCE WAVE',
+};
+
+const PLACER_LABELS: Record<PlacerMode, string> = {
+  ragdoll: 'Ragdoll',
+  curb: 'Curb',
+  cube: 'Cube',
+  sphere: 'Sphere',
+  dynamite: 'Dynamite',
+};
+
+const THROWER_LABELS: Record<ThrowerMode, string> = {
+  cube: 'Cube',
+  crate: 'Crate',
+  sphere: 'Sphere',
 };
 
 const STATE_BADGES: Array<{ label: string; cls: string }> = [
@@ -98,9 +114,12 @@ class PlaygroundApp {
   private readonly canvas: HTMLCanvasElement;
   private readonly lab: LabScene;
   private readonly audio = new TacticalAudio();
-  private sim: ArsaSimPhase4 | null = null;
+  private sim: ArsaSimExt | null = null;
 
   private activeTool: ToolMode = 'grab';
+  private activePlacerMode: PlacerMode = 'curb';
+  private activeThrowerMode: ThrowerMode = 'cube';
+  private openPopover: 'placer' | 'thrower' | null = null;
   private activeScenario = 0;
   private timeScale = 1.0;
   private paused = false;
@@ -166,6 +185,18 @@ class PlaygroundApp {
   private readonly slowmoBtn = document.getElementById(
     'btn-slowmo'
   ) as HTMLButtonElement;
+  private readonly placerBtn = document.getElementById(
+    'btn-tool-placer'
+  ) as HTMLButtonElement;
+  private readonly placerLabel = document.getElementById('label-tool-placer')!;
+  private readonly placerChevron = document.getElementById('chevron-placer')!;
+  private readonly placerPopover = document.getElementById('popover-placer')!;
+  private readonly throwerBtn = document.getElementById(
+    'btn-tool-thrower'
+  ) as HTMLButtonElement;
+  private readonly throwerLabel = document.getElementById('label-tool-thrower')!;
+  private readonly throwerChevron = document.getElementById('chevron-thrower')!;
+  private readonly throwerPopover = document.getElementById('popover-thrower')!;
 
   constructor() {
     this.canvas = document.getElementById('viewport') as HTMLCanvasElement;
@@ -184,7 +215,7 @@ class PlaygroundApp {
   public async start(): Promise<void> {
     try {
       await init();
-      this.sim = new ArsaSim() as ArsaSimPhase4;
+      this.sim = new ArsaSim() as ArsaSimExt;
       this.loadScenario(0);
       this.banner.classList.add('hidden');
       this.lastFrameTime = performance.now();
@@ -237,17 +268,17 @@ class PlaygroundApp {
       this.releaseGrab();
     }
     this.activeTool = tool;
-    this.statTool.textContent = TOOL_LABELS[tool];
+    this.updateToolReadout();
 
     this.canvas.classList.toggle('tool-grab', tool === 'grab');
-    this.canvas.classList.toggle('tool-place', tool === 'place_box');
+    this.canvas.classList.toggle('tool-place', tool === 'placer');
     this.reticle.classList.toggle(
       'visible',
-      tool !== 'grab' && tool !== 'place_box'
+      tool !== 'grab' && tool !== 'placer'
     );
 
-    if (tool !== 'place_box') {
-      this.lab.setPlaceBoxPreview(false);
+    if (tool !== 'placer') {
+      this.lab.setPlacePreview(false);
     } else if (this.hasLastPointer) {
       this.updatePlacePreview(this.lastPointerX, this.lastPointerY);
     }
@@ -255,6 +286,57 @@ class PlaygroundApp {
     document.querySelectorAll<HTMLButtonElement>('[data-tool]').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.tool === tool);
     });
+  }
+
+  private updateToolReadout(): void {
+    if (this.activeTool === 'placer') {
+      this.statTool.textContent = `TOOL: PLACER (${PLACER_LABELS[this.activePlacerMode].toUpperCase()})`;
+    } else if (this.activeTool === 'thrower') {
+      this.statTool.textContent = `TOOL: THROWER (${THROWER_LABELS[this.activeThrowerMode].toUpperCase()})`;
+    } else {
+      this.statTool.textContent = TOOL_LABELS[this.activeTool];
+    }
+  }
+
+  private setPlacerMode(mode: PlacerMode): void {
+    this.activePlacerMode = mode;
+    this.placerLabel.textContent = `Placer: ${PLACER_LABELS[mode]}`;
+    document
+      .querySelectorAll<HTMLButtonElement>('[data-placer-item]')
+      .forEach((item) => {
+        item.classList.toggle('active', item.dataset.placerItem === mode);
+      });
+    this.setTool('placer');
+    this.updateToolReadout();
+    if (this.hasLastPointer) {
+      this.updatePlacePreview(this.lastPointerX, this.lastPointerY);
+    }
+  }
+
+  private setThrowerMode(mode: ThrowerMode): void {
+    this.activeThrowerMode = mode;
+    this.throwerLabel.textContent = `Thrower: ${THROWER_LABELS[mode]}`;
+    document
+      .querySelectorAll<HTMLButtonElement>('[data-thrower-item]')
+      .forEach((item) => {
+        item.classList.toggle('active', item.dataset.throwerItem === mode);
+      });
+    this.setTool('thrower');
+    this.updateToolReadout();
+  }
+
+  private setOpenPopover(target: 'placer' | 'thrower' | null): void {
+    this.openPopover = target;
+
+    const showPlacer = target === 'placer';
+    this.placerPopover.hidden = !showPlacer;
+    this.placerPopover.classList.toggle('open', showPlacer);
+    this.placerBtn.setAttribute('aria-expanded', String(showPlacer));
+
+    const showThrower = target === 'thrower';
+    this.throwerPopover.hidden = !showThrower;
+    this.throwerPopover.classList.toggle('open', showThrower);
+    this.throwerBtn.setAttribute('aria-expanded', String(showThrower));
   }
 
   private setCameraMode(mode: CameraMode): void {
@@ -297,6 +379,9 @@ class PlaygroundApp {
       );
     }
     this.syncSimulationView(true);
+    if (this.activeTool === 'placer' && this.hasLastPointer) {
+      this.updatePlacePreview(this.lastPointerX, this.lastPointerY);
+    }
   }
 
   private syncProfileUi(): void {
@@ -397,17 +482,31 @@ class PlaygroundApp {
 
   private updatePlacePreview(clientX: number, clientY: number): boolean {
     const ray = this.updatePointerRay(clientX, clientY);
-    const hit = ray.intersectPlane(this.groundPlane, this.groundHit);
+    const surf = this.lab.raycastPlacementSurface(this.raycaster);
+    let hit: THREE.Vector3 | null = null;
+    if (surf) {
+      this.groundHit.copy(surf);
+      hit = this.groundHit;
+    } else {
+      hit = ray.intersectPlane(this.groundPlane, this.groundHit);
+    }
     if (!hit) {
-      this.lab.setPlaceBoxPreview(false);
+      this.lab.setPlacePreview(false);
       return false;
     }
+    hit.x = Math.max(-12, Math.min(12, hit.x));
+    hit.z = Math.max(-12, Math.min(12, hit.z));
     const dist = ray.origin.distanceTo(hit);
     if (dist > 28) {
-      this.lab.setPlaceBoxPreview(false);
+      this.lab.setPlacePreview(false);
       return false;
     }
-    this.lab.setPlaceBoxPreview(true, hit.x, hit.z);
+    this.lab.setPlacePreview(
+      true,
+      this.activePlacerMode,
+      hit,
+      this.bodyProfile.heightCm / 100
+    );
     return true;
   }
 
@@ -670,6 +769,7 @@ class PlaygroundApp {
           this.accumulator = 0;
         }
       }
+      this.pollExplosions();
       this.syncSimulationView();
     } else if (this.sim && this.grabbedBodyIndex >= 0) {
       this.syncSimulationView();
@@ -679,15 +779,219 @@ class PlaygroundApp {
     this.lab.render();
   };
 
+  private pollExplosions(): void {
+    if (!this.sim || typeof this.sim.take_explosions !== 'function') return;
+    const explosions = this.sim.take_explosions();
+    for (let i = 0; i + 3 < explosions.length; i += 4) {
+      const pos = new THREE.Vector3(
+        explosions[i],
+        explosions[i + 1],
+        explosions[i + 2]
+      );
+      const radius = explosions[i + 3];
+      this.lab.spawnExplosionEffect(pos, radius);
+      this.audio.playExplosion();
+    }
+  }
+
+  private executePlacerAt(x: number, y: number, z: number): void {
+    if (!this.sim) return;
+
+    switch (this.activePlacerMode) {
+      case 'ragdoll': {
+        const heightM = this.bodyProfile.heightCm / 100;
+        if (typeof this.sim.spawn_ragdoll_with_profile === 'function') {
+          this.sim.spawn_ragdoll_with_profile(
+            x,
+            y + 0.02,
+            z,
+            heightM,
+            this.bodyProfile.massKg,
+            this.bodyProfile.strength
+          );
+        } else {
+          this.sim.spawn_ragdoll(x, y + 0.02, z);
+        }
+        if (typeof this.sim.set_active_mode === 'function') {
+          this.sim.set_active_mode(this.activeMuscleMode);
+        }
+        this.audio.playBoxDrop();
+        break;
+      }
+      case 'curb':
+        this.placeBoxAt(x, y, z, 0.35, 0.14, 0.18, 30.0);
+        this.audio.playBoxDrop();
+        break;
+      case 'cube':
+        this.placeBoxAt(x, y, z, 0.24, 0.24, 0.24, 22.0);
+        this.audio.playBoxDrop();
+        break;
+      case 'sphere':
+        this.sim.spawn_sphere(x, y + 0.28 + 0.002, z, 0.28, 30.0, 0, 0, 0);
+        this.audio.playBoxDrop();
+        break;
+      case 'dynamite':
+        if (typeof this.sim.spawn_dynamite === 'function') {
+          this.sim.spawn_dynamite(x, y + 0.176, z, 0, 0, 0, 1.8);
+        } else {
+          this.sim.spawn_box(x, y + 0.142, z, 0.06, 0.14, 0.06, 1.5, 0, 0, 0);
+        }
+        this.audio.playBoxDrop();
+        break;
+    }
+  }
+
+  private placeBoxAt(
+    x: number,
+    y: number,
+    z: number,
+    hx: number,
+    hy: number,
+    hz: number,
+    mass: number
+  ): void {
+    if (!this.sim) return;
+    this.sim.spawn_box(x, y + hy + 0.002, z, hx, hy, hz, mass, 0, 0, 0);
+  }
+
+  private executeThrower(ray: THREE.Ray): void {
+    if (!this.sim) return;
+    const spawn = ray.origin.clone().addScaledVector(ray.direction, 1.35);
+
+    switch (this.activeThrowerMode) {
+      case 'cube': {
+        const vel = ray.direction.clone().multiplyScalar(15.5);
+        vel.y += 1.25;
+        this.sim.spawn_box(
+          spawn.x,
+          spawn.y,
+          spawn.z,
+          0.22,
+          0.22,
+          0.22,
+          16.0,
+          vel.x,
+          vel.y,
+          vel.z
+        );
+        break;
+      }
+      case 'crate': {
+        const vel = ray.direction.clone().multiplyScalar(14.5);
+        vel.y += 1.35;
+        this.sim.spawn_box(
+          spawn.x,
+          spawn.y,
+          spawn.z,
+          0.34,
+          0.18,
+          0.22,
+          22.0,
+          vel.x,
+          vel.y,
+          vel.z
+        );
+        break;
+      }
+      case 'sphere': {
+        const vel = ray.direction.clone().multiplyScalar(19.5);
+        vel.y += 1.05;
+        this.sim.spawn_sphere(
+          spawn.x,
+          spawn.y,
+          spawn.z,
+          0.24,
+          32.0,
+          vel.x,
+          vel.y,
+          vel.z
+        );
+        break;
+      }
+    }
+  }
+
   private bindUiEvents(): void {
     window.addEventListener('resize', () => this.lab.resize());
 
     document.querySelectorAll<HTMLButtonElement>('[data-tool]').forEach((btn) => {
+      const tool = btn.dataset.tool as ToolMode | undefined;
+      if (!tool || tool === 'placer' || tool === 'thrower') return;
       btn.addEventListener('click', () => {
-        const tool = btn.dataset.tool as ToolMode | undefined;
-        if (tool) this.setTool(tool);
+        this.setOpenPopover(null);
+        this.setTool(tool);
         btn.blur();
       });
+    });
+
+    this.placerChevron.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setTool('placer');
+      this.setOpenPopover(this.openPopover === 'placer' ? null : 'placer');
+      this.placerBtn.blur();
+    });
+
+    this.placerBtn.addEventListener('click', () => {
+      if (this.activeTool !== 'placer') {
+        this.setTool('placer');
+        this.setOpenPopover(null);
+      } else {
+        this.setOpenPopover(this.openPopover === 'placer' ? null : 'placer');
+      }
+      this.placerBtn.blur();
+    });
+
+    this.throwerChevron.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setTool('thrower');
+      this.setOpenPopover(this.openPopover === 'thrower' ? null : 'thrower');
+      this.throwerBtn.blur();
+    });
+
+    this.throwerBtn.addEventListener('click', () => {
+      if (this.activeTool !== 'thrower') {
+        this.setTool('thrower');
+        this.setOpenPopover('thrower');
+      } else {
+        this.setOpenPopover(this.openPopover === 'thrower' ? null : 'thrower');
+      }
+      this.throwerBtn.blur();
+    });
+
+    document
+      .querySelectorAll<HTMLButtonElement>('[data-placer-item]')
+      .forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const item = btn.dataset.placerItem as PlacerMode | undefined;
+          if (item) {
+            this.setPlacerMode(item);
+            this.setOpenPopover(null);
+          }
+          btn.blur();
+        });
+      });
+
+    document
+      .querySelectorAll<HTMLButtonElement>('[data-thrower-item]')
+      .forEach((btn) => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const item = btn.dataset.throwerItem as ThrowerMode | undefined;
+          if (item) {
+            this.setThrowerMode(item);
+            this.setOpenPopover(null);
+          }
+          btn.blur();
+        });
+      });
+
+    document.addEventListener('pointerdown', (e) => {
+      if (!this.openPopover) return;
+      const target = e.target as Element | null;
+      if (!target || !target.closest('.tool-selector-wrap')) {
+        this.setOpenPopover(null);
+      }
     });
 
     document
@@ -928,65 +1232,17 @@ class PlaygroundApp {
         this.activeTool === 'rifle'
       ) {
         this.fireWeapon(ray, this.activeTool);
-      } else if (this.activeTool === 'place_box') {
+      } else if (this.activeTool === 'placer') {
         if (this.updatePlacePreview(e.clientX, e.clientY)) {
-          if (typeof this.sim.place_obstacle_box === 'function') {
-            this.sim.place_obstacle_box(
-              this.groundHit.x,
-              this.groundHit.z,
-              0.35,
-              0.14,
-              0.18,
-              30.0
-            );
-          } else {
-            this.sim.spawn_box(
-              this.groundHit.x,
-              0.14,
-              this.groundHit.z,
-              0.35,
-              0.14,
-              0.18,
-              30.0,
-              0,
-              0,
-              0
-            );
-          }
-          this.audio.playBoxDrop();
+          this.executePlacerAt(
+            this.groundHit.x,
+            this.groundHit.y,
+            this.groundHit.z
+          );
           this.syncSimulationView();
         }
-      } else if (this.activeTool === 'box') {
-        const spawn = ray.origin.clone().addScaledVector(ray.direction, 1.35);
-        const vel = ray.direction.clone().multiplyScalar(15.5);
-        vel.y += 1.25;
-        this.sim.spawn_box(
-          spawn.x,
-          spawn.y,
-          spawn.z,
-          0.22,
-          0.22,
-          0.22,
-          8.0,
-          vel.x,
-          vel.y,
-          vel.z
-        );
-        this.syncSimulationView();
-      } else if (this.activeTool === 'sphere') {
-        const spawn = ray.origin.clone().addScaledVector(ray.direction, 1.35);
-        const vel = ray.direction.clone().multiplyScalar(19.5);
-        vel.y += 1.05;
-        this.sim.spawn_sphere(
-          spawn.x,
-          spawn.y,
-          spawn.z,
-          0.26,
-          26.0,
-          vel.x,
-          vel.y,
-          vel.z
-        );
+      } else if (this.activeTool === 'thrower') {
+        this.executeThrower(ray);
         this.syncSimulationView();
       } else if (this.activeTool === 'force_wave') {
         if (typeof this.sim.apply_force_wave === 'function') {
@@ -1026,7 +1282,7 @@ class PlaygroundApp {
         this.lab.rotateFlyCamera(dx, dy);
       }
 
-      if (this.activeTool === 'place_box') {
+      if (this.activeTool === 'placer') {
         this.updatePlacePreview(e.clientX, e.clientY);
       }
 
@@ -1040,8 +1296,8 @@ class PlaygroundApp {
     });
 
     this.canvas.addEventListener('pointerleave', () => {
-      if (this.activeTool === 'place_box') {
-        this.lab.setPlaceBoxPreview(false);
+      if (this.activeTool === 'placer') {
+        this.lab.setPlacePreview(false);
       }
     });
 
@@ -1098,34 +1354,44 @@ class PlaygroundApp {
 
       switch (e.code) {
         case 'Digit1':
+          this.setOpenPopover(null);
           this.setTool('grab');
           break;
         case 'Digit2':
+          this.setOpenPopover(null);
           this.setTool('shove');
           break;
         case 'Digit3':
+          this.setOpenPopover(null);
           this.setTool('punch');
           break;
         case 'Digit4':
+          this.setOpenPopover(null);
           this.setTool('pistol');
           break;
         case 'Digit5':
+          this.setOpenPopover(null);
           this.setTool('shotgun');
           break;
         case 'Digit6':
+          this.setOpenPopover(null);
           this.setTool('rifle');
           break;
         case 'Digit7':
-          this.setTool('place_box');
+          this.setOpenPopover(null);
+          this.setTool('placer');
           break;
         case 'Digit8':
-          this.setTool('box');
+          this.setOpenPopover(null);
+          this.setTool('thrower');
           break;
         case 'Digit9':
-          this.setTool('sphere');
-          break;
         case 'Digit0':
+          this.setOpenPopover(null);
           this.setTool('force_wave');
+          break;
+        case 'Escape':
+          this.setOpenPopover(null);
           break;
         case 'KeyF':
           this.setCameraMode(

@@ -317,6 +317,35 @@ impl ArsaSim {
             .spawn_sphere(Vec3::new(x, y, z), r, mass, Vec3::new(vx, vy, vz))
     }
 
+    /// Places a dynamic sphere resting cleanly on `y = 0` at `(x, radius, z)` with zero velocity.
+    pub fn place_sphere(&mut self, x: f32, z: f32, radius: f32, mass: f32) -> usize {
+        self.world
+            .spawn_sphere(Vec3::new(x, radius, z), radius, mass, Vec3::ZERO)
+    }
+
+    /// Spawns a lit dynamite bundle at `(x, y, z)` with velocity `(vx, vy, vz)` and `fuse_secs`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_dynamite(
+        &mut self,
+        x: f32,
+        y: f32,
+        z: f32,
+        vx: f32,
+        vy: f32,
+        vz: f32,
+        fuse_secs: f32,
+    ) -> usize {
+        self.world
+            .spawn_dynamite(Vec3::new(x, y, z), Vec3::new(vx, vy, vz), fuse_secs)
+    }
+
+    /// Drains pending explosion events into `[x, y, z, radius, ...]`.
+    pub fn take_explosions(&mut self) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.world.take_explosions(&mut out);
+        out
+    }
+
     /// Raycasts from `(ox, oy, oz)` along `(dx, dy, dz)` and starts grabbing the hit body.
     /// Returns the hit body index, or `-1` if nothing was hit.
     pub fn raycast_and_grab(

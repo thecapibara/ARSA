@@ -265,6 +265,62 @@ export class TacticalAudio {
     });
   }
 
+  /**
+   * Deep rumbling low-pass detonation boom + crackle burst for dynamite explosions.
+   */
+  public playExplosion(): void {
+    const ctx = this.activeContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+
+    // Deep sub-bass detonation pressure wave
+    this.triggerPitchSweep(ctx, now, 0.55, {
+      wave: 'sine',
+      freqStart: 112,
+      freqEnd: 22,
+      gain: 1.0,
+    });
+
+    // Punchy low-mid chest thump
+    this.triggerPitchSweep(ctx, now, 0.26, {
+      wave: 'triangle',
+      freqStart: 185,
+      freqEnd: 34,
+      gain: 0.72,
+    });
+
+    // Initial high-energy blast crack
+    this.triggerNoiseBurst(ctx, now, 0.22, {
+      filterType: 'bandpass',
+      freqStart: 1800,
+      freqEnd: 240,
+      q: 0.7,
+      gain: 0.95,
+    });
+
+    // Long deep low-pass detonation rumble tail
+    this.triggerNoiseBurst(ctx, now + 0.01, 1.05, {
+      filterType: 'lowpass',
+      freqStart: 720,
+      freqEnd: 75,
+      q: 0.75,
+      gain: 0.88,
+    });
+
+    // Staggered debris / shrapnel crackle bursts
+    const crackleOffsets = [0.045, 0.095, 0.155, 0.225, 0.31];
+    for (let i = 0; i < crackleOffsets.length; i++) {
+      this.triggerNoiseBurst(ctx, now + crackleOffsets[i], 0.065, {
+        filterType: 'bandpass',
+        freqStart: 2750 - i * 280,
+        freqEnd: 650,
+        q: 1.35,
+        gain: 0.34 - i * 0.045,
+      });
+    }
+  }
+
   private ensureContext(): AudioContext | null {
     if (this.ctx) return this.ctx;
     if (typeof window === 'undefined') return null;

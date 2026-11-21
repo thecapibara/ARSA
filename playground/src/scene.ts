@@ -5,6 +5,9 @@ import { createBoneMesh, ShapeType } from './mannequin.ts';
 export type CameraMode = 'orbit' | 'fly';
 export type CameraPresetName = 'front' | 'back' | 'left' | 'right' | 'top';
 export type ImpulseEffectVariant = 'shove' | 'punch';
+export type PlacerMode = 'ragdoll' | 'curb' | 'cube' | 'sphere' | 'dynamite';
+
+export const DYNAMITE_BONE_ID = 250;
 
 interface CameraPreset {
   position: [number, number, number];
@@ -70,6 +73,22 @@ interface ForceWaveFx {
   maxOpacity: number;
 }
 
+interface ExplosionFx {
+  core: THREE.Mesh;
+  fireball: THREE.Mesh;
+  groundRing: THREE.Mesh;
+  age: number;
+  duration: number;
+  maxFireballRadius: number;
+  maxRingRadius: number;
+}
+
+interface DynamiteFuseTip {
+  core: THREE.Mesh;
+  halo: THREE.Mesh;
+  phase: number;
+}
+
 interface CableVisual {
   group: THREE.Group;
   cable: THREE.Mesh;
@@ -117,6 +136,9 @@ export class LabScene {
   private readonly propSphereMat: THREE.MeshStandardMaterial;
   private readonly propAccentMat: THREE.MeshStandardMaterial;
   private readonly propEdgeMat: THREE.LineBasicMaterial;
+  private readonly dynamiteRedMat: THREE.MeshStandardMaterial;
+  private readonly dynamiteTapeMat: THREE.MeshStandardMaterial;
+  private readonly dynamiteCordMat: THREE.MeshStandardMaterial;
   private readonly staticBoxMat: THREE.MeshStandardMaterial;
   private readonly staticEdgeMat: THREE.LineBasicMaterial;
 
@@ -125,7 +147,12 @@ export class LabScene {
   private readonly tetherEndDot: THREE.Mesh;
   private readonly tetherPositions = new Float32Array(6);
 
-  private readonly placePreview: THREE.Group;
+  private readonly placePreviewGroup: THREE.Group;
+  private readonly placePreviewRagdoll: THREE.Group;
+  private readonly placePreviewCurb: THREE.Group;
+  private readonly placePreviewCube: THREE.Group;
+  private readonly placePreviewSphere: THREE.Group;
+  private readonly placePreviewDynamite: THREE.Group;
 
   private readonly impulseEffects: ImpulseFx[] = [];
   private readonly impulseRingGeo: THREE.RingGeometry;
@@ -134,9 +161,13 @@ export class LabScene {
   private readonly tracerEffects: TracerFx[] = [];
   private readonly sparkParticles: SparkParticle[] = [];
   private readonly forceWaveEffects: ForceWaveFx[] = [];
+  private readonly explosionEffects: ExplosionFx[] = [];
+  private readonly dynamiteFuseTips = new Set<DynamiteFuseTip>();
   private readonly tracerBeamGeo: THREE.CylinderGeometry;
   private readonly sparkGeo: THREE.BoxGeometry;
   private readonly forceWaveRingGeo: THREE.RingGeometry;
+  private readonly explosionSphereGeo: THREE.SphereGeometry;
+  private readonly explosionGroundRingGeo: THREE.RingGeometry;
   private fxTime = 0;
 
   // Steel Cable / Tether Renderer (Wrecking Ball)
@@ -236,6 +267,21 @@ export class LabScene {
       transparent: true,
       opacity: 0.45,
     });
+    this.dynamiteRedMat = new THREE.MeshStandardMaterial({
+      color: 0xc92a2a,
+      roughness: 0.68,
+      metalness: 0.06,
+    });
+    this.dynamiteTapeMat = new THREE.MeshStandardMaterial({
+      color: 0x181b22,
+      roughness: 0.55,
+      metalness: 0.16,
+    });
+    this.dynamiteCordMat = new THREE.MeshStandardMaterial({
+      color: 0xd6cfc2,
+      roughness: 0.85,
+      metalness: 0.0,
+    });
 
     this.staticBoxMat = new THREE.MeshStandardMaterial({
       color: 0x262d38,
@@ -279,29 +325,22 @@ export class LabScene {
     this.scene.add(this.tetherStartDot);
     this.scene.add(this.tetherEndDot);
 
-    // Place-Box ghost preview (matches hx=0.35, hy=0.14, hz=0.18)
-    this.placePreview = new THREE.Group();
-    const previewGeo = new THREE.BoxGeometry(0.7, 0.28, 0.36);
-    const previewFill = new THREE.Mesh(
-      previewGeo,
-      new THREE.MeshBasicMaterial({
-        color: 0xe8942c,
-        transparent: true,
-        opacity: 0.16,
-        depthWrite: false,
-      })
+    // Multi-mode 3D Placement Ghost Preview
+    this.placePreviewGroup = new THREE.Group();
+    this.placePreviewRagdoll = this.buildRagdollGhostPreview();
+    this.placePreviewCurb = this.buildBoxGhostPreview(0.7, 0.28, 0.36, 0xe8942c, 0xf5a623);
+    this.placePreviewCube = this.buildBoxGhostPreview(0.48, 0.48, 0.48, 0xe8942c, 0xf5a623);
+    this.placePreviewSphere = this.buildSphereGhostPreview(0.28, 0xe8942c, 0xf5a623);
+    this.placePreviewDynamite = this.buildDynamiteGhostPreview();
+    this.placePreviewGroup.add(
+      this.placePreviewRagdoll,
+      this.placePreviewCurb,
+      this.placePreviewCube,
+      this.placePreviewSphere,
+      this.placePreviewDynamite
     );
-    const previewWire = new THREE.LineSegments(
-      new THREE.EdgesGeometry(previewGeo),
-      new THREE.LineBasicMaterial({
-        color: 0xf5a623,
-        transparent: true,
-        opacity: 0.85,
-      })
-    );
-    this.placePreview.add(previewFill, previewWire);
-    this.placePreview.visible = false;
-    this.scene.add(this.placePreview);
+    this.placePreviewGroup.visible = false;
+    this.scene.add(this.placePreviewGroup);
 
     this.impulseRingGeo = new THREE.RingGeometry(0.08, 0.13, 28);
     this.punchCoreGeo = new THREE.SphereGeometry(0.075, 14, 12);
@@ -311,6 +350,8 @@ export class LabScene {
     this.tracerBeamGeo.rotateX(Math.PI / 2);
     this.sparkGeo = new THREE.BoxGeometry(0.007, 0.007, 0.065);
     this.forceWaveRingGeo = new THREE.RingGeometry(0.14, 0.195, 36);
+    this.explosionSphereGeo = new THREE.SphereGeometry(1, 22, 16);
+    this.explosionGroundRingGeo = new THREE.RingGeometry(0.68, 1.0, 40);
 
     // Steel cable & gunmetal anchor shackle shared assets
     this.cableGeo = new THREE.CylinderGeometry(0.015, 0.015, 1, 10);
@@ -791,9 +832,9 @@ export class LabScene {
           this.disposeObjectGeometries(entry.object);
         }
 
-        const isProp = ragdollId < 0 || boneId < 0;
+        const isProp = ragdollId < 0 || boneId < 0 || boneId === DYNAMITE_BONE_ID;
         const object = isProp
-          ? this.createPropMesh(shapeType, dim0, dim1, dim2)
+          ? this.createPropMesh(shapeType, dim0, dim1, dim2, boneId)
           : createBoneMesh(boneId, shapeType, dim0, dim1, dim2);
 
         this.dynamicGroup.add(object);
@@ -820,13 +861,20 @@ export class LabScene {
     shapeType: number,
     dim0: number,
     dim1: number,
-    dim2: number
+    dim2: number,
+    boneId = -1
   ): THREE.Object3D {
+    if (boneId === DYNAMITE_BONE_ID) {
+      return this.createDynamiteMesh(shapeType, dim0, dim1, dim2);
+    }
+
     const group = new THREE.Group();
+    group.userData.isProp = true;
 
     if (shapeType === ShapeType.Box) {
       const geo = new THREE.BoxGeometry(dim0 * 2, dim1 * 2, dim2 * 2);
       const mesh = new THREE.Mesh(geo, this.propBoxMat);
+      mesh.userData.isProp = true;
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geo), this.propEdgeMat));
@@ -837,6 +885,7 @@ export class LabScene {
         new THREE.SphereGeometry(r, 24, 18),
         this.propSphereMat
       );
+      sphere.userData.isProp = true;
       sphere.castShadow = true;
       sphere.receiveShadow = true;
       group.add(sphere);
@@ -845,6 +894,7 @@ export class LabScene {
         new THREE.TorusGeometry(r * 0.995, r * 0.045, 8, 28),
         this.propAccentMat
       );
+      band.userData.isProp = true;
       band.rotation.x = Math.PI / 2;
       group.add(band);
     } else {
@@ -854,6 +904,7 @@ export class LabScene {
         new THREE.CapsuleGeometry(r, len, 8, 16),
         this.propBoxMat
       );
+      cap.userData.isProp = true;
       cap.castShadow = true;
       cap.receiveShadow = true;
       group.add(cap);
@@ -862,7 +913,123 @@ export class LabScene {
     return group;
   }
 
+  private createDynamiteMesh(
+    shapeType: number,
+    dim0: number,
+    dim1: number,
+    dim2: number
+  ): THREE.Object3D {
+    const root = new THREE.Group();
+    const bundle = new THREE.Group();
+
+    const maxHalfLen =
+      shapeType === ShapeType.Box
+        ? Math.max(0.11, dim0, dim1, dim2)
+        : Math.max(0.11, dim1 + dim0 * 0.5);
+    const minHalfThick =
+      shapeType === ShapeType.Box
+        ? Math.max(0.042, Math.min(dim0, dim1, dim2))
+        : Math.max(0.042, dim0);
+
+    const stickLen = maxHalfLen * 2;
+    const stickR = Math.max(0.022, minHalfThick * 0.52);
+    const radialOffset = stickR * 1.06;
+
+    const stickGeo = new THREE.CylinderGeometry(stickR, stickR, stickLen, 14);
+    for (let i = 0; i < 3; i++) {
+      const angle = (i * Math.PI * 2) / 3;
+      const stick = new THREE.Mesh(stickGeo, this.dynamiteRedMat);
+      stick.position.set(
+        Math.cos(angle) * radialOffset,
+        0,
+        Math.sin(angle) * radialOffset
+      );
+      stick.castShadow = true;
+      stick.receiveShadow = true;
+      bundle.add(stick);
+    }
+
+    // Two black electrical-tape bands wrapping the 3 clustered sticks
+    const bandR = radialOffset + stickR * 1.08;
+    const bandGeo = new THREE.CylinderGeometry(bandR, bandR, stickLen * 0.12, 18);
+    for (const bandY of [-stickLen * 0.25, stickLen * 0.25]) {
+      const band = new THREE.Mesh(bandGeo, this.dynamiteTapeMat);
+      band.position.y = bandY;
+      band.castShadow = true;
+      band.receiveShadow = true;
+      bundle.add(band);
+    }
+
+    // Braided fuse cord emerging from the top end
+    const cordLen = Math.max(0.055, stickLen * 0.24);
+    const cordPivot = new THREE.Group();
+    cordPivot.position.set(0, stickLen * 0.5, 0);
+    cordPivot.rotation.z = -0.26;
+    const cord = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.0045, 0.0055, cordLen, 8),
+      this.dynamiteCordMat
+    );
+    cord.position.y = cordLen * 0.5;
+    cordPivot.add(cord);
+
+    // Glowing flickering amber/orange fuse tip
+    const tipCoreMat = new THREE.MeshBasicMaterial({
+      color: 0xffe484,
+      transparent: true,
+      opacity: 0.98,
+    });
+    const tipCore = new THREE.Mesh(
+      new THREE.SphereGeometry(0.014, 10, 8),
+      tipCoreMat
+    );
+    tipCore.position.y = cordLen;
+    cordPivot.add(tipCore);
+
+    const tipHaloMat = new THREE.MeshBasicMaterial({
+      color: 0xff6b00,
+      transparent: true,
+      opacity: 0.78,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const tipHalo = new THREE.Mesh(
+      new THREE.SphereGeometry(0.032, 10, 8),
+      tipHaloMat
+    );
+    tipHalo.position.y = cordLen;
+    cordPivot.add(tipHalo);
+
+    bundle.add(cordPivot);
+
+    // Align sticks along the collider's longest axis if it is a Box
+    if (shapeType === ShapeType.Box) {
+      if (dim0 >= dim1 && dim0 >= dim2) {
+        bundle.rotation.z = Math.PI / 2;
+      } else if (dim2 >= dim1 && dim2 >= dim0) {
+        bundle.rotation.x = Math.PI / 2;
+      }
+    }
+
+    root.add(bundle);
+
+    const fuseTip: DynamiteFuseTip = {
+      core: tipCore,
+      halo: tipHalo,
+      phase: Math.random() * Math.PI * 2,
+    };
+    this.dynamiteFuseTips.add(fuseTip);
+    root.userData.fuseTip = fuseTip;
+
+    return root;
+  }
+
   private disposeObjectGeometries(root: THREE.Object3D): void {
+    const fuseTip = root.userData.fuseTip as DynamiteFuseTip | undefined;
+    if (fuseTip) {
+      this.dynamiteFuseTips.delete(fuseTip);
+      (fuseTip.core.material as THREE.Material).dispose();
+      (fuseTip.halo.material as THREE.Material).dispose();
+    }
     root.traverse((obj) => {
       if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
         obj.geometry.dispose();
@@ -1006,14 +1173,314 @@ export class LabScene {
     };
   }
 
-  /**
-   * Updates or hides the translucent Place Box wireframe preview on the floor.
-   */
-  public setPlaceBoxPreview(visible: boolean, x = 0, z = 0): void {
-    this.placePreview.visible = visible;
-    if (visible) {
-      this.placePreview.position.set(x, 0.14, z);
+  private buildBoxGhostPreview(
+    sx: number,
+    sy: number,
+    sz: number,
+    fillHex: number,
+    wireHex: number
+  ): THREE.Group {
+    const group = new THREE.Group();
+    const geo = new THREE.BoxGeometry(sx, sy, sz);
+    const fill = new THREE.Mesh(
+      geo,
+      new THREE.MeshBasicMaterial({
+        color: fillHex,
+        transparent: true,
+        opacity: 0.16,
+        depthWrite: false,
+      })
+    );
+    const wire = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geo),
+      new THREE.LineBasicMaterial({
+        color: wireHex,
+        transparent: true,
+        opacity: 0.85,
+      })
+    );
+    fill.position.y = sy * 0.5;
+    wire.position.y = sy * 0.5;
+    group.add(fill, wire);
+    group.visible = false;
+    return group;
+  }
+
+  private buildSphereGhostPreview(
+    radius: number,
+    fillHex: number,
+    wireHex: number
+  ): THREE.Group {
+    const group = new THREE.Group();
+    const geo = new THREE.SphereGeometry(radius, 20, 14);
+    const fill = new THREE.Mesh(
+      geo,
+      new THREE.MeshBasicMaterial({
+        color: fillHex,
+        transparent: true,
+        opacity: 0.16,
+        depthWrite: false,
+      })
+    );
+    const wire = new THREE.LineSegments(
+      new THREE.WireframeGeometry(geo),
+      new THREE.LineBasicMaterial({
+        color: wireHex,
+        transparent: true,
+        opacity: 0.55,
+      })
+    );
+    fill.position.y = radius;
+    wire.position.y = radius;
+    group.add(fill, wire);
+    group.visible = false;
+    return group;
+  }
+
+  private buildDynamiteGhostPreview(): THREE.Group {
+    const group = new THREE.Group();
+
+    const fillMat = new THREE.MeshBasicMaterial({
+      color: 0xef4444,
+      transparent: true,
+      opacity: 0.2,
+      depthWrite: false,
+    });
+    const wireMat = new THREE.LineBasicMaterial({
+      color: 0xf87171,
+      transparent: true,
+      opacity: 0.88,
+    });
+
+    // Translucent red wireframe 3-stick vertical dynamite bundle centered at y = 0.175
+    // (matches vertical Capsule { radius: 0.055, half_length: 0.12 } whose bottom sits 0.175m below center)
+    const bundle = new THREE.Group();
+    bundle.position.y = 0.175;
+
+    const stickR = 0.028;
+    const stickLen = 0.295;
+    const radialOffset = stickR * 1.06;
+    const stickGeo = new THREE.CylinderGeometry(stickR, stickR, stickLen, 10, 1);
+    const stickWireGeo = new THREE.WireframeGeometry(stickGeo);
+
+    for (let i = 0; i < 3; i++) {
+      const angle = (i * Math.PI * 2) / 3;
+      const ox = Math.cos(angle) * radialOffset;
+      const oz = Math.sin(angle) * radialOffset;
+
+      const stickFill = new THREE.Mesh(stickGeo, fillMat);
+      stickFill.position.set(ox, 0, oz);
+      const stickWire = new THREE.LineSegments(stickWireGeo, wireMat);
+      stickWire.position.set(ox, 0, oz);
+      bundle.add(stickFill, stickWire);
     }
+
+    // Fuse stub emerging from bundle end
+    const cordGeo = new THREE.CylinderGeometry(0.004, 0.005, 0.055, 6);
+    const cordMesh = new THREE.Mesh(cordGeo, fillMat);
+    cordMesh.position.set(0, stickLen * 0.5 + 0.025, 0);
+    cordMesh.rotation.z = -0.26;
+    bundle.add(cordMesh);
+
+    group.add(bundle);
+
+    // Ground blast-hint rings (inner placement ring + outer danger perimeter)
+    const innerRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.24, 0.28, 36),
+      new THREE.MeshBasicMaterial({
+        color: 0xef4444,
+        transparent: true,
+        opacity: 0.82,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    innerRing.rotation.x = -Math.PI / 2;
+    innerRing.position.y = 0.008;
+
+    const blastRing = new THREE.Mesh(
+      new THREE.RingGeometry(0.82, 0.86, 48),
+      new THREE.MeshBasicMaterial({
+        color: 0xf87171,
+        transparent: true,
+        opacity: 0.36,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    blastRing.rotation.x = -Math.PI / 2;
+    blastRing.position.y = 0.008;
+
+    group.add(innerRing, blastRing);
+    group.visible = false;
+    return group;
+  }
+
+  private buildRagdollGhostPreview(): THREE.Group {
+    const group = new THREE.Group();
+    const fillMat = new THREE.MeshBasicMaterial({
+      color: 0x22d3ee,
+      transparent: true,
+      opacity: 0.15,
+      depthWrite: false,
+    });
+    const edgeMat = new THREE.LineBasicMaterial({
+      color: 0x67e8f9,
+      transparent: true,
+      opacity: 0.85,
+    });
+    const wireMat = new THREE.LineBasicMaterial({
+      color: 0x22d3ee,
+      transparent: true,
+      opacity: 0.42,
+    });
+
+    const addBox = (
+      sx: number,
+      sy: number,
+      sz: number,
+      x: number,
+      y: number,
+      z: number,
+      rz = 0
+    ) => {
+      const geo = new THREE.BoxGeometry(sx, sy, sz);
+      const mesh = new THREE.Mesh(geo, fillMat);
+      const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), edgeMat);
+      const part = new THREE.Group();
+      part.position.set(x, y, z);
+      part.rotation.z = rz;
+      part.add(mesh, edges);
+      group.add(part);
+    };
+
+    const addLimb = (
+      rTop: number,
+      rBot: number,
+      h: number,
+      x: number,
+      y: number,
+      z: number,
+      rz = 0
+    ) => {
+      const geo = new THREE.CylinderGeometry(rTop, rBot, h, 10, 1);
+      const mesh = new THREE.Mesh(geo, fillMat);
+      const wire = new THREE.LineSegments(new THREE.WireframeGeometry(geo), wireMat);
+      const part = new THREE.Group();
+      part.position.set(x, y, z);
+      part.rotation.z = rz;
+      part.add(mesh, wire);
+      group.add(part);
+    };
+
+    // Normalized 1.0m humanoid silhouette (scaled by heightM in setPlacePreview)
+    // Feet
+    addBox(0.052, 0.042, 0.13, -0.075, 0.021, 0.022);
+    addBox(0.052, 0.042, 0.13, 0.075, 0.021, 0.022);
+    // Shins
+    addLimb(0.034, 0.026, 0.22, -0.075, 0.155, 0);
+    addLimb(0.034, 0.026, 0.22, 0.075, 0.155, 0);
+    // Thighs
+    addLimb(0.046, 0.034, 0.23, -0.075, 0.385, 0);
+    addLimb(0.046, 0.034, 0.23, 0.075, 0.385, 0);
+    // Pelvis
+    addBox(0.175, 0.09, 0.105, 0, 0.535, 0);
+    // Lower spine & chest
+    addBox(0.145, 0.09, 0.095, 0, 0.625, 0);
+    addBox(0.215, 0.165, 0.12, 0, 0.745, 0);
+    // Neck & Head
+    addLimb(0.03, 0.032, 0.05, 0, 0.855, 0);
+    const headGeo = new THREE.SphereGeometry(0.068, 12, 10);
+    const headFill = new THREE.Mesh(headGeo, fillMat);
+    const headWire = new THREE.LineSegments(
+      new THREE.WireframeGeometry(headGeo),
+      wireMat
+    );
+    headFill.position.set(0, 0.932, 0);
+    headWire.position.set(0, 0.932, 0);
+    group.add(headFill, headWire);
+
+    // Arms (slightly relaxed A-pose)
+    addLimb(0.032, 0.026, 0.165, -0.148, 0.72, 0, -0.14);
+    addLimb(0.032, 0.026, 0.165, 0.148, 0.72, 0, 0.14);
+    addLimb(0.025, 0.02, 0.15, -0.174, 0.565, 0.01, -0.08);
+    addLimb(0.025, 0.02, 0.15, 0.174, 0.565, 0.01, 0.08);
+    addBox(0.032, 0.052, 0.042, -0.184, 0.465, 0.015);
+    addBox(0.032, 0.052, 0.042, 0.184, 0.465, 0.015);
+
+    // Crisp floor placement ring
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.19, 0.225, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0x22d3ee,
+        transparent: true,
+        opacity: 0.75,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      })
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.008;
+    group.add(ring);
+
+    group.visible = false;
+    return group;
+  }
+
+  /**
+   * Updates or hides the translucent 3D placement ghost preview on the target surface.
+   */
+  public setPlacePreview(
+    visible: boolean,
+    mode: PlacerMode = 'curb',
+    pos?: THREE.Vector3,
+    heightM = 1.78
+  ): void {
+    if (!visible || !pos) {
+      this.placePreviewGroup.visible = false;
+      return;
+    }
+
+    this.placePreviewGroup.visible = true;
+    this.placePreviewGroup.position.set(pos.x, Math.max(0, pos.y), pos.z);
+
+    this.placePreviewRagdoll.visible = mode === 'ragdoll';
+    this.placePreviewCurb.visible = mode === 'curb';
+    this.placePreviewCube.visible = mode === 'cube';
+    this.placePreviewSphere.visible = mode === 'sphere';
+    this.placePreviewDynamite.visible = mode === 'dynamite';
+
+    if (mode === 'ragdoll') {
+      this.placePreviewRagdoll.scale.setScalar(Math.max(0.5, heightM));
+    }
+  }
+
+  /**
+   * Raycasts against static obstacle meshes (stairs, platforms) and dynamic non-ragdoll
+   * prop meshes so placed entities can stack on top of surfaces above the ground plane.
+   */
+  public raycastPlacementSurface(raycaster: THREE.Raycaster): THREE.Vector3 | null {
+    const targets: THREE.Object3D[] = [...this.staticGroup.children];
+    for (const child of this.dynamicGroup.children) {
+      if (child.userData.isProp === true) {
+        targets.push(child);
+      }
+    }
+    if (targets.length === 0) {
+      return null;
+    }
+
+    const hits = raycaster.intersectObjects(targets, true);
+    const meshHit = hits.find((h) => h.object instanceof THREE.Mesh);
+    if (!meshHit) {
+      return null;
+    }
+
+    const pt = meshHit.point.clone();
+    if (pt.y < 0.0) {
+      pt.y = 0.0;
+    }
+    return pt;
   }
 
   /**
@@ -1246,8 +1713,115 @@ export class LabScene {
     }
   }
 
+  /**
+   * Spawns a 3D dynamite detonation: orange-white fireball sphere, expanding ground
+   * shockwave ring, and 28 glowing ember/spark particles flying outward with gravity.
+   */
+  public spawnExplosionEffect(pos: THREE.Vector3, radius: number): void {
+    const maxFireballRadius = Math.max(0.85, radius * 0.56);
+    const maxRingRadius = Math.max(1.8, radius * 1.1);
+
+    const coreMat = new THREE.MeshBasicMaterial({
+      color: 0xfff5d6,
+      transparent: true,
+      opacity: 0.98,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const core = new THREE.Mesh(this.explosionSphereGeo, coreMat);
+    core.position.copy(pos);
+    core.scale.setScalar(0.12);
+    this.scene.add(core);
+
+    const fireballMat = new THREE.MeshBasicMaterial({
+      color: 0xff6b1a,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const fireball = new THREE.Mesh(this.explosionSphereGeo, fireballMat);
+    fireball.position.copy(pos);
+    fireball.scale.setScalar(0.2);
+    this.scene.add(fireball);
+
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0xffaa33,
+      transparent: true,
+      opacity: 0.92,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const groundRing = new THREE.Mesh(this.explosionGroundRingGeo, ringMat);
+    groundRing.position.set(pos.x, 0.025, pos.z);
+    groundRing.rotation.x = -Math.PI / 2;
+    groundRing.scale.setScalar(0.25);
+    this.scene.add(groundRing);
+
+    this.explosionEffects.push({
+      core,
+      fireball,
+      groundRing,
+      age: 0,
+      duration: 0.45,
+      maxFireballRadius,
+      maxRingRadius,
+    });
+
+    // 28 glowing ember/spark particles flying outward with gravity
+    const emberColors = [0xfff3b0, 0xffa928, 0xff5418];
+    const emberCount = 28;
+    for (let i = 0; i < emberCount; i++) {
+      const emberMat = new THREE.MeshBasicMaterial({
+        color: emberColors[i % emberColors.length],
+        transparent: true,
+        opacity: 1.0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.sparkGeo, emberMat);
+      mesh.position.copy(pos);
+
+      const theta = Math.random() * Math.PI * 2;
+      const upBias = Math.random() * 0.95 - 0.1;
+      const speed = 3.8 + Math.random() * 6.8;
+      const velocity = new THREE.Vector3(
+        Math.cos(theta),
+        upBias,
+        Math.sin(theta)
+      )
+        .normalize()
+        .multiplyScalar(speed);
+
+      mesh.lookAt(this.tempVecA.copy(pos).add(velocity));
+      this.scene.add(mesh);
+
+      this.sparkParticles.push({
+        mesh,
+        velocity,
+        age: 0,
+        duration: 0.35 + Math.random() * 0.4,
+      });
+    }
+  }
+
   public updateEffects(dt: number): void {
     this.fxTime += dt;
+
+    // Flicker active dynamite fuse tips
+    for (const tip of this.dynamiteFuseTips) {
+      const flicker =
+        0.75 +
+        0.35 * Math.sin(this.fxTime * 38.0 + tip.phase) +
+        0.2 * Math.sin(this.fxTime * 71.0 + tip.phase * 1.7);
+      const coreScale = Math.max(0.65, flicker);
+      const haloScale = Math.max(0.75, flicker * 1.25);
+      tip.core.scale.setScalar(coreScale);
+      tip.halo.scale.setScalar(haloScale);
+      (tip.halo.material as THREE.MeshBasicMaterial).opacity =
+        THREE.MathUtils.clamp(0.45 + 0.4 * flicker, 0.3, 0.95);
+    }
 
     // Pulse & billboard active wound rings
     if (this.telemetryGroup.visible) {
@@ -1311,6 +1885,10 @@ export class LabScene {
 
       spark.velocity.y -= 9.8 * dt;
       spark.mesh.position.addScaledVector(spark.velocity, dt);
+      if (spark.mesh.position.y < 0.02) {
+        spark.mesh.position.y = 0.02;
+        spark.velocity.y = Math.abs(spark.velocity.y) * 0.4;
+      }
       const lookTarget = this.tempVecA
         .copy(spark.mesh.position)
         .add(spark.velocity);
@@ -1322,6 +1900,40 @@ export class LabScene {
         this.scene.remove(spark.mesh);
         (spark.mesh.material as THREE.Material).dispose();
         this.sparkParticles.splice(i, 1);
+      }
+    }
+
+    for (let i = this.explosionEffects.length - 1; i >= 0; i--) {
+      const fx = this.explosionEffects[i];
+      fx.age += dt;
+      const t = Math.min(1, fx.age / fx.duration);
+      const easeOut = 1 - Math.pow(1 - t, 3);
+
+      const coreScale = THREE.MathUtils.lerp(0.14, fx.maxFireballRadius * 0.72, easeOut);
+      fx.core.scale.setScalar(coreScale);
+      (fx.core.material as THREE.MeshBasicMaterial).opacity = Math.max(
+        0,
+        (1 - t * 1.35) * 0.98
+      );
+
+      const fireballScale = THREE.MathUtils.lerp(0.22, fx.maxFireballRadius, easeOut);
+      fx.fireball.scale.setScalar(fireballScale);
+      (fx.fireball.material as THREE.MeshBasicMaterial).opacity =
+        (1 - t) * (1 - t) * 0.9;
+
+      const ringScale = THREE.MathUtils.lerp(0.25, fx.maxRingRadius, easeOut);
+      fx.groundRing.scale.setScalar(ringScale);
+      (fx.groundRing.material as THREE.MeshBasicMaterial).opacity =
+        (1 - t) * 0.9;
+
+      if (t >= 1) {
+        this.scene.remove(fx.core);
+        this.scene.remove(fx.fireball);
+        this.scene.remove(fx.groundRing);
+        (fx.core.material as THREE.Material).dispose();
+        (fx.fireball.material as THREE.Material).dispose();
+        (fx.groundRing.material as THREE.Material).dispose();
+        this.explosionEffects.splice(i, 1);
       }
     }
 

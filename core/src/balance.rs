@@ -449,8 +449,9 @@ pub fn update_ragdoll_balance(
                     0.0,
                     support_center.z - com_pos.z,
                 );
-                // Deadzone inside comfortable stance footprint prevents phantom forward creeping
-                let deadzone = 0.055 * s_h;
+                // Deadzone covering the real foot support footprint (heel-to-toe & stance width)
+                // prevents phantom sliding when hunched forward (e.g. during Reach-for-Wound)
+                let deadzone = 0.14 * s_h;
                 let err_len = raw_horiz_err.length();
                 let horiz_err = if err_len > deadzone {
                     raw_horiz_err * ((err_len - deadzone) / err_len)
@@ -458,8 +459,8 @@ pub fn update_ragdoll_balance(
                     Vec3::ZERO
                 };
                 let stumble_scale = if is_stumbling { 0.35 } else { 1.0 };
-                let mut f_horiz = (horiz_err * (total_mass * 14.0)
-                    - com_vel_xz * (total_mass * 6.5))
+                let mut f_horiz = (horiz_err * (total_mass * 6.0)
+                    - com_vel_xz * (total_mass * 8.0))
                     * strength_scale
                     * stumble_scale;
                 let max_f_horiz = total_mass * 2.2 * strength_scale * stumble_scale;
@@ -470,11 +471,34 @@ pub fn update_ragdoll_balance(
                 let pelvis = &mut bodies[pelvis_idx];
                 pelvis.linear_velocity += f_horiz * (dt * pelvis.inv_mass);
 
-                // Damp idle yaw spin when planted on both feet (prevents spinning in place like on ice)
-                if grounded_count >= 2 && !is_stumbling {
-                    let yaw_damp = (-8.0 * dt).exp();
-                    bodies[pelvis_idx].angular_velocity.y *= yaw_damp;
-                    bodies[chest_idx].angular_velocity.y *= yaw_damp;
+                // Damp idle yaw spin & plant feet firmly on the floor when Balanced
+                // (prevents "hovercraft" sliding caused by vertical pelvis support unloading foot normal_lambda)
+                if !is_stumbling {
+                    let foot_grip = (-35.0 * dt).exp();
+                    let foot_yaw_grip = (-25.0 * dt).exp();
+                    if foot_contacts.0 {
+                        let lf = &mut bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]];
+                        let v_xz = Vec3::new(lf.linear_velocity.x, 0.0, lf.linear_velocity.z);
+                        if v_xz.length() < 0.65 {
+                            lf.linear_velocity.x *= foot_grip;
+                            lf.linear_velocity.z *= foot_grip;
+                            lf.angular_velocity.y *= foot_yaw_grip;
+                        }
+                    }
+                    if foot_contacts.1 {
+                        let rf = &mut bodies[ragdoll.body_indices[BoneId::RightFoot as usize]];
+                        let v_xz = Vec3::new(rf.linear_velocity.x, 0.0, rf.linear_velocity.z);
+                        if v_xz.length() < 0.65 {
+                            rf.linear_velocity.x *= foot_grip;
+                            rf.linear_velocity.z *= foot_grip;
+                            rf.angular_velocity.y *= foot_yaw_grip;
+                        }
+                    }
+                    if grounded_count >= 2 {
+                        let yaw_damp = (-12.0 * dt).exp();
+                        bodies[pelvis_idx].angular_velocity.y *= yaw_damp;
+                        bodies[chest_idx].angular_velocity.y *= yaw_damp;
+                    }
                 }
             }
         }

@@ -205,17 +205,76 @@
               <button class="hud-btn" data-tool="rifle" title="5.56 Rifle — high-velocity stagger &amp; headshot KO [6]">
                 <span class="key-cap">6</span> Rifle
               </button>
-              <button class="hud-btn" data-tool="place_box" title="Place tripping obstacle box on floor [7]">
-                <span class="key-cap">7</span> Place Box
-              </button>
-              <button class="hud-btn" data-tool="box" title="Throw dynamic crate [8]">
-                <span class="key-cap">8</span> Throw Box
-              </button>
-              <button class="hud-btn" data-tool="sphere" title="Throw heavy steel sphere [9]">
-                <span class="key-cap">9</span> Throw Sphere
-              </button>
-              <button class="hud-btn" data-tool="force_wave" title="Directional kinetic shockwave [0]">
-                <span class="key-cap">0</span> Force Wave
+              <div class="tool-selector-wrap" id="wrap-placer">
+                <button
+                  type="button"
+                  class="hud-btn tool-selector-btn"
+                  id="btn-tool-placer"
+                  data-tool="placer"
+                  aria-expanded="false"
+                  title="Place ragdoll, obstacle, or dynamite on floor [7]"
+                >
+                  <span class="key-cap">7</span>
+                  <span id="label-tool-placer">Placer: Curb</span>
+                  <span class="tool-chevron" id="chevron-placer" aria-hidden="true">▾</span>
+                </button>
+                <div class="tool-popover" id="popover-placer" aria-label="Placer Items" hidden>
+                  <div class="popover-header">PLACER</div>
+                  <button type="button" class="popover-item" data-placer-item="ragdoll">
+                    <span class="popover-item-title">Mannequin</span>
+                    <span class="popover-item-meta">Active Profile</span>
+                  </button>
+                  <button type="button" class="popover-item active" data-placer-item="curb">
+                    <span class="popover-item-title">Tripping Curb</span>
+                    <span class="popover-item-meta">Low Obstacle</span>
+                  </button>
+                  <button type="button" class="popover-item" data-placer-item="cube">
+                    <span class="popover-item-title">Cube Crate</span>
+                    <span class="popover-item-meta">22 kg</span>
+                  </button>
+                  <button type="button" class="popover-item" data-placer-item="sphere">
+                    <span class="popover-item-title">Steel Sphere</span>
+                    <span class="popover-item-meta">r=0.28 · 30 kg</span>
+                  </button>
+                  <button type="button" class="popover-item popover-item-danger" data-placer-item="dynamite">
+                    <span class="popover-item-title">Dynamite 💥</span>
+                    <span class="popover-item-meta">1.8s Fuse</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="tool-selector-wrap" id="wrap-thrower">
+                <button
+                  type="button"
+                  class="hud-btn tool-selector-btn"
+                  id="btn-tool-thrower"
+                  data-tool="thrower"
+                  aria-expanded="false"
+                  title="Throw physics prop [8]"
+                >
+                  <span class="key-cap">8</span>
+                  <span id="label-tool-thrower">Thrower: Cube</span>
+                  <span class="tool-chevron" id="chevron-thrower" aria-hidden="true">▾</span>
+                </button>
+                <div class="tool-popover" id="popover-thrower" aria-label="Thrower Projectiles" hidden>
+                  <div class="popover-header">THROWER</div>
+                  <button type="button" class="popover-item active" data-thrower-item="cube">
+                    <span class="popover-item-title">Cube Box</span>
+                    <span class="popover-item-meta">16 kg</span>
+                  </button>
+                  <button type="button" class="popover-item" data-thrower-item="crate">
+                    <span class="popover-item-title">Long Crate</span>
+                    <span class="popover-item-meta">22 kg</span>
+                  </button>
+                  <button type="button" class="popover-item" data-thrower-item="sphere">
+                    <span class="popover-item-title">Steel Sphere</span>
+                    <span class="popover-item-meta">r=0.24 · 32 kg</span>
+                  </button>
+                </div>
+              </div>
+
+              <button type="button" class="hud-btn" data-tool="force_wave" title="Directional kinetic shockwave [9 / 0]">
+                <span class="key-cap">9</span> Force Wave
               </button>
             </div>
           </div>

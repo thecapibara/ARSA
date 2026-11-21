@@ -22,7 +22,8 @@ pub use skeleton::{
     JointId, RagdollInstance,
 };
 pub use world::{
-    ArsaWorld, GrabConstraint, RaycastHit, TetherConstraint, WeaponKind, WeaponShotResult,
+    ArsaWorld, DynamiteTimer, ExplosionEvent, GrabConstraint, RaycastHit, TetherConstraint,
+    WeaponKind, WeaponShotResult,
 };
 
 #[cfg(test)]
@@ -677,6 +678,124 @@ mod tests {
         assert!(
             horiz_drift < 0.05,
             "downed extreme dense profile slid across floor: horiz_drift={horiz_drift}"
+        );
+    }
+
+    #[test]
+    fn test_place_box_under_feet_no_launch() {
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+
+        // Step 0.5 seconds (30 frames at 1/60s)
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+
+        world.place_obstacle_box(0.0, 0.0, 0.35, 0.14, 0.18, 30.0);
+
+        let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+        let mut max_pelvis_y = 0.0_f32;
+
+        // Step 1.5 seconds (90 frames at 1/60s)
+        for _ in 0..90 {
+            world.step(1.0 / 60.0);
+            max_pelvis_y = max_pelvis_y.max(world.bodies[pelvis_idx].position.y);
+            for (i, b) in world.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "body {i} produced NaN/Inf after placing box under feet"
+                );
+            }
+        }
+
+        let pelvis_y = world.bodies[pelvis_idx].position.y;
+        assert!(
+            max_pelvis_y < 1.85 && pelvis_y < 1.85,
+            "placing box under feet launched ragdoll: pelvis_y={pelvis_y}, max_pelvis_y={max_pelvis_y}"
+        );
+    }
+
+    #[test]
+    fn test_dynamite_detonates_and_applies_blast() {
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+        let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+        let initial_pelvis = world.bodies[pelvis_idx].position;
+
+        let dyn_idx = world.spawn_dynamite(Vec3::new(0.0, 0.25, 0.8), Vec3::ZERO, 0.3);
+        assert_eq!(world.bodies[dyn_idx].bone_id, Some(250));
+
+        // Step 0.8 seconds (48 frames at 1/60s)
+        for _ in 0..48 {
+            world.step(1.0 / 60.0);
+            for (i, b) in world.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "body {i} produced NaN/Inf after dynamite blast"
+                );
+            }
+        }
+
+        let mut explosions = Vec::new();
+        world.take_explosions(&mut explosions);
+        assert_eq!(
+            explosions.len(),
+            4,
+            "expected 1 explosion event (4 floats), got {} floats",
+            explosions.len()
+        );
+        assert!(world.bodies[dyn_idx].position.y < -40.0);
+
+        let disp = (world.bodies[pelvis_idx].position - initial_pelvis).length();
+        assert!(
+            disp > 0.5,
+            "ragdoll was not significantly displaced by dynamite blast: disp={disp}"
+        );
+        assert!(
+            world.ragdolls[id].reflex.health < 100.0,
+            "ragdoll health should decrease from dynamite blast"
+        );
+    }
+
+    #[test]
+    fn test_box_stacking_tower_stability() {
+        let mut world = ArsaWorld::new();
+        let half = Vec3::splat(0.24);
+        let _b0 = world.spawn_box(Vec3::new(0.0, 0.24, 0.0), half, 22.0, Vec3::ZERO);
+        let _b1 = world.spawn_box(Vec3::new(0.0, 0.722, 0.0), half, 22.0, Vec3::ZERO);
+        let top_idx = world.spawn_box(Vec3::new(0.0, 1.204, 0.0), half, 22.0, Vec3::ZERO);
+
+        // Step 2.0 seconds (120 frames at 1/60s)
+        for _ in 0..120 {
+            world.step(1.0 / 60.0);
+            for (i, b) in world.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "body {i} produced NaN/Inf during box stacking"
+                );
+            }
+        }
+
+        let top = &world.bodies[top_idx];
+        let horiz_drift = Vec3::new(top.position.x, 0.0, top.position.z).length();
+        assert!(
+            top.position.y > 1.05,
+            "top cube collapsed: y={}, horiz_drift={horiz_drift}",
+            top.position.y
+        );
+        assert!(
+            horiz_drift < 0.08,
+            "top cube drifted horizontally: horiz_drift={horiz_drift}, pos={:?}",
+            top.position
         );
     }
 }

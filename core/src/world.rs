@@ -60,6 +60,24 @@ pub struct RaycastHit {
     pub local_point: Vec3,
 }
 
+/// Active fuse timer for a thrown/placed dynamite bundle.
+#[derive(Debug, Clone)]
+pub struct DynamiteTimer {
+    pub body_idx: usize,
+    pub fuse_remaining: f32,
+    pub radius: f32,
+    pub impulse: f32,
+    pub damage: f32,
+    pub detonated: bool,
+}
+
+/// Recorded radial explosion event to be consumed by the renderer/frontend.
+#[derive(Debug, Clone, Copy)]
+pub struct ExplosionEvent {
+    pub position: Vec3,
+    pub radius: f32,
+}
+
 /// Main ARSA physics simulation world.
 #[derive(Debug, Clone)]
 pub struct ArsaWorld {
@@ -72,6 +90,8 @@ pub struct ArsaWorld {
     pub static_boxes: Vec<StaticBox>,
     pub ragdolls: Vec<RagdollInstance>,
     pub grab: Option<GrabConstraint>,
+    pub dynamites: Vec<DynamiteTimer>,
+    pub pending_explosions: Vec<ExplosionEvent>,
     connected_pairs: HashSet<(usize, usize)>,
 }
 
@@ -95,11 +115,13 @@ impl ArsaWorld {
             static_boxes: Vec::new(),
             ragdolls: Vec::new(),
             grab: None,
+            dynamites: Vec::new(),
+            pending_explosions: Vec::new(),
             connected_pairs: HashSet::new(),
         }
     }
 
-    /// Clears all bodies, joints, tethers, static obstacles, ragdolls, and active grabs.
+    /// Clears all bodies, joints, tethers, static obstacles, ragdolls, dynamites, and active grabs.
     pub fn clear(&mut self) {
         self.bodies.clear();
         self.joints.clear();
@@ -107,6 +129,8 @@ impl ArsaWorld {
         self.static_boxes.clear();
         self.ragdolls.clear();
         self.grab = None;
+        self.dynamites.clear();
+        self.pending_explosions.clear();
         self.connected_pairs.clear();
     }
 
@@ -241,12 +265,167 @@ impl ArsaWorld {
         idx
     }
 
+    /// Spawns a lit dynamite capsule (`bone_id = Some(250)`) with a countdown fuse and returns its body index.
+    pub fn spawn_dynamite(&mut self, pos: Vec3, vel: Vec3, fuse_secs: f32) -> usize {
+        let idx = self.bodies.len();
+        let mut rb = RigidBody::new(
+            pos,
+            Quat::IDENTITY,
+            1.5,
+            ColliderShape::Capsule {
+                radius: 0.055,
+                half_length: 0.12,
+            },
+        );
+        rb.linear_velocity = vel;
+        rb.bone_id = Some(250);
+        self.bodies.push(rb);
+
+        let safe_fuse = if fuse_secs.is_finite() && fuse_secs > 0.0 {
+            fuse_secs
+        } else {
+            1.8
+        };
+        self.dynamites.push(DynamiteTimer {
+            body_idx: idx,
+            fuse_remaining: safe_fuse,
+            radius: 4.2,
+            impulse: 72.0,
+            damage: 75.0,
+            detonated: false,
+        });
+        idx
+    }
+
+    /// Drains all pending radial explosion events into `out` as `[x, y, z, radius, ...]`.
+    pub fn take_explosions(&mut self, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve(self.pending_explosions.len() * 4);
+        for ev in self.pending_explosions.drain(..) {
+            out.push(ev.position.x);
+            out.push(ev.position.y);
+            out.push(ev.position.z);
+            out.push(ev.radius);
+        }
+    }
+
+    /// Applies a radial explosion centered at `center` with `radius`, `max_impulse`, and `max_damage`,
+    /// returning the count of affected dynamic bodies.
+    pub fn apply_explosion(
+        &mut self,
+        center: Vec3,
+        radius: f32,
+        max_impulse: f32,
+        max_damage: f32,
+    ) -> usize {
+        if !center.is_finite()
+            || !radius.is_finite()
+            || radius <= 0.0
+            || !max_impulse.is_finite()
+            || !max_damage.is_finite()
+        {
+            return 0;
+        }
+
+        const MAX_BLAST_DV: f32 = 24.0;
+        let mut affected = 0usize;
+        // Track the strongest blast hit per ragdoll so 17 bones don't multiply health damage 17x.
+        let mut ragdoll_best_hit: Vec<Option<(BoneId, Vec3, f32)>> = vec![None; self.ragdolls.len()];
+
+        for b in &mut self.bodies {
+            if b.inv_mass == 0.0 {
+                continue;
+            }
+            let offset = b.position - center;
+            let dist = offset.length();
+            if dist >= radius {
+                continue;
+            }
+            let falloff = (1.0 - dist / radius).clamp(0.0, 1.0).powi(2);
+            if falloff <= 0.0 {
+                continue;
+            }
+
+            let blast_dir = (offset.normalize_or_zero() + Vec3::Y * 0.45).normalize_or_zero();
+            let mass_scale = (b.mass / 6.0).sqrt().clamp(0.25, 2.5);
+            let impulse_mag = max_impulse * falloff * mass_scale;
+            let dv = (impulse_mag * b.inv_mass).min(MAX_BLAST_DV);
+            b.linear_velocity += blast_dir * dv;
+            affected += 1;
+
+            if let (Some(r_id), Some(bone)) = (b.ragdoll_id, b.bone_id.and_then(BoneId::from_u8)) {
+                if let Some(ragdoll) = self.ragdolls.get_mut(r_id) {
+                    ragdoll.reflex.bone_damage[bone as usize] =
+                        (ragdoll.reflex.bone_damage[bone as usize] + falloff * 0.45).min(1.0);
+                    let local_pt = b.orientation.conjugate() * (-offset.normalize_or_zero() * 0.05);
+                    let replace = match ragdoll_best_hit[r_id] {
+                        Some((_, _, best_f)) => falloff > best_f,
+                        None => true,
+                    };
+                    if replace {
+                        ragdoll_best_hit[r_id] = Some((bone, local_pt, falloff));
+                    }
+                }
+            }
+        }
+
+        for (r_id, hit_opt) in ragdoll_best_hit.into_iter().enumerate() {
+            if let Some((bone, local_pt, falloff)) = hit_opt {
+                let damage = falloff * max_damage;
+                let severity = (falloff * (max_damage / 75.0)).clamp(0.0, 1.0);
+                self.ragdolls[r_id].register_hit(bone, local_pt, severity, damage);
+            }
+        }
+
+        affected
+    }
+
     /// Advances the simulation by `dt` seconds using sub-stepped XPBD.
     pub fn step(&mut self, dt: f32) {
         if dt <= 0.0 || !dt.is_finite() {
             return;
         }
         let clamped_dt = dt.min(0.05);
+
+        // Update dynamite fuse timers and trigger any detonations before substeps.
+        let mut detonations: Vec<(Vec3, f32, f32, f32)> = Vec::new();
+        for d in &mut self.dynamites {
+            if d.detonated {
+                continue;
+            }
+            d.fuse_remaining -= clamped_dt;
+            if d.fuse_remaining <= 0.0 {
+                d.detonated = true;
+                if let Some(body) = self.bodies.get_mut(d.body_idx) {
+                    let pos = body.position;
+                    let buried = Vec3::new(0.0, -50.0, 0.0);
+                    body.position = buried;
+                    body.prev_position = buried;
+                    body.mass = 0.0;
+                    body.inv_mass = 0.0;
+                    body.local_inertia = Vec3::ZERO;
+                    body.inv_local_inertia = Vec3::ZERO;
+                    body.linear_velocity = Vec3::ZERO;
+                    body.angular_velocity = Vec3::ZERO;
+                    body.collision_group = 0;
+                    body.collision_mask = 0;
+                    if let Some(grab) = &self.grab {
+                        if grab.body_idx == d.body_idx {
+                            self.grab = None;
+                        }
+                    }
+                    self.pending_explosions.push(ExplosionEvent {
+                        position: pos,
+                        radius: d.radius,
+                    });
+                    detonations.push((pos, d.radius, d.impulse, d.damage));
+                }
+            }
+        }
+        for (pos, radius, impulse, damage) in detonations {
+            self.apply_explosion(pos, radius, impulse, damage);
+        }
+
         let substeps = self.substeps.max(1);
         let sub_dt = clamped_dt / (substeps as f32);
         let inv_dt = 1.0 / sub_dt;
@@ -256,6 +435,7 @@ impl ArsaWorld {
             .iter()
             .map(|r| (r.balance.left_foot_grounded, r.balance.right_foot_grounded))
             .collect();
+        let mut pre_solve_vels = Vec::with_capacity(self.bodies.len());
 
         for _ in 0..substeps {
             // 1. Save previous state & integrate external forces
@@ -304,6 +484,9 @@ impl ArsaWorld {
             for j in &self.joints {
                 j.apply_muscle_motor(&mut self.bodies, sub_dt);
             }
+
+            pre_solve_vels.clear();
+            pre_solve_vels.extend(self.bodies.iter().map(|b| b.linear_velocity));
 
             // Predict positions and orientations
             for b in &mut self.bodies {
@@ -368,11 +551,20 @@ impl ArsaWorld {
             }
 
             // 4. Derive velocities from position & orientation changes
-            for b in &mut self.bodies {
+            const MAX_DEPENETRATION_DV: f32 = 6.0;
+            for (b_idx, b) in self.bodies.iter_mut().enumerate() {
                 if b.inv_mass == 0.0 {
                     continue;
                 }
-                b.linear_velocity = (b.position - b.prev_position) * inv_dt;
+                let pre_solve_vel = pre_solve_vels[b_idx];
+                let derived_vel = (b.position - b.prev_position) * inv_dt;
+                let dv = derived_vel - pre_solve_vel;
+                let dv_len = dv.length();
+                b.linear_velocity = if dv_len > MAX_DEPENETRATION_DV {
+                    pre_solve_vel + dv * (MAX_DEPENETRATION_DV / dv_len)
+                } else {
+                    derived_vel
+                };
                 let mut dq = b.orientation * b.prev_orientation.conjugate();
                 if dq.w < 0.0 {
                     dq = -dq;

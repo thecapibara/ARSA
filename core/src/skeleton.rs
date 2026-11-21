@@ -529,7 +529,10 @@ pub fn spawn_humanoid_with_profile(
         );
         rb.ragdoll_id = Some(ragdoll_id);
         rb.bone_id = Some(b_spec.bone as u8);
-        rb.friction = 0.75;
+        rb.friction = match b_spec.bone {
+            BoneId::LeftFoot | BoneId::RightFoot => 1.15,
+            _ => 0.75,
+        };
         rb.restitution = 0.02;
         bodies.push(rb);
         body_indices[b_spec.bone as usize] = idx;

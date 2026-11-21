@@ -139,6 +139,10 @@ pub fn solve_contacts_position(bodies: &mut [RigidBody], contacts: &mut [Contact
         if pen <= 0.0 {
             continue;
         }
+        // Soft depenetration cap per solver iteration so deep initial overlaps
+        // (e.g. spawning an obstacle under a ragdoll's feet) resolve smoothly
+        // over multiple substeps rather than launching bodies into the air.
+        let effective_pen = pen.min(0.025);
 
         let r_a = pa - bodies[a].position;
         let w_a = bodies[a].generalized_inv_mass(r_a, c.normal);
@@ -156,7 +160,7 @@ pub fn solve_contacts_position(bodies: &mut [RigidBody], contacts: &mut [Contact
             continue;
         }
 
-        let d_lambda_n = pen / w;
+        let d_lambda_n = effective_pen / w;
         c.normal_lambda += d_lambda_n;
         let p_n = c.normal * d_lambda_n;
 
@@ -263,8 +267,20 @@ pub fn solve_contacts_velocity(
                 let w_t = w_a_t + w_b_t;
                 if w_t > 1e-12 {
                     let max_j_f = c.friction * (c.normal_lambda / dt);
-                    let j_f_mag = if c.body_b.is_none() && c.normal.y > 0.5 && v_t_len < 0.08 {
-                        // Static friction stiction on ground contacts so resting bodies stop cleanly
+                    let is_box_pair = matches!(
+                        (
+                            bodies[a].collider,
+                            c.body_b.map(|b| bodies[b].collider)
+                        ),
+                        (
+                            ColliderShape::Box { .. },
+                            Some(ColliderShape::Box { .. })
+                        )
+                    );
+                    let stiction = (c.body_b.is_none() && c.normal.y > 0.5 && v_t_len < 0.08)
+                        || (is_box_pair && c.normal.y.abs() > 0.7 && v_t_len < 0.06);
+                    let j_f_mag = if stiction {
+                        // Static friction stiction so resting bodies on ground/stacks stop cleanly
                         v_t_len / w_t
                     } else {
                         (v_t_len / w_t).min(max_j_f)
@@ -667,39 +683,329 @@ fn detect_obb_vs_obb(
 ) {
     let a = &bodies[i];
     let b = &bodies[j];
-    let inv_b = b.orientation.conjugate();
-    for local_a in box_sample_points(ha) {
-        let world_a = a.world_point(local_a);
-        let in_b = inv_b * (world_a - b.position);
-        if let Some((pb_local, normal_b_local, pen)) = point_inside_aabb(in_b, Vec3::ZERO, hb) {
-            let pb = b.world_point(pb_local);
-            let normal = b.orientation * normal_b_local;
-            out.push(Contact::new(
-                bodies,
-                i,
-                Some(j),
-                (world_a, pb, normal, pen),
-                ContactMaterial { ..mat },
-            ));
+
+    let axes_a = [
+        a.orientation * Vec3::X,
+        a.orientation * Vec3::Y,
+        a.orientation * Vec3::Z,
+    ];
+    let axes_b = [
+        b.orientation * Vec3::X,
+        b.orientation * Vec3::Y,
+        b.orientation * Vec3::Z,
+    ];
+    let delta = a.position - b.position;
+
+    // 1. Test the 6 face axes (A.x, A.y, A.z, B.x, B.y, B.z) for minimum penetration.
+    let mut best_pen = f32::MAX;
+    let mut best_axis = Vec3::Y;
+    let mut best_local_idx = 1usize;
+    let mut ref_is_b = false;
+
+    for (idx, &axis) in axes_a.iter().enumerate() {
+        let ra = ha.x * axes_a[0].dot(axis).abs()
+            + ha.y * axes_a[1].dot(axis).abs()
+            + ha.z * axes_a[2].dot(axis).abs();
+        let rb = hb.x * axes_b[0].dot(axis).abs()
+            + hb.y * axes_b[1].dot(axis).abs()
+            + hb.z * axes_b[2].dot(axis).abs();
+        let dist = delta.dot(axis).abs();
+        let overlap = ra + rb - dist;
+        if overlap <= 0.0 {
+            return;
+        }
+        if overlap < best_pen {
+            best_pen = overlap;
+            best_axis = axis;
+            best_local_idx = idx;
+            ref_is_b = false;
         }
     }
 
-    let inv_a = a.orientation.conjugate();
-    for local_b in box_sample_points(hb) {
-        let world_b = b.world_point(local_b);
-        let in_a = inv_a * (world_b - a.position);
-        if let Some((pa_local, normal_a_local, pen)) = point_inside_aabb(in_a, Vec3::ZERO, ha) {
-            let pa = a.world_point(pa_local);
-            let normal = -(a.orientation * normal_a_local);
-            out.push(Contact::new(
-                bodies,
-                i,
-                Some(j),
-                (pa, world_b, normal, pen),
-                ContactMaterial { ..mat },
-            ));
+    for (idx, &axis) in axes_b.iter().enumerate() {
+        let ra = ha.x * axes_a[0].dot(axis).abs()
+            + ha.y * axes_a[1].dot(axis).abs()
+            + ha.z * axes_a[2].dot(axis).abs();
+        let rb = hb.x * axes_b[0].dot(axis).abs()
+            + hb.y * axes_b[1].dot(axis).abs()
+            + hb.z * axes_b[2].dot(axis).abs();
+        let dist = delta.dot(axis).abs();
+        let overlap = ra + rb - dist;
+        if overlap <= 0.0 {
+            return;
+        }
+        if overlap < best_pen {
+            best_pen = overlap;
+            best_axis = axis;
+            best_local_idx = idx;
+            ref_is_b = true;
         }
     }
+
+    // Orient normal from B to A.
+    let mut normal = best_axis;
+    if delta.dot(normal) < 0.0 {
+        normal = -normal;
+    }
+
+    // 2. Identify reference & incident boxes and clip incident face against reference side planes.
+    let (ref_body, inc_body, ref_half, inc_half, ref_axes, inc_axes, ref_outward_normal) =
+        if ref_is_b {
+            (b, a, hb, ha, axes_b, axes_a, normal)
+        } else {
+            (a, b, ha, hb, axes_a, axes_b, -normal)
+        };
+
+    let n_axis = best_local_idx;
+    let u_axis = (n_axis + 1) % 3;
+    let v_axis = (n_axis + 2) % 3;
+    let ref_sign = if ref_axes[n_axis].dot(ref_outward_normal) >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    };
+
+    // Pick the incident face whose outward normal is most antiparallel to ref_outward_normal.
+    let mut inc_n_axis = 0usize;
+    let mut inc_sign = 1.0_f32;
+    let mut min_dot = f32::MAX;
+    for (k, &ax) in inc_axes.iter().enumerate() {
+        let d = ax.dot(ref_outward_normal);
+        if d < min_dot {
+            min_dot = d;
+            inc_n_axis = k;
+            inc_sign = 1.0;
+        }
+        if -d < min_dot {
+            min_dot = -d;
+            inc_n_axis = k;
+            inc_sign = -1.0;
+        }
+    }
+
+    let iu = (inc_n_axis + 1) % 3;
+    let iv = (inc_n_axis + 2) % 3;
+    let inv_ref_rot = ref_body.orientation.conjugate();
+
+    let mut poly_a = [Vec3::ZERO; 8];
+    let mut poly_b = [Vec3::ZERO; 8];
+    let quad_signs = [(-1.0_f32, -1.0_f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
+    for (idx, &(su, sv)) in quad_signs.iter().enumerate() {
+        let mut p_inc = Vec3::ZERO;
+        p_inc[inc_n_axis] = inc_sign * inc_half[inc_n_axis];
+        p_inc[iu] = su * inc_half[iu];
+        p_inc[iv] = sv * inc_half[iv];
+        let p_world = inc_body.world_point(p_inc);
+        poly_a[idx] = inv_ref_rot * (p_world - ref_body.position);
+    }
+
+    let len = clip_polygon_against_plane(&poly_a[..4], &mut poly_b, u_axis, 1.0, ref_half[u_axis]);
+    let len = clip_polygon_against_plane(&poly_b[..len], &mut poly_a, u_axis, -1.0, ref_half[u_axis]);
+    let len = clip_polygon_against_plane(&poly_a[..len], &mut poly_b, v_axis, 1.0, ref_half[v_axis]);
+    let len = clip_polygon_against_plane(&poly_b[..len], &mut poly_a, v_axis, -1.0, ref_half[v_axis]);
+
+    // Collect penetrating points (deduplicating near-coincident clipped vertices).
+    let mut cands = [(Vec3::ZERO, 0.0_f32); 8];
+    let mut cand_len = 0usize;
+    for &v_ref_local in &poly_a[..len] {
+        let pen = ref_half[n_axis] - v_ref_local[n_axis] * ref_sign;
+        if pen <= 0.0 {
+            continue;
+        }
+        let mut merged = false;
+        for existing in &mut cands[..cand_len] {
+            let du = existing.0[u_axis] - v_ref_local[u_axis];
+            let dv = existing.0[v_axis] - v_ref_local[v_axis];
+            if du * du + dv * dv < 1e-8 {
+                if pen > existing.1 {
+                    *existing = (v_ref_local, pen);
+                }
+                merged = true;
+                break;
+            }
+        }
+        if !merged && cand_len < 8 {
+            cands[cand_len] = (v_ref_local, pen);
+            cand_len += 1;
+        }
+    }
+
+    if cand_len == 0 {
+        return;
+    }
+
+    let selected = reduce_manifold_to_4(&cands[..cand_len], u_axis, v_axis);
+    for &(v_ref_local, pen) in selected.iter().flatten() {
+        let v_world = ref_body.world_point(v_ref_local);
+        let (pa, pb) = if ref_is_b {
+            (v_world, v_world + normal * pen)
+        } else {
+            (v_world - normal * pen, v_world)
+        };
+        out.push(Contact::new(
+            bodies,
+            i,
+            Some(j),
+            (pa, pb, normal, pen),
+            ContactMaterial { ..mat },
+        ));
+    }
+}
+
+fn clip_polygon_against_plane(
+    poly: &[Vec3],
+    out: &mut [Vec3; 8],
+    axis: usize,
+    sign: f32,
+    limit: f32,
+) -> usize {
+    let n = poly.len();
+    if n == 0 {
+        return 0;
+    }
+    const EPS: f32 = -1e-6;
+    let mut out_len = 0usize;
+    let mut prev = poly[n - 1];
+    let mut prev_dist = limit - sign * prev[axis];
+
+    for &curr in poly {
+        let curr_dist = limit - sign * curr[axis];
+        let prev_in = prev_dist >= EPS;
+        let curr_in = curr_dist >= EPS;
+
+        if curr_in {
+            if !prev_in {
+                let denom = prev_dist - curr_dist;
+                let t = if denom.abs() > 1e-12 {
+                    (prev_dist / denom).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+                if out_len < 8 {
+                    out[out_len] = prev.lerp(curr, t);
+                    out_len += 1;
+                }
+            }
+            if out_len < 8 {
+                out[out_len] = curr;
+                out_len += 1;
+            }
+        } else if prev_in {
+            let denom = prev_dist - curr_dist;
+            let t = if denom.abs() > 1e-12 {
+                (prev_dist / denom).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+            if out_len < 8 {
+                out[out_len] = prev.lerp(curr, t);
+                out_len += 1;
+            }
+        }
+
+        prev = curr;
+        prev_dist = curr_dist;
+    }
+
+    out_len
+}
+
+fn reduce_manifold_to_4(
+    cands: &[(Vec3, f32)],
+    u_axis: usize,
+    v_axis: usize,
+) -> [Option<(Vec3, f32)>; 4] {
+    let mut out = [None; 4];
+    if cands.len() <= 4 {
+        for (idx, &c) in cands.iter().enumerate() {
+            out[idx] = Some(c);
+        }
+        return out;
+    }
+
+    // 1. Deepest point
+    let mut i0 = 0usize;
+    for (idx, &(_, pen)) in cands.iter().enumerate().skip(1) {
+        if pen > cands[i0].1 {
+            i0 = idx;
+        }
+    }
+
+    // 2. Point farthest from i0 in reference face plane
+    let u0 = cands[i0].0[u_axis];
+    let v0 = cands[i0].0[v_axis];
+    let mut i1 = i0;
+    let mut max_d2 = -1.0_f32;
+    for (idx, &(p, _)) in cands.iter().enumerate() {
+        if idx == i0 {
+            continue;
+        }
+        let du = p[u_axis] - u0;
+        let dv = p[v_axis] - v0;
+        let d2 = du * du + dv * dv;
+        if d2 > max_d2 {
+            max_d2 = d2;
+            i1 = idx;
+        }
+    }
+
+    // 3. Extremal triangle areas on each side of segment (i0 -> i1)
+    let du01 = cands[i1].0[u_axis] - u0;
+    let dv01 = cands[i1].0[v_axis] - v0;
+    let mut i2: Option<usize> = None;
+    let mut max_pos = 0.0_f32;
+    let mut i3: Option<usize> = None;
+    let mut min_neg = 0.0_f32;
+
+    for (idx, &(p, _)) in cands.iter().enumerate() {
+        if idx == i0 || idx == i1 {
+            continue;
+        }
+        let cross = du01 * (p[v_axis] - v0) - dv01 * (p[u_axis] - u0);
+        if cross > max_pos {
+            max_pos = cross;
+            i2 = Some(idx);
+        }
+        if cross < min_neg {
+            min_neg = cross;
+            i3 = Some(idx);
+        }
+    }
+
+    let mut chosen = [Some(i0), Some(i1), i2, i3];
+    for slot_idx in 2..4 {
+        if chosen[slot_idx].is_some() {
+            continue;
+        }
+        let mut best_idx = None;
+        let mut best_min_d2 = -1.0_f32;
+        for (idx, &(p, _)) in cands.iter().enumerate() {
+            if chosen.iter().flatten().any(|&c| c == idx) {
+                continue;
+            }
+            let min_d2 = chosen
+                .iter()
+                .flatten()
+                .map(|&c| {
+                    let du = p[u_axis] - cands[c].0[u_axis];
+                    let dv = p[v_axis] - cands[c].0[v_axis];
+                    du * du + dv * dv
+                })
+                .fold(f32::MAX, f32::min);
+            if min_d2 > best_min_d2 {
+                best_min_d2 = min_d2;
+                best_idx = Some(idx);
+            }
+        }
+        chosen[slot_idx] = best_idx;
+    }
+
+    for (k, idx_opt) in chosen.into_iter().enumerate() {
+        if let Some(idx) = idx_opt {
+            out[k] = Some(cands[idx]);
+        }
+    }
+    out
 }
 
 #[inline]
