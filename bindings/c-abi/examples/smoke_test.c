@@ -122,6 +122,34 @@ int main(void) {
         }
     }
 
+    /* Verify Host-Physics pose synchronization input. */
+    if (!arsa_world_sync_bone_pose(
+            world,
+            ARSA_BONE_PELVIS,
+            transforms[0],
+            transforms[1],
+            transforms[2],
+            transforms[3],
+            transforms[4],
+            transforms[5],
+            transforms[6],
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f)) {
+        fprintf(stderr, "FAIL: arsa_world_sync_bone_pose failed for valid pelvis bone\n");
+        arsa_world_destroy(world);
+        return 1;
+    }
+    if (arsa_world_sync_bone_pose(
+            world, 9999, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)) {
+        fprintf(stderr, "FAIL: arsa_world_sync_bone_pose should reject out-of-range body_idx\n");
+        arsa_world_destroy(world);
+        return 1;
+    }
+
     printf("PASS: Heavy Brute (2.17m/135kg) Balanced (pelvis_y=%.3fm), "
            "LeftArm wound=%d, health=%.1f, motors=%zu floats\n",
            pelvis_y, wound_region, post_health, m_written);

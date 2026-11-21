@@ -242,11 +242,34 @@ size_t arsa_world_body_count(const ArsaWorldHandle *handle);
 size_t arsa_world_joint_count(const ArsaWorldHandle *handle);
 
 /**
+ * Synchronizes a body's simulated pose and velocities from an external host physics engine
+ * (e.g. UE5 Chaos / Unity PhysX) so ARSA balance/reflex controllers can compute updated
+ * joint motor targets. Returns false if handle is NULL, body_idx is invalid, or any
+ * input is non-finite / degenerate.
+ */
+bool arsa_world_sync_bone_pose(
+    ArsaWorldHandle *handle,
+    size_t body_idx,
+    float px,
+    float py,
+    float pz,
+    float qx,
+    float qy,
+    float qz,
+    float qw,
+    float vx,
+    float vy,
+    float vz,
+    float wx,
+    float wy,
+    float wz);
+
+/**
  * Copies packed body transforms (7 floats per body: px, py, pz, qx, qy, qz, qw)
  * into out_buf (up to max_floats) and returns the number of floats written.
  */
 size_t arsa_world_get_transforms(
-    const ArsaWorldHandle *handle,
+    ArsaWorldHandle *handle,
     float *out_buf,
     size_t max_floats);
 
@@ -264,7 +287,7 @@ size_t arsa_world_get_transforms(
  * Returns the number of floats written.
  */
 size_t arsa_world_get_ragdoll_telemetry(
-    const ArsaWorldHandle *handle,
+    ArsaWorldHandle *handle,
     float *out_buf,
     size_t max_floats);
 
@@ -274,7 +297,7 @@ size_t arsa_world_get_ragdoll_telemetry(
  * for Host-Physics Control Mode. Returns the number of floats written.
  */
 size_t arsa_world_get_joint_motor_targets(
-    const ArsaWorldHandle *handle,
+    ArsaWorldHandle *handle,
     float *out_buf,
     size_t max_floats);
 

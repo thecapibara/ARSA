@@ -1,11 +1,12 @@
 //! Native C ABI bindings (`arsa-c-abi`) for Unreal Engine 5, Unity, Godot, and C/C++.
 
-use arsa_core::glam::Vec3;
+use arsa_core::glam::{Quat, Vec3};
 use arsa_core::{ArsaWorld, BodyProfile, WeaponKind};
 
-/// Opaque handle owning an `ArsaWorld` simulation instance.
+/// Opaque handle owning an `ArsaWorld` simulation instance and a reusable scratch buffer.
 pub struct ArsaWorldHandle {
     world: ArsaWorld,
+    scratch: Vec<f32>,
 }
 
 /// C-compatible anthropometric body profile.
@@ -75,6 +76,7 @@ unsafe fn copy_floats_to_out(src: &[f32], out_buf: *mut f32, max_floats: usize) 
 pub extern "C" fn arsa_world_create() -> *mut ArsaWorldHandle {
     Box::into_raw(Box::new(ArsaWorldHandle {
         world: ArsaWorld::new(),
+        scratch: Vec::with_capacity(256),
     }))
 }
 
@@ -416,6 +418,44 @@ pub unsafe extern "C" fn arsa_world_joint_count(handle: *const ArsaWorldHandle) 
     }
 }
 
+/// Synchronizes a body's simulated pose and velocities from an external host physics engine
+/// (e.g. UE5 Chaos / Unity PhysX) so ARSA balance/reflex controllers can compute updated
+/// `joint.motor_target` values. Returns `false` if `handle` is null, `body_idx` is invalid,
+/// or any input is non-finite / degenerate.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_sync_bone_pose(
+    handle: *mut ArsaWorldHandle,
+    body_idx: usize,
+    px: f32,
+    py: f32,
+    pz: f32,
+    qx: f32,
+    qy: f32,
+    qz: f32,
+    qw: f32,
+    vx: f32,
+    vy: f32,
+    vz: f32,
+    wx: f32,
+    wy: f32,
+    wz: f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    h.world.sync_bone_pose(
+        body_idx,
+        Vec3::new(px, py, pz),
+        Quat::from_xyzw(qx, qy, qz, qw),
+        Vec3::new(vx, vy, vz),
+        Vec3::new(wx, wy, wz),
+    )
+}
+
 /// Copies packed transforms (`px, py, pz, qx, qy, qz, qw` per body) into `out_buf`,
 /// writing at most `max_floats` floats, and returns the number of floats written.
 ///
@@ -424,16 +464,15 @@ pub unsafe extern "C" fn arsa_world_joint_count(handle: *const ArsaWorldHandle) 
 /// If `out_buf` is non-null, it must be valid for writes of `max_floats` `f32` elements.
 #[no_mangle]
 pub unsafe extern "C" fn arsa_world_get_transforms(
-    handle: *const ArsaWorldHandle,
+    handle: *mut ArsaWorldHandle,
     out_buf: *mut f32,
     max_floats: usize,
 ) -> usize {
-    let Some(h) = (unsafe { handle.as_ref() }) else {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
         return 0;
     };
-    let mut buf = Vec::new();
-    h.world.write_transforms(&mut buf);
-    unsafe { copy_floats_to_out(&buf, out_buf, max_floats) }
+    h.world.write_transforms(&mut h.scratch);
+    unsafe { copy_floats_to_out(&h.scratch, out_buf, max_floats) }
 }
 
 /// Copies per-ragdoll balance & reflex telemetry (16 floats per ragdoll) into `out_buf`,
@@ -448,16 +487,15 @@ pub unsafe extern "C" fn arsa_world_get_transforms(
 /// If `out_buf` is non-null, it must be valid for writes of `max_floats` `f32` elements.
 #[no_mangle]
 pub unsafe extern "C" fn arsa_world_get_ragdoll_telemetry(
-    handle: *const ArsaWorldHandle,
+    handle: *mut ArsaWorldHandle,
     out_buf: *mut f32,
     max_floats: usize,
 ) -> usize {
-    let Some(h) = (unsafe { handle.as_ref() }) else {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
         return 0;
     };
-    let mut buf = Vec::new();
-    h.world.write_ragdoll_telemetry(&mut buf);
-    unsafe { copy_floats_to_out(&buf, out_buf, max_floats) }
+    h.world.write_ragdoll_telemetry(&mut h.scratch);
+    unsafe { copy_floats_to_out(&h.scratch, out_buf, max_floats) }
 }
 
 /// Copies per-joint PD muscle motor targets (8 floats per joint:
@@ -470,25 +508,26 @@ pub unsafe extern "C" fn arsa_world_get_ragdoll_telemetry(
 /// If `out_buf` is non-null, it must be valid for writes of `max_floats` `f32` elements.
 #[no_mangle]
 pub unsafe extern "C" fn arsa_world_get_joint_motor_targets(
-    handle: *const ArsaWorldHandle,
+    handle: *mut ArsaWorldHandle,
     out_buf: *mut f32,
     max_floats: usize,
 ) -> usize {
-    let Some(h) = (unsafe { handle.as_ref() }) else {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
         return 0;
     };
-    let mut buf = Vec::with_capacity(h.world.joints.len() * 8);
+    h.scratch.clear();
+    h.scratch.reserve(h.world.joints.len() * 8);
     for j in &h.world.joints {
-        buf.push(j.motor_target.x);
-        buf.push(j.motor_target.y);
-        buf.push(j.motor_target.z);
-        buf.push(j.motor_target.w);
-        buf.push(j.motor_stiffness);
-        buf.push(j.motor_damping);
-        buf.push(j.max_torque);
-        buf.push(j.damage_scale);
+        h.scratch.push(j.motor_target.x);
+        h.scratch.push(j.motor_target.y);
+        h.scratch.push(j.motor_target.z);
+        h.scratch.push(j.motor_target.w);
+        h.scratch.push(j.motor_stiffness);
+        h.scratch.push(j.motor_damping);
+        h.scratch.push(j.max_torque);
+        h.scratch.push(j.damage_scale);
     }
-    unsafe { copy_floats_to_out(&buf, out_buf, max_floats) }
+    unsafe { copy_floats_to_out(&h.scratch, out_buf, max_floats) }
 }
 
 #[cfg(test)]
@@ -531,6 +570,20 @@ mod tests {
             let m_written =
                 arsa_world_get_joint_motor_targets(world, motors.as_mut_ptr(), motors.len());
             assert_eq!(m_written, 16 * 8);
+
+            assert!(arsa_world_sync_bone_pose(
+                world, 0, 0.1, 1.0, 0.2, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            ));
+            assert!(!arsa_world_sync_bone_pose(
+                world, 9999, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            ));
+
+            let mut xforms = [0.0_f32; 17 * 7];
+            let x_written = arsa_world_get_transforms(world, xforms.as_mut_ptr(), xforms.len());
+            assert_eq!(x_written, 17 * 7);
+            assert!((xforms[0] - 0.1).abs() < 1e-6);
+            assert!((xforms[1] - 1.0).abs() < 1e-6);
+            assert!((xforms[2] - 0.2).abs() < 1e-6);
 
             arsa_world_clear(world);
             assert_eq!(arsa_world_body_count(world), 0);

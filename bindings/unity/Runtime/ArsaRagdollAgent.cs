@@ -23,7 +23,15 @@ namespace Arsa
         [Header("Active Control")]
         public bool activeBalance = true;
 
+        [SerializeField]
+        public bool autoGetUp = true;
+
         [Header("Skeleton Rig (17 Bones in ArsaBoneId Order)")]
+        /// <summary>
+        /// 17 bone transforms ordered by <see cref="ArsaBoneId"/>.
+        /// Expected as flat sibling children under the agent root (because <c>SyncBoneTransforms</c>
+        /// writes root-relative <c>localPosition</c> and <c>localRotation</c>), or synchronized in world space.
+        /// </summary>
         public Transform[] boneTransforms = new Transform[(int)ArsaBoneId.Count];
 
         public ArsaBehaviorState CurrentState { get; private set; } = ArsaBehaviorState.Balanced;
@@ -52,6 +60,15 @@ namespace Arsa
                 massKg,
                 muscleRatio);
             ArsaNative.arsa_world_set_active(_world, activeBalance);
+            ArsaNative.arsa_world_set_auto_get_up(_world, autoGetUp);
+        }
+
+        private void Start()
+        {
+            if (_world != IntPtr.Zero)
+            {
+                ArsaNative.arsa_world_set_auto_get_up(_world, autoGetUp);
+            }
         }
 
         private void FixedUpdate()
@@ -81,6 +98,7 @@ namespace Arsa
             {
                 ArsaNative.arsa_world_update_all_profiles(_world, heightMeters, massKg, muscleRatio);
                 ArsaNative.arsa_world_set_active(_world, activeBalance);
+                ArsaNative.arsa_world_set_auto_get_up(_world, autoGetUp);
             }
         }
 
@@ -163,6 +181,58 @@ namespace Arsa
                 localD.y,
                 localD.z,
                 strength);
+        }
+
+        /// <summary>
+        /// Enables or disables automatic procedural get-up from <see cref="ArsaBehaviorState.Downed"/>.
+        /// </summary>
+        public void SetAutoGetUp(bool enabled)
+        {
+            autoGetUp = enabled;
+            if (_world != IntPtr.Zero)
+            {
+                ArsaNative.arsa_world_set_auto_get_up(_world, autoGetUp);
+            }
+        }
+
+        /// <summary>
+        /// Sets the earthquake seismic magnitude (<c>0.0..=9.0</c>, <c>0.0</c> disables).
+        /// </summary>
+        public void SetEarthquake(float magnitude)
+        {
+            if (_world != IntPtr.Zero)
+            {
+                ArsaNative.arsa_world_set_earthquake(_world, magnitude);
+            }
+        }
+
+        /// <summary>
+        /// Fires a radial + directional kinetic force wave along a Unity world-space ray.
+        /// Returns the number of affected bodies.
+        /// </summary>
+        public int ApplyForceWave(
+            Vector3 worldOrigin,
+            Vector3 worldDirection,
+            float radius = 3.2f,
+            float maxImpulse = 42.0f)
+        {
+            if (_world == IntPtr.Zero)
+            {
+                return 0;
+            }
+
+            Vector3 localO = ArsaNative.ToArsaVector(transform.InverseTransformPoint(worldOrigin));
+            Vector3 localD = ArsaNative.ToArsaVector(transform.InverseTransformDirection(worldDirection));
+            return (int)ArsaNative.arsa_world_apply_force_wave(
+                _world,
+                localO.x,
+                localO.y,
+                localO.z,
+                localD.x,
+                localD.y,
+                localD.z,
+                radius,
+                maxImpulse);
         }
 
         /// <summary>

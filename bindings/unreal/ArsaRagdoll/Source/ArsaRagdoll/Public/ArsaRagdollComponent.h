@@ -36,7 +36,8 @@ enum class EArsaBehaviorState : uint8
     Falling = 2,
     Downed = 3,
     Passive = 4,
-    Unconscious = 5
+    Unconscious = 5,
+    Recovering = 6 UMETA(DisplayName = "Recovering")
 };
 
 UENUM(BlueprintType)
@@ -83,6 +84,9 @@ public:
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|Control")
     bool bActiveBalance = true;
 
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|Control")
+    bool bAutoGetUp = true;
+
     /** Latest 17 bone transforms in Unreal Engine coordinates (relative to owner actor if spawned at origin). */
     UPROPERTY(BlueprintReadOnly, Category = "ARSA|Output")
     TArray<FTransform> BoneTransforms;
@@ -106,6 +110,14 @@ public:
     UFUNCTION(BlueprintCallable, Category = "ARSA|Control")
     void SetActiveBalance(bool bEnabled);
 
+    /** Enables or disables automatic procedural get-up from Downed. */
+    UFUNCTION(BlueprintCallable, Category = "ARSA|Control")
+    void SetAutoGetUp(bool bEnabled);
+
+    /** Sets earthquake seismic magnitude (0.0 .. 9.0, 0.0 disables). */
+    UFUNCTION(BlueprintCallable, Category = "ARSA|Control")
+    void SetEarthquake(float Magnitude);
+
     /** Fires a ballistic weapon ray (in Unreal world space) into the ragdoll. Returns hit count. */
     UFUNCTION(BlueprintCallable, Category = "ARSA|Interaction")
     int32 FireWeapon(FVector OriginUnreal, FVector DirectionUnreal, EArsaWeaponKind Weapon);
@@ -113,6 +125,10 @@ public:
     /** Applies a broad two-handed shove impulse along an Unreal world-space ray. Returns hit bone index or -1. */
     UFUNCTION(BlueprintCallable, Category = "ARSA|Interaction")
     int32 ApplyShove(FVector OriginUnreal, FVector DirectionUnreal, float Strength = 300.0f);
+
+    /** Applies a sharp localized punch impulse along an Unreal world-space ray. Returns hit bone index or -1. */
+    UFUNCTION(BlueprintCallable, Category = "ARSA|Interaction")
+    int32 ApplyPunch(FVector Origin, FVector Direction, float Strength = 150.0f);
 
     /** Returns the current procedural behavioral balance state. */
     UFUNCTION(BlueprintCallable, BlueprintPure, Category = "ARSA|Telemetry")
@@ -166,4 +182,13 @@ private:
     EArsaWoundRegion CachedWoundRegion = EArsaWoundRegion::None;
 
     void SyncOutputs();
+    void ConvertUnrealRayToArsa(
+        const FVector& OriginUnreal,
+        const FVector& DirectionUnreal,
+        float& OutOx,
+        float& OutOy,
+        float& OutOz,
+        float& OutDx,
+        float& OutDy,
+        float& OutDz) const;
 };

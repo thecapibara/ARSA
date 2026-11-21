@@ -30,6 +30,7 @@ void UArsaRagdollComponent::BeginPlay()
         MassKg,
         MuscleRatio);
     arsa_world_set_active(WorldHandle, bActiveBalance);
+    arsa_world_set_auto_get_up(WorldHandle, bAutoGetUp);
 
     SyncOutputs();
 }
@@ -74,6 +75,7 @@ void UArsaRagdollComponent::PostEditChangeProperty(FPropertyChangedEvent& Proper
     {
         arsa_world_update_all_profiles(WorldHandle, HeightMeters, MassKg, MuscleRatio);
         arsa_world_set_active(WorldHandle, bActiveBalance);
+        arsa_world_set_auto_get_up(WorldHandle, bAutoGetUp);
     }
 }
 #endif
@@ -102,6 +104,41 @@ void UArsaRagdollComponent::SetActiveBalance(bool bEnabled)
     }
 }
 
+void UArsaRagdollComponent::SetAutoGetUp(bool bEnabled)
+{
+    bAutoGetUp = bEnabled;
+    if (WorldHandle)
+    {
+        arsa_world_set_auto_get_up(WorldHandle, bAutoGetUp);
+    }
+}
+
+void UArsaRagdollComponent::SetEarthquake(float Magnitude)
+{
+    if (WorldHandle)
+    {
+        arsa_world_set_earthquake(WorldHandle, Magnitude);
+    }
+}
+
+void UArsaRagdollComponent::ConvertUnrealRayToArsa(
+    const FVector& OriginUnreal,
+    const FVector& DirectionUnreal,
+    float& OutOx,
+    float& OutOy,
+    float& OutOz,
+    float& OutDx,
+    float& OutDy,
+    float& OutDz) const
+{
+    const FTransform OwnerTransform = GetOwner() ? GetOwner()->GetActorTransform() : FTransform::Identity;
+    const FVector LocalOrigin = OwnerTransform.InverseTransformPosition(OriginUnreal);
+    const FVector LocalDir = OwnerTransform.InverseTransformVectorNoScale(DirectionUnreal);
+
+    UnrealToArsaLocation(LocalOrigin, OutOx, OutOy, OutOz);
+    UnrealToArsaDirection(LocalDir, OutDx, OutDy, OutDz);
+}
+
 int32 UArsaRagdollComponent::FireWeapon(
     FVector OriginUnreal,
     FVector DirectionUnreal,
@@ -112,14 +149,9 @@ int32 UArsaRagdollComponent::FireWeapon(
         return 0;
     }
 
-    const FTransform OwnerTransform = GetOwner() ? GetOwner()->GetActorTransform() : FTransform::Identity;
-    const FVector LocalOrigin = OwnerTransform.InverseTransformPosition(OriginUnreal);
-    const FVector LocalDir = OwnerTransform.InverseTransformVectorNoScale(DirectionUnreal);
-
     float Ox = 0.0f, Oy = 0.0f, Oz = 0.0f;
     float Dx = 0.0f, Dy = 0.0f, Dz = 0.0f;
-    UnrealToArsaLocation(LocalOrigin, Ox, Oy, Oz);
-    UnrealToArsaDirection(LocalDir, Dx, Dy, Dz);
+    ConvertUnrealRayToArsa(OriginUnreal, DirectionUnreal, Ox, Oy, Oz, Dx, Dy, Dz);
 
     return arsa_world_fire_weapon(
         WorldHandle,
@@ -142,16 +174,28 @@ int32 UArsaRagdollComponent::ApplyShove(
         return -1;
     }
 
-    const FTransform OwnerTransform = GetOwner() ? GetOwner()->GetActorTransform() : FTransform::Identity;
-    const FVector LocalOrigin = OwnerTransform.InverseTransformPosition(OriginUnreal);
-    const FVector LocalDir = OwnerTransform.InverseTransformVectorNoScale(DirectionUnreal);
+    float Ox = 0.0f, Oy = 0.0f, Oz = 0.0f;
+    float Dx = 0.0f, Dy = 0.0f, Dz = 0.0f;
+    ConvertUnrealRayToArsa(OriginUnreal, DirectionUnreal, Ox, Oy, Oz, Dx, Dy, Dz);
+
+    return arsa_world_apply_shove(WorldHandle, Ox, Oy, Oz, Dx, Dy, Dz, Strength);
+}
+
+int32 UArsaRagdollComponent::ApplyPunch(
+    FVector Origin,
+    FVector Direction,
+    float Strength)
+{
+    if (!WorldHandle)
+    {
+        return -1;
+    }
 
     float Ox = 0.0f, Oy = 0.0f, Oz = 0.0f;
     float Dx = 0.0f, Dy = 0.0f, Dz = 0.0f;
-    UnrealToArsaLocation(LocalOrigin, Ox, Oy, Oz);
-    UnrealToArsaDirection(LocalDir, Dx, Dy, Dz);
+    ConvertUnrealRayToArsa(Origin, Direction, Ox, Oy, Oz, Dx, Dy, Dz);
 
-    return arsa_world_apply_shove(WorldHandle, Ox, Oy, Oz, Dx, Dy, Dz, Strength);
+    return arsa_world_apply_punch(WorldHandle, Ox, Oy, Oz, Dx, Dy, Dz, Strength);
 }
 
 EArsaBehaviorState UArsaRagdollComponent::GetBehaviorState() const
@@ -206,7 +250,7 @@ void UArsaRagdollComponent::SyncOutputs()
     if (TelFloats >= ARSA_TELEMETRY_FLOATS_PER_RAGDOLL)
     {
         const int32 StateInt = FMath::RoundToInt(TelemetryScratch[7]);
-        CachedBehaviorState = static_cast<EArsaBehaviorState>(FMath::Clamp(StateInt, 0, 5));
+        CachedBehaviorState = static_cast<EArsaBehaviorState>(FMath::Clamp(StateInt, 0, 6));
         CachedHealth = TelemetryScratch[11];
         const int32 WoundInt = FMath::RoundToInt(TelemetryScratch[12]);
         CachedWoundRegion = static_cast<EArsaWoundRegion>(FMath::Clamp(WoundInt, 0, 6));

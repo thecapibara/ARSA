@@ -33,7 +33,8 @@ namespace Arsa
         Falling = 2,
         Downed = 3,
         Passive = 4,
-        Unconscious = 5
+        Unconscious = 5,
+        Recovering = 6
     }
 
     public enum ArsaWoundRegion : uint
@@ -154,6 +155,35 @@ namespace Arsa
         public static extern void arsa_world_set_active(
             IntPtr handle,
             [MarshalAs(UnmanagedType.I1)] bool enabled);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_set_auto_get_up(
+            IntPtr handle,
+            [MarshalAs(UnmanagedType.I1)] bool enabled);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_set_earthquake(
+            IntPtr handle,
+            float magnitude);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_sync_bone_pose(
+            IntPtr handle,
+            UIntPtr bodyIdx,
+            float px,
+            float py,
+            float pz,
+            float qx,
+            float qy,
+            float qz,
+            float qw,
+            float vx,
+            float vy,
+            float vz,
+            float wx,
+            float wy,
+            float wz);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern UIntPtr arsa_world_spawn_box(

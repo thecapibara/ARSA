@@ -39,11 +39,16 @@ ARSA owns the rigid-body solver, ground/obstacle contacts, active balance contro
 
 ### Mode B: Host-Physics Motor Target Mode (UE5 Chaos / Unity PhysX)
 When your host engine owns world collisions and character ragdoll bodies (e.g., Chaos `UPhysicsAsset` or Unity `ArticulationBody` / `ConfigurableJoint`):
-1. Step ARSA's behavioral brain alongside your character (`arsa_world_step`).
-2. Read per-joint PD motor targets via `arsa_world_get_joint_motor_targets(world, motors, max_floats)`.
-3. Each of the 16 articulated joints outputs **8 floats** (`ArsaJointMotorTarget`):
+1. Before stepping ARSA each physics tick, push each host bone's world pose and linear/angular velocities into ARSA via `arsa_world_sync_bone_pose(world, body_idx, px, py, pz, qx, qy, qz, qw, vx, vy, vz, wx, wy, wz)` (converted to ARSA right-handed Y-up meters).
+2. Step ARSA's behavioral brain alongside your character (`arsa_world_step`).
+3. Read per-joint PD motor targets via `arsa_world_get_joint_motor_targets(world, motors, max_floats)`.
+4. Each of the 16 articulated joints outputs **8 floats** (`ArsaJointMotorTarget`):
    `qx, qy, qz, qw, stiffness, damping, max_torque, damage_scale`.
-4. Feed `(qx, qy, qz, qw)` as the angular drive target orientation and scale your engine's angular motor spring/damping/torque limits by `stiffness * damage_scale`, `damping * damage_scale`, and `max_torque * damage_scale`.
+5. Feed `(qx, qy, qz, qw)` as the angular drive target orientation and scale your engine's angular motor spring/damping/torque limits by `stiffness * damage_scale`, `damping * damage_scale`, and `max_torque * damage_scale`.
+
+### World Control & Telemetry Enums
+- **Procedural Get-Up (`arsa_world_set_auto_get_up(world, enabled)`)**: Enables or disables automatic procedural get-up when a ragdoll is in `ARSA_STATE_DOWNED`. When recovering, `telemetry[7]` reports `ARSA_STATE_RECOVERING = 6` (`Balanced = 0`, `Stumbling = 1`, `Falling = 2`, `Downed = 3`, `Passive = 4`, `Unconscious = 5`, `Recovering = 6`).
+- **Earthquake Disturbance (`arsa_world_set_earthquake(world, magnitude)`)**: Sets seismic ground-shake magnitude (`0.0 .. 9.0`; `0.0` disables).
 
 ---
 
