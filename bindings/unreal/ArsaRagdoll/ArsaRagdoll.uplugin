@@ -1,0 +1,23 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.5.0",
+  "FriendlyName": "ARSA Active Ragdoll",
+  "Description": "Cross-engine Active Ragdoll Simulation Architecture (ARSA) native XPBD + Stable-PD physics plugin for Unreal Engine 5.",
+  "Category": "Physics",
+  "CreatedBy": "ARSA Contributors",
+  "DocsURL": "",
+  "MarketplaceURL": "",
+  "SupportURL": "",
+  "CanContainContent": false,
+  "IsBetaVersion": false,
+  "IsExperimentalVersion": false,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "ArsaRagdoll",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
