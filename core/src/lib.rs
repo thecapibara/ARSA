@@ -701,6 +701,11 @@ mod tests {
         for _ in 0..90 {
             world.step(1.0 / 60.0);
             max_pelvis_y = max_pelvis_y.max(world.bodies[pelvis_idx].position.y);
+            world.step(1.0 / 60.0);
+            let py = world.bodies[pelvis_idx].position.y;
+            if py > max_pelvis_y {
+                max_pelvis_y = py;
+            }
             for (i, b) in world.bodies.iter().enumerate() {
                 assert!(
                     b.position.is_finite()
@@ -931,5 +936,109 @@ mod tests {
             max_box_disp > 0.05,
             "earthquake did not shake stacked box: max_box_disp={max_box_disp}"
         );
+    }
+
+    #[test]
+    fn test_arms_do_not_clip_through_chest() {
+        // Verify zero spawn overlap between Forearm/Hand and Pelvis/LowerSpine/Chest even at 166cm / 160kg
+        let extreme_profile = BodyProfile {
+            height_m: 1.66,
+            mass_kg: 160.0,
+            muscle_ratio: 1.80,
+        };
+        let mut world_extreme = ArsaWorld::new();
+        let ex_id = world_extreme.spawn_ragdoll_with_profile(Vec3::ZERO, extreme_profile);
+        let ex_r = &world_extreme.ragdolls[ex_id];
+        let ex_pelvis = &world_extreme.bodies[ex_r.body_indices[BoneId::Pelvis as usize]];
+        let ex_pelvis_hx = match ex_pelvis.collider {
+            ColliderShape::Box { half_extents } => half_extents.x,
+            _ => panic!("expected Pelvis box collider"),
+        };
+        for arm_bone in [
+            BoneId::LeftForearm,
+            BoneId::LeftHand,
+            BoneId::RightForearm,
+            BoneId::RightHand,
+        ] {
+            let b = &world_extreme.bodies[ex_r.body_indices[arm_bone as usize]];
+            let arm_hx = match b.collider {
+                ColliderShape::Box { half_extents } => half_extents.x,
+                ColliderShape::Capsule { radius, .. } => radius,
+                ColliderShape::Sphere { radius } => radius,
+            };
+            assert!(
+                b.position.x.abs() - arm_hx > ex_pelvis_hx,
+                "{arm_bone:?} overlaps Pelvis horizontally at 166cm/160kg spawn"
+            );
+        }
+
+        // Active ragdoll shotgun knockback + inward arm impulses
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::ZERO);
+
+        for _ in 0..10 {
+            world.step(1.0 / 60.0);
+        }
+
+        let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+        let chest_pos = world.bodies[chest_idx].position;
+        let res = world.fire_weapon(
+            chest_pos + Vec3::new(0.0, 0.0, 2.2),
+            Vec3::new(0.0, 0.0, -1.0),
+            WeaponKind::Shotgun,
+        );
+        assert_eq!(res.hit_ragdoll_id, Some(id));
+
+        let chest_half_extents = match world.bodies[chest_idx].collider {
+            ColliderShape::Box { half_extents } => half_extents,
+            _ => panic!("expected Chest box collider"),
+        };
+        let inner_chest = chest_half_extents * 0.65;
+
+        let arm_bones = [
+            BoneId::LeftHand,
+            BoneId::RightHand,
+            BoneId::LeftForearm,
+            BoneId::RightForearm,
+        ];
+
+        for frame in 0..90 {
+            // Periodically push arms inward toward Chest to stress-test self-collision + shoulder cone
+            if frame % 15 == 0 {
+                let c_pos = world.bodies[chest_idx].position;
+                for bone in arm_bones {
+                    let b_idx = world.ragdolls[id].body_indices[bone as usize];
+                    let b_pos = world.bodies[b_idx].position;
+                    let inward = (c_pos - b_pos).normalize_or_zero();
+                    world.apply_impulse_at_point(b_idx, inward * 12.0, b_pos);
+                }
+            }
+
+            world.step(1.0 / 60.0);
+
+            for (i, b) in world.bodies.iter().enumerate() {
+                assert!(
+                    b.position.is_finite()
+                        && b.orientation.is_finite()
+                        && b.linear_velocity.is_finite()
+                        && b.angular_velocity.is_finite(),
+                    "body {i} produced NaN/Inf at frame {frame}"
+                );
+            }
+
+            let c_pos = world.bodies[chest_idx].position;
+            let c_inv_rot = world.bodies[chest_idx].orientation.conjugate();
+            for bone in arm_bones {
+                let b_idx = world.ragdolls[id].body_indices[bone as usize];
+                let local_in_chest = c_inv_rot * (world.bodies[b_idx].position - c_pos);
+                let deep_inside = local_in_chest.x.abs() < inner_chest.x
+                    && local_in_chest.y.abs() < inner_chest.y
+                    && local_in_chest.z.abs() < inner_chest.z;
+                assert!(
+                    !deep_inside,
+                    "{bone:?} clipped deep inside Chest at frame {frame}: local_in_chest={local_in_chest:?}, inner_chest={inner_chest:?}"
+                );
+            }
+        }
     }
 }

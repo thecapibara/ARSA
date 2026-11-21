@@ -78,6 +78,30 @@ impl Contact {
     }
 }
 
+/// Returns `true` for same-ragdoll bone pairs that should resolve self-collision.
+/// Only distal-limb vs torso/head/opposite-distal-limb pairs that cannot overlap
+/// at standing spawn (even at extreme dense profiles like 166 cm / 160 kg) are enabled.
+#[inline]
+pub fn should_ragdoll_bones_collide(bone_a: u8, bone_b: u8) -> bool {
+    let is_distal_left_arm = |b: u8| matches!(b, 6 | 7);
+    let is_distal_right_arm = |b: u8| matches!(b, 9 | 10);
+    let is_distal_arm = |b: u8| is_distal_left_arm(b) || is_distal_right_arm(b);
+    let is_torso_or_head = |b: u8| matches!(b, 0 | 1 | 2 | 4);
+    let is_distal_left_leg = |b: u8| matches!(b, 12 | 13);
+    let is_distal_right_leg = |b: u8| matches!(b, 15 | 16);
+    let is_distal_leg = |b: u8| is_distal_left_leg(b) || is_distal_right_leg(b);
+    let is_upper_torso_or_head = |b: u8| matches!(b, 2 | 4);
+
+    (is_distal_arm(bone_a) && is_torso_or_head(bone_b))
+        || (is_distal_arm(bone_b) && is_torso_or_head(bone_a))
+        || (is_distal_left_arm(bone_a) && is_distal_right_arm(bone_b))
+        || (is_distal_left_arm(bone_b) && is_distal_right_arm(bone_a))
+        || (is_distal_left_leg(bone_a) && is_distal_right_leg(bone_b))
+        || (is_distal_left_leg(bone_b) && is_distal_right_leg(bone_a))
+        || (is_distal_leg(bone_a) && is_upper_torso_or_head(bone_b))
+        || (is_distal_leg(bone_b) && is_upper_torso_or_head(bone_a))
+}
+
 /// Detects all contacts against the `y = 0.0` ground plane, static boxes, and dynamic body pairs.
 pub fn detect_contacts(
     bodies: &[RigidBody],
@@ -116,7 +140,13 @@ pub fn detect_contacts(
                 continue;
             }
             if a.ragdoll_id.is_some() && a.ragdoll_id == b.ragdoll_id {
-                continue;
+                let allow = match (a.bone_id, b.bone_id) {
+                    (Some(ba), Some(bb)) => should_ragdoll_bones_collide(ba, bb),
+                    _ => false,
+                };
+                if !allow {
+                    continue;
+                }
             }
             detect_dynamic_pair(bodies, i, j, &mut contacts);
         }
@@ -142,7 +172,7 @@ pub fn solve_contacts_position(bodies: &mut [RigidBody], contacts: &mut [Contact
         // Soft depenetration cap per solver iteration so deep initial overlaps
         // (e.g. spawning an obstacle under a ragdoll's feet) resolve smoothly
         // over multiple substeps rather than launching bodies into the air.
-        let effective_pen = pen.min(0.025);
+        let effective_pen = pen.min(0.008);
 
         let r_a = pa - bodies[a].position;
         let w_a = bodies[a].generalized_inv_mass(r_a, c.normal);

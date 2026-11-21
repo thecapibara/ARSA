@@ -161,6 +161,7 @@ struct JointSpec {
     parent: BoneId,
     child: BoneId,
     world_anchor_rel: Vec3,
+    frame_parent: Quat,
     kind: JointKind,
     damping: f32,
 }
@@ -353,14 +354,16 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
     ];
 
     let arm_joint = |side: f32, ua: BoneId, fa: BoneId, ha: BoneId| -> [JointSpec; 3] {
+        let shoulder_bias = Quat::from_euler(glam::EulerRot::XYZ, -0.22, 0.0, side * 0.42);
         [
             JointSpec {
                 parent: BoneId::Chest,
                 child: ua,
                 world_anchor_rel: Vec3::new(side * arm_x, 1.430 * s_h, 0.0),
+                frame_parent: shoulder_bias,
                 kind: JointKind::Spherical {
-                    swing_x_limit: 1.55,
-                    swing_z_limit: 1.45,
+                    swing_x_limit: 1.35,
+                    swing_z_limit: 0.95,
                     twist_min: -1.10,
                     twist_max: 1.10,
                 },
@@ -370,6 +373,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
                 parent: ua,
                 child: fa,
                 world_anchor_rel: Vec3::new(side * arm_x, 1.130 * s_h, 0.0),
+                frame_parent: Quat::IDENTITY,
                 kind: JointKind::Hinge {
                     axis: Vec3::X,
                     min_angle: -2.50,
@@ -381,6 +385,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
                 parent: fa,
                 child: ha,
                 world_anchor_rel: Vec3::new(side * arm_x, 0.870 * s_h, 0.0),
+                frame_parent: Quat::IDENTITY,
                 kind: JointKind::Spherical {
                     swing_x_limit: 0.85,
                     swing_z_limit: 0.50,
@@ -398,6 +403,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
                 parent: BoneId::Pelvis,
                 child: th,
                 world_anchor_rel: Vec3::new(side * leg_x, 0.920 * s_h, 0.0),
+                frame_parent: Quat::IDENTITY,
                 kind: JointKind::Spherical {
                     swing_x_limit: 1.25,
                     swing_z_limit: 0.75,
@@ -410,6 +416,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
                 parent: th,
                 child: sh,
                 world_anchor_rel: Vec3::new(side * leg_x, 0.500 * s_h, 0.0),
+                frame_parent: Quat::IDENTITY,
                 kind: JointKind::Hinge {
                     axis: Vec3::X,
                     min_angle: 0.0,
@@ -421,6 +428,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
                 parent: sh,
                 child: ft,
                 world_anchor_rel: Vec3::new(side * leg_x, 0.070 * s_h, 0.0),
+                frame_parent: Quat::IDENTITY,
                 kind: JointKind::Spherical {
                     swing_x_limit: 0.65,
                     swing_z_limit: 0.35,
@@ -442,6 +450,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
             parent: BoneId::Pelvis,
             child: BoneId::LowerSpine,
             world_anchor_rel: Vec3::new(0.0, 1.030 * s_h, 0.0),
+            frame_parent: Quat::IDENTITY,
             kind: JointKind::Spherical {
                 swing_x_limit: 0.45,
                 swing_z_limit: 0.35,
@@ -454,6 +463,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
             parent: BoneId::LowerSpine,
             child: BoneId::Chest,
             world_anchor_rel: Vec3::new(0.0, 1.210 * s_h, 0.0),
+            frame_parent: Quat::IDENTITY,
             kind: JointKind::Spherical {
                 swing_x_limit: 0.45,
                 swing_z_limit: 0.35,
@@ -466,6 +476,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
             parent: BoneId::Chest,
             child: BoneId::Neck,
             world_anchor_rel: Vec3::new(0.0, 1.470 * s_h, 0.0),
+            frame_parent: Quat::IDENTITY,
             kind: JointKind::Spherical {
                 swing_x_limit: 0.45,
                 swing_z_limit: 0.40,
@@ -478,6 +489,7 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
             parent: BoneId::Neck,
             child: BoneId::Head,
             world_anchor_rel: Vec3::new(0.0, 1.560 * s_h, 0.0),
+            frame_parent: Quat::IDENTITY,
             kind: JointKind::Spherical {
                 swing_x_limit: 0.50,
                 swing_z_limit: 0.40,
@@ -549,6 +561,7 @@ pub fn spawn_humanoid_with_profile(
         let j_idx = joints.len();
         joints.push(
             Joint::new(p_idx, c_idx, anchor_parent, anchor_child, j_spec.kind)
+                .with_frames(j_spec.frame_parent, Quat::IDENTITY)
                 .with_solver_params(0.0, j_spec.damping),
         );
         joint_indices[j_cursor] = j_idx;

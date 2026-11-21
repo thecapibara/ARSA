@@ -489,5 +489,6 @@ fn set_motor_target(
     target: Quat,
 ) {
     let j_idx = ragdoll.joint_indices[joint_id as usize];
-    joints[j_idx].motor_target = target.normalize();
+    let j = &mut joints[j_idx];
+    j.motor_target = (j.frame_parent.conjugate() * target * j.frame_child).normalize();
 }

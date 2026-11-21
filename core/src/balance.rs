@@ -1017,7 +1017,8 @@ fn apply_recovery_lift(
 #[inline]
 fn set_target(ragdoll: &RagdollInstance, joints: &mut [Joint], joint_id: JointId, target: Quat) {
     let j_idx = ragdoll.joint_indices[joint_id as usize];
-    joints[j_idx].motor_target = target.normalize();
+    let j = &mut joints[j_idx];
+    j.motor_target = (j.frame_parent.conjugate() * target * j.frame_child).normalize();
 }
 
 fn assign_nominal_gains(
