@@ -18,7 +18,8 @@ pub use joint::{Joint, JointKind};
 pub use math::{inertia_box, inertia_capsule, inertia_sphere, swing_twist_decomposition};
 pub use reflex::{apply_procedural_reflexes, ReflexState, WoundEvent, WoundRegion};
 pub use skeleton::{
-    spawn_humanoid, spawn_humanoid_with_profile, BodyProfile, BoneId, JointId, RagdollInstance,
+    spawn_humanoid, spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId,
+    JointId, RagdollInstance,
 };
 pub use world::{ArsaWorld, GrabConstraint, RaycastHit, WeaponKind, WeaponShotResult};
 
@@ -417,5 +418,60 @@ mod tests {
         let r = &world.ragdolls[id];
         assert!(r.reflex.unconscious, "headshot rifle should cause unconsciousness");
         assert_eq!(r.balance.state, BehaviorState::Unconscious);
+    }
+
+    #[test]
+    fn test_realtime_profile_resize_stability() {
+        let mut world = ArsaWorld::new();
+        let initial_profile = BodyProfile {
+            height_m: 1.65,
+            mass_kg: 60.0,
+            muscle_ratio: 0.9,
+        };
+        let id = world.spawn_ragdoll_with_profile(Vec3::ZERO, initial_profile);
+
+        // Step 0.5 seconds (30 frames at 1/60s)
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+
+        // Resize in-place to 135 kg / 2.17 m
+        let heavy_profile = BodyProfile {
+            height_m: 2.17,
+            mass_kg: 135.0,
+            muscle_ratio: 1.0,
+        };
+        world.update_all_ragdolls_profile(heavy_profile);
+
+        // Step 1.0 second (60 frames at 1/60s)
+        for _ in 0..60 {
+            world.step(1.0 / 60.0);
+        }
+
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf after realtime resize"
+            );
+        }
+
+        let r = &world.ragdolls[id];
+        assert_eq!(r.profile, heavy_profile);
+        let pelvis = &world.bodies[r.body_indices[BoneId::Pelvis as usize]];
+        assert!(
+            pelvis.position.y > 0.72 * r.standing_pelvis_y,
+            "resized ragdoll slumped: pelvis.y={}, threshold={}",
+            pelvis.position.y,
+            0.72 * r.standing_pelvis_y
+        );
+        assert_eq!(
+            r.balance.state,
+            BehaviorState::Balanced,
+            "resized ragdoll expected Balanced, got {:?}",
+            r.balance.state
+        );
     }
 }

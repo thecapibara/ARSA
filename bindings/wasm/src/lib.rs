@@ -177,6 +177,21 @@ impl ArsaSim {
         self.world.set_all_ragdolls_active(enabled);
     }
 
+    /// Updates the anthropometric body profile of all spawned ragdolls in-place
+    /// without resetting the scene.
+    pub fn update_all_ragdolls_profile(
+        &mut self,
+        height_m: f32,
+        mass_kg: f32,
+        muscle_ratio: f32,
+    ) {
+        self.world.update_all_ragdolls_profile(BodyProfile {
+            height_m,
+            mass_kg,
+            muscle_ratio,
+        });
+    }
+
     /// Places a dynamic obstacle box resting on `y = 0` at `(x, hy, z)`.
     pub fn place_obstacle_box(
         &mut self,

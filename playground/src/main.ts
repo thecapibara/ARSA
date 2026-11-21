@@ -19,6 +19,11 @@ type ArsaSimPhase3 = ArsaSim & {
     dz: number,
     weapon_kind: number
   ) => Float32Array;
+  update_all_ragdolls_profile?: (
+    height_m: number,
+    mass_kg: number,
+    muscle_ratio: number
+  ) => void;
 };
 
 type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
@@ -271,6 +276,19 @@ class PlaygroundApp {
   private applyProfilePreset(key: ProfilePresetKey): void {
     this.bodyProfile = { ...PROFILE_PRESETS[key] };
     this.syncProfileUi();
+    this.applyLiveBodyProfile();
+  }
+
+  private applyLiveBodyProfile(): void {
+    if (!this.sim) return;
+    if (typeof this.sim.update_all_ragdolls_profile === 'function') {
+      this.sim.update_all_ragdolls_profile(
+        this.bodyProfile.heightCm / 100,
+        this.bodyProfile.massKg,
+        this.bodyProfile.strength
+      );
+    }
+    this.syncSimulationView(true);
   }
 
   private syncProfileUi(): void {
@@ -385,13 +403,13 @@ class PlaygroundApp {
     this.lab.setGrabTether(false);
   }
 
-  private syncSimulationView(): void {
+  private syncSimulationView(forceRebuild = false): void {
     if (!this.sim) return;
     const count = this.sim.body_count();
     const transforms = this.sim.get_transforms();
     const descriptors = this.sim.get_body_descriptors();
 
-    this.lab.syncBodies(transforms, descriptors, count);
+    this.lab.syncBodies(transforms, descriptors, count, forceRebuild);
 
     if (this.grabbedBodyIndex >= 0 && this.grabbedBodyIndex < count) {
       const tOff = this.grabbedBodyIndex * 7;
@@ -716,6 +734,7 @@ class PlaygroundApp {
         strength: Number(this.sliderStrength.value),
       };
       this.syncProfileUi();
+      this.applyLiveBodyProfile();
     };
     this.sliderHeight.addEventListener('input', onSliderInput);
     this.sliderMass.addEventListener('input', onSliderInput);

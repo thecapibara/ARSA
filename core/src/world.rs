@@ -11,7 +11,9 @@ use crate::collision::{
 };
 use crate::joint::Joint;
 use crate::reflex::{apply_procedural_reflexes, WoundRegion};
-use crate::skeleton::{spawn_humanoid_with_profile, BodyProfile, BoneId, RagdollInstance};
+use crate::skeleton::{
+    spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId, RagdollInstance,
+};
 
 /// Ballistic weapon presets supported by [`ArsaWorld::fire_weapon`].
 #[repr(u32)]
@@ -145,6 +147,13 @@ impl ArsaWorld {
     pub fn set_all_ragdolls_active(&mut self, active: bool) {
         for r in &mut self.ragdolls {
             r.active_enabled = active;
+        }
+    }
+
+    /// Updates the anthropometric body profile of all ragdolls in-place without resetting the scene.
+    pub fn update_all_ragdolls_profile(&mut self, profile: BodyProfile) {
+        for ragdoll in &mut self.ragdolls {
+            update_humanoid_profile(ragdoll, &mut self.bodies, &mut self.joints, profile);
         }
     }
 

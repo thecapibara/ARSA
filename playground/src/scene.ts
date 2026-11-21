@@ -632,7 +632,8 @@ export class LabScene {
   public syncBodies(
     transforms: Float32Array,
     descriptors: Float32Array,
-    count: number
+    count: number,
+    forceRebuild = false
   ): void {
     while (this.bodyPool.length > count) {
       const removed = this.bodyPool.pop()!;
@@ -652,7 +653,7 @@ export class LabScene {
       const sig = `${shapeType}|${dim0.toFixed(4)}|${dim1.toFixed(4)}|${dim2.toFixed(4)}|${ragdollId}|${boneId}`;
       let entry = this.bodyPool[i];
 
-      if (!entry || entry.signature !== sig) {
+      if (forceRebuild || !entry || entry.signature !== sig) {
         if (entry) {
           this.dynamicGroup.remove(entry.object);
           this.disposeObjectGeometries(entry.object);
