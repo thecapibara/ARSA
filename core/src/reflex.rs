@@ -46,6 +46,7 @@ pub struct WoundEvent {
     pub local_point: Vec3,
     pub severity: f32,
     pub time_since_hit: f32,
+    pub hit_from_back: bool,
 }
 
 /// Active environmental hand grab latched onto a static ledge/edge point.
@@ -99,6 +100,19 @@ impl RagdollInstance {
     /// Registers a ballistic or traumatic hit on `bone` at `local_point`, updating per-bone
     /// damage, health, consciousness, and the active wound target.
     pub fn register_hit(&mut self, bone: BoneId, local_point: Vec3, severity: f32, damage: f32) {
+        self.register_hit_with_dir(bone, local_point, severity, damage, false);
+    }
+
+    /// Registers a directional hit on `bone` at `local_point`, recording whether the impact
+    /// arrived from behind (`hit_from_back`) for directional spine/arm trauma reflexes.
+    pub fn register_hit_with_dir(
+        &mut self,
+        bone: BoneId,
+        local_point: Vec3,
+        severity: f32,
+        damage: f32,
+        hit_from_back: bool,
+    ) {
         let sev = if severity.is_finite() {
             severity.max(0.0)
         } else {
@@ -135,6 +149,7 @@ impl RagdollInstance {
             local_point,
             severity: sev,
             time_since_hit: 0.0,
+            hit_from_back,
         });
 
         self.balance.downed_still_time = 0.0;
@@ -410,9 +425,20 @@ pub fn apply_procedural_reflexes(
     }
 
     // Spine hunch / twist / curl + Downed writhe
+    let torso_back_arch = wound.region == WoundRegion::Torso && wound.hit_from_back;
+    let back_arch_active = torso_back_arch && wound.time_since_hit < 1.6;
     let mut spine_pitch = match wound.region {
         WoundRegion::LeftArm | WoundRegion::RightArm => 0.18 * w,
-        WoundRegion::Torso => 0.35 * w,
+        WoundRegion::Torso => {
+            if back_arch_active {
+                -0.38 * w
+            } else if torso_back_arch {
+                let hunch_blend = ((wound.time_since_hit - 1.6) / 0.6).clamp(0.0, 1.0);
+                (-0.38 * (1.0 - hunch_blend) + 0.35 * hunch_blend) * w
+            } else {
+                0.35 * w
+            }
+        }
         WoundRegion::Head => 0.12 * w,
         WoundRegion::LeftLeg | WoundRegion::RightLeg => 0.22 * w,
         WoundRegion::None => 0.0,
@@ -445,6 +471,12 @@ pub fn apply_procedural_reflexes(
             let j = &mut joints[ragdoll.joint_indices[jid as usize]];
             j.motor_target = (j.motor_target * spine_offset).normalize();
         }
+    }
+
+    if back_arch_active {
+        let head_j = &mut joints[ragdoll.joint_indices[JointId::Head as usize]];
+        let head_back = Quat::from_rotation_x(-0.25 * w);
+        head_j.motor_target = (head_j.motor_target * head_back).normalize();
     }
 
     // Arm reach-for-wound (skip while actively bracing mid-air)
@@ -505,7 +537,48 @@ pub fn apply_procedural_reflexes(
                 Quat::from_rotation_x(-0.65),
             );
         }
-        WoundRegion::Torso | WoundRegion::Head => {
+        WoundRegion::Torso => {
+            if back_arch_active {
+                if !left_grab_active {
+                    set_motor_target(
+                        ragdoll,
+                        joints,
+                        JointId::LeftShoulder,
+                        Quat::from_euler(EulerRot::XYZ, 0.35 * w, 0.0, 0.78 * w),
+                    );
+                    set_motor_target(
+                        ragdoll,
+                        joints,
+                        JointId::LeftElbow,
+                        Quat::from_rotation_x(-0.25),
+                    );
+                    let sh = &mut joints[ragdoll.joint_indices[JointId::LeftShoulder as usize]];
+                    sh.motor_stiffness = sh.motor_stiffness.max(68.0 * grav_scale * w);
+                    sh.max_torque = sh.max_torque.max(75.0 * grav_scale * w);
+                }
+                if !right_grab_active {
+                    set_motor_target(
+                        ragdoll,
+                        joints,
+                        JointId::RightShoulder,
+                        Quat::from_euler(EulerRot::XYZ, 0.35 * w, 0.0, -0.78 * w),
+                    );
+                    set_motor_target(
+                        ragdoll,
+                        joints,
+                        JointId::RightElbow,
+                        Quat::from_rotation_x(-0.25),
+                    );
+                    let sh = &mut joints[ragdoll.joint_indices[JointId::RightShoulder as usize]];
+                    sh.motor_stiffness = sh.motor_stiffness.max(68.0 * grav_scale * w);
+                    sh.max_torque = sh.max_torque.max(75.0 * grav_scale * w);
+                }
+            } else {
+                reach(true, false);
+                reach(false, false);
+            }
+        }
+        WoundRegion::Head => {
             reach(true, false);
             reach(false, false);
         }

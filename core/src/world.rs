@@ -666,7 +666,57 @@ impl ArsaWorld {
             // 1b. Update active balance controllers, procedural reflexes & apply PD muscle motors
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
                 let pelvis_idx = ragdoll.body_indices[BoneId::Pelvis as usize];
-                let pelvis_y = self.bodies[pelvis_idx].position.y;
+                let pelvis_pos = self.bodies[pelvis_idx].position;
+                let pelvis_y = pelvis_pos.y;
+                let foot_contacts = self.foot_contacts_buf[r_idx];
+                let s_h = ragdoll.profile.height_m / 1.78;
+                let foot_half_y = 0.035 * s_h;
+                let lf_pos = self.bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]].position;
+                let rf_pos = self.bodies[ragdoll.body_indices[BoneId::RightFoot as usize]].position;
+                let foot_ground_y = match foot_contacts {
+                    (true, true) => 0.5 * (lf_pos.y + rf_pos.y) - foot_half_y,
+                    (true, false) => lf_pos.y - foot_half_y,
+                    (false, true) => rf_pos.y - foot_half_y,
+                    (false, false) => (lf_pos.y.min(rf_pos.y) - foot_half_y).max(0.0),
+                };
+
+                if matches!(
+                    ragdoll.balance.state,
+                    BehaviorState::Balanced | BehaviorState::Stumbling
+                ) && foot_ground_y > 0.35
+                {
+                    let probe_radius = 0.42 * s_h;
+                    let dirs = [
+                        Vec3::new(1.0, 0.0, 0.0),
+                        Vec3::new(-1.0, 0.0, 0.0),
+                        Vec3::new(0.0, 0.0, 1.0),
+                        Vec3::new(0.0, 0.0, -1.0),
+                    ];
+                    let mut escape = Vec3::ZERO;
+                    for d in dirs {
+                        let probe_h = sample_support_height_parts(
+                            &self.static_boxes,
+                            &self.bodies,
+                            pelvis_pos.x + d.x * probe_radius,
+                            pelvis_pos.z + d.z * probe_radius,
+                            pelvis_y,
+                        );
+                        if probe_h < foot_ground_y - 0.50 {
+                            escape -= d;
+                        }
+                    }
+                    if escape.length_squared() > 0.1 {
+                        ragdoll.balance.teetering = true;
+                        ragdoll.balance.teeter_escape_dir = escape.normalize();
+                    } else {
+                        ragdoll.balance.teetering = false;
+                        ragdoll.balance.teeter_escape_dir = Vec3::ZERO;
+                    }
+                } else {
+                    ragdoll.balance.teetering = false;
+                    ragdoll.balance.teeter_escape_dir = Vec3::ZERO;
+                }
+
                 let step_target_ground_y = sample_support_height_parts(
                     &self.static_boxes,
                     &self.bodies,
@@ -678,7 +728,7 @@ impl ArsaWorld {
                     ragdoll,
                     &mut self.bodies,
                     &mut self.joints,
-                    self.foot_contacts_buf[r_idx],
+                    foot_contacts,
                     step_target_ground_y,
                     gravity_mag,
                     self.earthquake_magnitude,
@@ -1132,7 +1182,16 @@ impl ArsaWorld {
                     b.ragdoll_id.zip(b.bone_id.and_then(BoneId::from_u8))
                 };
                 if let Some((r_id, bone)) = ragdoll_info {
-                    self.ragdolls[r_id].register_hit(bone, hit.local_point, severity, damage);
+                    let chest_idx = self.ragdolls[r_id].body_indices[BoneId::Chest as usize];
+                    let chest_fwd = self.bodies[chest_idx].orientation * Vec3::Z;
+                    let hit_from_back = ray_dir.dot(chest_fwd) > 0.25;
+                    self.ragdolls[r_id].register_hit_with_dir(
+                        bone,
+                        hit.local_point,
+                        severity,
+                        damage,
+                        hit_from_back,
+                    );
                     if hit_ragdoll_id.is_none() {
                         hit_ragdoll_id = Some(r_id);
                         hit_region = WoundRegion::from_bone(bone);

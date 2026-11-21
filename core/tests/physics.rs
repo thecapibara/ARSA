@@ -1585,3 +1585,80 @@ fn test_threat_anticipation_raises_guard_before_impact() {
         "RightHand did not rise into defensive guard before impact: rest={rest_right_hand_y}, now={right_hand_y}"
     );
 }
+
+#[test]
+fn test_teeter_on_edge_detects_dropoff_and_leans_safe() {
+    let mut world = ArsaWorld::new();
+    // Elevated platform with top_y = 2.1 and +X edge at x = 1.1
+    world.add_static_box(
+        Vec3::new(0.0, 2.0, 0.0),
+        Vec3::new(1.1, 0.1, 1.1),
+        0.75,
+        0.05,
+    );
+    let id = world.spawn_ragdoll(Vec3::new(0.95, 2.12, 0.0));
+
+    for _ in 0..18 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during teeter on edge test"
+            );
+        }
+    }
+
+    assert!(
+        world.ragdolls[id].balance.teetering,
+        "expected ragdoll near +X platform brink to detect teetering (state={:?})",
+        world.ragdolls[id].balance.state
+    );
+    assert!(
+        world.ragdolls[id].balance.teeter_escape_dir.x < -0.5,
+        "expected teeter_escape_dir.x < -0.5 pointing away from +X cliff, got {:?}",
+        world.ragdolls[id].balance.teeter_escape_dir
+    );
+}
+
+#[test]
+fn test_shot_from_behind_sets_back_flag_and_arches() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::ZERO);
+
+    for _ in 0..12 {
+        world.step(1.0 / 60.0);
+    }
+
+    let res = world.fire_weapon(
+        Vec3::new(0.0, 1.32, -2.5),
+        Vec3::new(0.0, 0.0, 1.0),
+        WeaponKind::Pistol,
+    );
+    assert_eq!(res.hit_ragdoll_id, Some(id));
+    assert_eq!(res.hit_region, WoundRegion::Torso);
+
+    let wound = world.ragdolls[id]
+        .reflex
+        .active_wound
+        .expect("active_wound should be set after shot from behind");
+    assert!(
+        wound.hit_from_back,
+        "expected hit_from_back == true when shot into back of Chest"
+    );
+
+    for _ in 0..24 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during back shot test"
+            );
+        }
+    }
+}

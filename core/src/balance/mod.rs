@@ -72,6 +72,8 @@ pub struct BalanceState {
     pub step_target_xz: Vec3,
     pub step_target_ground_y: f32,
     pub idle_time: f32,
+    pub teetering: bool,
+    pub teeter_escape_dir: Vec3,
 }
 
 impl Default for BalanceState {
@@ -99,6 +101,8 @@ impl Default for BalanceState {
             step_target_xz: Vec3::ZERO,
             step_target_ground_y: 0.0,
             idle_time: 0.0,
+            teetering: false,
+            teeter_escape_dir: Vec3::ZERO,
         }
     }
 }
@@ -343,11 +347,18 @@ pub fn update_ragdoll_balance(
 
             // Express horizontal CoM velocity in pelvis yaw frame (local +Z = fwd, +X = left)
             let local_vel = yaw_inv * com_vel_xz;
+            let teeter_active = ragdoll.balance.teetering && grounded_count > 0;
+            let (teeter_pitch, teeter_roll) = if teeter_active {
+                let local_escape = yaw_inv * ragdoll.balance.teeter_escape_dir;
+                (local_escape.z * 0.28, -local_escape.x * 0.28)
+            } else {
+                (0.0, 0.0)
+            };
             let sway = (ragdoll.balance.idle_time * 1.6).sin() * 0.025;
             let counter_pitch = (-local_vel.z * 0.10).clamp(-0.22, 0.22);
             let counter_roll = (local_vel.x * 0.10).clamp(-0.20, 0.20);
 
-            // Spine, chest, neck, head (forward bracing crouch lean during earthquakes)
+            // Spine, chest, neck, head (forward bracing crouch lean during earthquakes, lean-back when teetering)
             let quake_lean = 0.08 * quake_crouch;
             set_target(
                 ragdoll,
@@ -355,9 +366,9 @@ pub fn update_ragdoll_balance(
                 JointId::LowerSpine,
                 Quat::from_euler(
                     glam::EulerRot::XYZ,
-                    counter_pitch * 0.5 + sway + quake_lean,
+                    counter_pitch * 0.5 + sway + quake_lean + teeter_pitch * 0.5,
                     0.0,
-                    counter_roll * 0.5,
+                    counter_roll * 0.5 + teeter_roll * 0.5,
                 ),
             );
             set_target(
@@ -366,30 +377,42 @@ pub fn update_ragdoll_balance(
                 JointId::ChestSpine,
                 Quat::from_euler(
                     glam::EulerRot::XYZ,
-                    counter_pitch * 0.6 + sway * 0.5 + quake_lean,
+                    counter_pitch * 0.6 + sway * 0.5 + quake_lean + teeter_pitch * 0.5,
                     0.0,
-                    counter_roll * 0.6,
+                    counter_roll * 0.6 + teeter_roll * 0.5,
                 ),
             );
             set_target(
                 ragdoll,
                 joints,
                 JointId::Neck,
-                Quat::from_rotation_x(-counter_pitch * 0.4 - quake_lean * 0.6),
+                Quat::from_rotation_x(
+                    -counter_pitch * 0.4 - quake_lean * 0.6 - teeter_pitch * 0.35,
+                ),
             );
             set_target(
                 ragdoll,
                 joints,
                 JointId::Head,
-                Quat::from_rotation_x(-counter_pitch * 0.3 - quake_lean * 0.6),
+                Quat::from_rotation_x(
+                    -counter_pitch * 0.3 - quake_lean * 0.6 - teeter_pitch * 0.35,
+                ),
             );
 
-            // Arms: relaxed standing bend, flaring outward/opposite velocity when stumbling or bracing in quake
+            // Arms: relaxed standing bend, flaring outward/opposite velocity when stumbling, bracing in quake, or windmilling on edge
             let is_stumbling = next_state == BehaviorState::Stumbling;
             let mut flare = if is_stumbling { 0.48 } else { 0.10 };
             flare += 0.55 * quake_crouch;
+            if teeter_active {
+                flare = flare.max(0.85);
+            }
+            let windmill = if teeter_active {
+                (ragdoll.balance.idle_time * 9.5).sin() * 0.85
+            } else {
+                0.0
+            };
             let arm_pitch_swing = (-local_vel.z * 0.25).clamp(-0.55, 0.55);
-            let elbow_bend = if is_stumbling || quake_mag >= 3.0 {
+            let elbow_bend = if is_stumbling || quake_mag >= 3.0 || teeter_active {
                 -0.55
             } else {
                 -0.25
@@ -402,7 +425,7 @@ pub fn update_ragdoll_balance(
                 JointId::LeftShoulder,
                 Quat::from_euler(
                     glam::EulerRot::XYZ,
-                    arm_pitch_swing,
+                    arm_pitch_swing + windmill,
                     0.0,
                     flare + (-local_vel.x * 0.18).clamp(-0.35, 0.35),
                 ),
@@ -422,7 +445,7 @@ pub fn update_ragdoll_balance(
                 JointId::RightShoulder,
                 Quat::from_euler(
                     glam::EulerRot::XYZ,
-                    arm_pitch_swing,
+                    arm_pitch_swing - windmill,
                     0.0,
                     -flare + (-local_vel.x * 0.18).clamp(-0.35, 0.35),
                 ),
@@ -458,7 +481,12 @@ pub fn update_ragdoll_balance(
                     -1.0
                 };
                 let lat_offset = left_xz * (side_sign * (0.095 + 0.06 * quake_crouch) * s_w);
-                let raw_target = cp_xz + com_vel_xz * 0.12 + lat_offset;
+                let teeter_bias = if teeter_active {
+                    ragdoll.balance.teeter_escape_dir * (0.18 * s_h)
+                } else {
+                    Vec3::ZERO
+                };
+                let raw_target = cp_xz + com_vel_xz * 0.12 + lat_offset + teeter_bias;
                 let pelvis_xz = Vec3::new(pelvis_pos.x, foot_ground_y, pelvis_pos.z);
                 let mut rel_target = raw_target - pelvis_xz;
                 rel_target.y = 0.0;
@@ -620,12 +648,15 @@ pub fn update_ragdoll_balance(
                     foot_ground_y,
                     0.5 * (la_pos.z + ra_pos.z),
                 );
-                let support_center = match foot_contacts {
+                let mut support_center = match foot_contacts {
                     (true, true) => mid_ankles_xz,
                     (true, false) => Vec3::new(la_pos.x, foot_ground_y, la_pos.z),
                     (false, true) => Vec3::new(ra_pos.x, foot_ground_y, ra_pos.z),
                     (false, false) => mid_ankles_xz,
                 };
+                if teeter_active {
+                    support_center += ragdoll.balance.teeter_escape_dir * (0.18 * s_h);
+                }
                 let raw_horiz_err = Vec3::new(
                     support_center.x - com_pos.x,
                     0.0,
