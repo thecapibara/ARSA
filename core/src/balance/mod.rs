@@ -210,7 +210,7 @@ pub fn update_ragdoll_balance(
                 let upright_and_high = pelvis_rel_y >= 0.68 * ragdoll.standing_pelvis_y
                     && chest_up_dot >= 0.65
                     && up_dot >= 0.65;
-                if upright_and_high && cp_offset <= 0.16 * s_h && com_vel_xz.length() <= 0.45 {
+                if upright_and_high && cp_offset <= 0.26 * s_h && com_vel_xz.length() <= 0.45 {
                     BehaviorState::Balanced
                 } else {
                     BehaviorState::Stumbling
@@ -254,9 +254,22 @@ pub fn update_ragdoll_balance(
     } else {
         ragdoll.balance.fallen_time = 0.0;
         ragdoll.balance.downed_still_time = 0.0;
-        let cp_thresh = (0.16 - 0.08 * quake_crouch) * s_h;
-        let vel_thresh = 0.45 - 0.23 * quake_crouch;
-        if cp_offset > cp_thresh || com_vel_xz.length() > vel_thresh {
+        let speed_xz = com_vel_xz.length();
+        let was_stumbling = ragdoll.balance.state == BehaviorState::Stumbling;
+        let enter_cp = (0.24 - 0.10 * quake_crouch) * s_h;
+        let exit_cp = (0.18 - 0.06 * quake_crouch) * s_h;
+        let enter_vel = 0.48 - 0.24 * quake_crouch;
+        let exit_vel = 0.30 - 0.12 * quake_crouch;
+        let settled_wide_stance = quake_crouch < 0.1 && speed_xz < 0.14 && cp_offset < 0.28 * s_h;
+        if settled_wide_stance {
+            BehaviorState::Balanced
+        } else if was_stumbling {
+            if cp_offset > exit_cp || speed_xz > exit_vel {
+                BehaviorState::Stumbling
+            } else {
+                BehaviorState::Balanced
+            }
+        } else if cp_offset > enter_cp || speed_xz > enter_vel {
             BehaviorState::Stumbling
         } else {
             BehaviorState::Balanced
