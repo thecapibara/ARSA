@@ -2557,3 +2557,46 @@ fn test_host_physics_brain_only_and_joint_torques() {
         );
     }
 }
+
+#[test]
+fn test_dynamic_box_resting_on_static_ledge_edge_no_sinking() {
+    let mut world = ArsaWorld::new();
+    // Large static platform with top surface at y = 2.0 and front edge at z = 1.5
+    world.add_static_box(
+        Vec3::new(0.0, 1.0, 0.0),
+        Vec3::new(2.0, 1.0, 1.5),
+        0.75,
+        0.05,
+    );
+    // Spawn a dynamic crate straddling the platform's front edge (z = 1.5), tilted slightly
+    // so its bottom corners are outside the platform while the platform edge intersects its bottom face.
+    let box_idx = world.spawn_box(
+        Vec3::new(0.0, 2.24, 1.62),
+        Vec3::splat(0.22),
+        10.0,
+        Vec3::ZERO,
+    );
+
+    // Step 1.5 seconds: the box must tip off the edge via edge-vs-edge SAT without sinking into the platform
+    let mut max_edge_penetration = 0.0_f32;
+    for _ in 0..90 {
+        world.step(1.0 / 60.0);
+        let b = &world.bodies[box_idx];
+        assert!(b.position.is_finite() && b.orientation.is_finite());
+        // If the box center is near the edge (z < 1.72 && y > 1.78), verify it never sinks deep inside (z < 1.5, y < 2.0)
+        if b.position.z < 1.5 && b.position.y < 2.0 {
+            let depth = (1.5_f32 - b.position.z).min(2.0_f32 - b.position.y);
+            max_edge_penetration = max_edge_penetration.max(depth);
+        }
+    }
+
+    assert!(
+        max_edge_penetration < 0.02,
+        "dynamic box sank into static platform edge: max_edge_penetration={max_edge_penetration}"
+    );
+    assert!(
+        world.bodies[box_idx].position.y < 1.5,
+        "crate straddling past the edge should have tipped off cleanly, got pos={:?}",
+        world.bodies[box_idx].position
+    );
+}

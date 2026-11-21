@@ -171,38 +171,23 @@ pub(super) fn detect_static_box_contacts(
                 }
             }
             ColliderShape::Box { half_extents } => {
-                for local_pt in box_sample_points(half_extents) {
-                    let world_pt = b.world_point(local_pt);
-                    if let Some((pb, normal, pen)) =
-                        point_inside_aabb(world_pt, sb.center, sb.half_extents)
-                    {
+                detect_obb_vs_obb_poses(
+                    b.position,
+                    b.orientation,
+                    half_extents,
+                    sb.center,
+                    Quat::IDENTITY,
+                    sb.half_extents,
+                    |geom| {
                         out.push(Contact::new(
                             bodies,
                             idx,
                             None,
-                            (world_pt, pb, normal, pen),
+                            geom,
                             ContactMaterial { ..mat },
                         ));
-                    }
-                }
-                let inv_rot = b.orientation.conjugate();
-                for sb_corner_offset in box_corners(sb.half_extents) {
-                    let world_sb_corner = sb.center + sb_corner_offset;
-                    let local_in_b = inv_rot * (world_sb_corner - b.position);
-                    if let Some((local_pa, local_normal_out, pen)) =
-                        point_inside_aabb(local_in_b, Vec3::ZERO, half_extents)
-                    {
-                        let normal = -(b.orientation * local_normal_out);
-                        let pa = b.world_point(local_pa);
-                        out.push(Contact::new(
-                            bodies,
-                            idx,
-                            None,
-                            (pa, world_sb_corner, normal, pen),
-                            ContactMaterial { ..mat },
-                        ));
-                    }
-                }
+                    },
+                );
             }
         }
         return;
@@ -1066,25 +1051,5 @@ fn box_corners(h: Vec3) -> [Vec3; 8] {
         Vec3::new(h.x, -h.y, h.z),
         Vec3::new(-h.x, h.y, h.z),
         Vec3::new(h.x, h.y, h.z),
-    ]
-}
-
-#[inline]
-fn box_sample_points(h: Vec3) -> [Vec3; 14] {
-    [
-        Vec3::new(-h.x, -h.y, -h.z),
-        Vec3::new(h.x, -h.y, -h.z),
-        Vec3::new(-h.x, h.y, -h.z),
-        Vec3::new(h.x, h.y, -h.z),
-        Vec3::new(-h.x, -h.y, h.z),
-        Vec3::new(h.x, -h.y, h.z),
-        Vec3::new(-h.x, h.y, h.z),
-        Vec3::new(h.x, h.y, h.z),
-        Vec3::new(h.x, 0.0, 0.0),
-        Vec3::new(-h.x, 0.0, 0.0),
-        Vec3::new(0.0, h.y, 0.0),
-        Vec3::new(0.0, -h.y, 0.0),
-        Vec3::new(0.0, 0.0, h.z),
-        Vec3::new(0.0, 0.0, -h.z),
     ]
 }

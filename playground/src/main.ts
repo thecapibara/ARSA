@@ -595,12 +595,45 @@ class PlaygroundApp {
     return this.raycaster.ray;
   }
 
+  private getPlacerHalfExtents(mode: PlacerMode): [number, number, number] {
+    switch (mode) {
+      case 'curb':
+        return [0.35, 0.14, 0.18];
+      case 'cube':
+        return [0.24, 0.24, 0.24];
+      case 'sphere':
+        return [0.28, 0.28, 0.28];
+      case 'dynamite':
+        return [0.06, 0.174, 0.06];
+      case 'ragdoll':
+        return [0.28, 0.0, 0.22];
+    }
+  }
+
   private updatePlacePreview(clientX: number, clientY: number): boolean {
     const ray = this.updatePointerRay(clientX, clientY);
     const surf = this.lab.raycastPlacementSurface(this.raycaster);
     let hit: THREE.Vector3 | null = null;
     if (surf) {
-      this.groundHit.copy(surf);
+      const [hx, hy, hz] = this.getPlacerHalfExtents(this.activePlacerMode);
+      const n = surf.normal;
+      const eps = 0.004;
+      // Offset flush outside the hit surface along its outward normal so objects
+      // never spawn embedded inside vertical walls, cube sides, or tilted ramps.
+      const center = surf.point.clone();
+      if (this.activePlacerMode === 'ragdoll') {
+        center.x += n.x * (hx + eps);
+        center.z += n.z * (hz + eps);
+        center.y = Math.max(0.0, surf.point.y);
+      } else {
+        // Exact support distance of an axis-aligned box along normal `n`:
+        // |n.x|*hx + |n.y|*hy + |n.z|*hz, then convert center -> bottom-center (y - hy)
+        const support =
+          Math.abs(n.x) * hx + Math.abs(n.y) * hy + Math.abs(n.z) * hz + eps;
+        center.addScaledVector(n, support);
+        center.y = Math.max(0.0, center.y - hy);
+      }
+      this.groundHit.copy(center);
       hit = this.groundHit;
     } else {
       hit = ray.intersectPlane(this.groundPlane, this.groundHit);
@@ -1548,21 +1581,31 @@ class PlaygroundApp {
           this.setOpenPopover(null);
           break;
         case 'KeyF':
-          this.setCameraMode(
-            this.lab.getCameraMode() === 'orbit' ? 'fly' : 'orbit'
-          );
+          if (!e.repeat) {
+            this.setCameraMode(
+              this.lab.getCameraMode() === 'orbit' ? 'fly' : 'orbit'
+            );
+          }
           break;
         case 'KeyM':
-          this.setActiveMuscleMode(!this.activeMuscleMode);
+          if (!e.repeat) {
+            this.setActiveMuscleMode(!this.activeMuscleMode);
+          }
           break;
         case 'KeyD':
-          this.setDebugTelemetry(!this.debugTelemetry);
+          if (this.lab.getCameraMode() === 'orbit' && !e.repeat) {
+            this.setDebugTelemetry(!this.debugTelemetry);
+          }
           break;
         case 'KeyP':
-          this.setPaused(!this.paused);
+          if (!e.repeat) {
+            this.setPaused(!this.paused);
+          }
           break;
         case 'KeyT':
-          this.setTimeScale(this.timeScale < 0.5 ? 1.0 : 0.15);
+          if (!e.repeat) {
+            this.setTimeScale(this.timeScale < 0.5 ? 1.0 : 0.15);
+          }
           break;
         case 'BracketLeft':
         case 'Minus':

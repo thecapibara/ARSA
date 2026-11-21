@@ -1366,10 +1366,13 @@ export class LabScene {
   }
 
   /**
-   * Raycasts against static obstacle meshes (stairs, platforms) and dynamic non-ragdoll
-   * prop meshes so placed entities can stack on top of surfaces above the ground plane.
+   * Raycasts against static obstacle meshes (stairs, platforms, ramps), terrain heightfield,
+   * and dynamic non-ragdoll prop meshes, returning hit point and outward world-space normal
+   * so placed entities sit flush against tops, slopes, and vertical sides without overlapping.
    */
-  public raycastPlacementSurface(raycaster: THREE.Raycaster): THREE.Vector3 | null {
+  public raycastPlacementSurface(
+    raycaster: THREE.Raycaster
+  ): { point: THREE.Vector3; normal: THREE.Vector3 } | null {
     const targets: THREE.Object3D[] = [...this.staticGroup.children];
     if (this.terrainSurfaceMesh) {
       targets.push(this.terrainSurfaceMesh);
@@ -1389,11 +1392,20 @@ export class LabScene {
       return null;
     }
 
-    const pt = meshHit.point.clone();
-    if (pt.y < 0.0) {
-      pt.y = 0.0;
+    const point = meshHit.point.clone();
+    if (point.y < 0.0) {
+      point.y = 0.0;
     }
-    return pt;
+    const normal = meshHit.face
+      ? meshHit.face.normal
+          .clone()
+          .transformDirection(meshHit.object.matrixWorld)
+          .normalize()
+      : new THREE.Vector3(0, 1, 0);
+    if (normal.dot(raycaster.ray.direction) > 0) {
+      normal.negate();
+    }
+    return { point, normal };
   }
 
   /**
