@@ -27,6 +27,23 @@ Because the entire physics & behavioral core lives in pure **Rust (`arsa-core`)*
 
 ---
 
+## Playground Screenshots
+
+> All screenshots below are captured directly from the live **ARSA Three.js + WebAssembly Playground** (`playground/`).
+
+<table>
+  <tr>
+    <td><img src="docs/assets/screenshots/playground_crowd_1.jpg" alt="ARSA Playground — Crowd 4x & Heavy Sphere Impact" width="100%" /></td>
+    <td><img src="docs/assets/screenshots/playground_crowd_2.jpg" alt="ARSA Playground — Multi-Build Active Balance & Telemetry" width="100%" /></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/screenshots/playground_trip.jpg" alt="ARSA Playground — Emergent Tripping Over Ground Obstacle" width="100%" /></td>
+    <td><img src="docs/assets/screenshots/playground_stairs.jpg" alt="ARSA Playground — Staircase Multi-Ragdoll Collision" width="100%" /></td>
+  </tr>
+</table>
+
+---
+
 ## Key Features
 
 - **Anthropometric 17-Bone Humanoid Rig** — Realistic segment mass distribution, inertia tensors, strict 1-DOF hinge limits (knees & elbows never bend backward), and elliptical swing-twist cones (shoulders, hips, spine, neck, wrists, ankles).
