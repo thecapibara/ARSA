@@ -1079,7 +1079,7 @@ fn update_hand_grab(
     }
 
     let max_reach = 0.78 * s_h;
-    let min_ledge_y = (pelvis_pos.y - 0.35 * s_h).max(0.35);
+    let min_ledge_y = (pelvis_pos.y - 0.50 * s_h).max(0.35);
     let max_ledge_y = chest_pos.y + 0.65 * s_h;
     let mut best_point: Option<Vec3> = None;
     let mut best_dist_sq = f32::MAX;

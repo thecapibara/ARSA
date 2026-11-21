@@ -21,7 +21,7 @@
         <aside class="hud-panel hud-telemetry" aria-label="Simulation Telemetry">
           <div class="brand-header">
             <span class="brand-badge">ARSA</span>
-            <span class="brand-version">v0.5 — Phase 5: ARSA Engine</span>
+            <span class="brand-version">v0.6 — ARSA Engine</span>
             <button
               class="audio-toggle-btn"
               id="btn-audio-toggle"
@@ -144,6 +144,14 @@
                     <span class="slider-val" id="val-strength">1.00×</span>
                   </span>
                   <input id="slider-strength" type="range" min="0.3" max="1.8" step="0.05" value="1.0" />
+                </label>
+
+                <label class="slider-row" for="slider-intoxication">
+                  <span class="slider-meta">
+                    <span>Stagger / Drunk</span>
+                    <span class="slider-val" id="val-intoxication">0%</span>
+                  </span>
+                  <input id="slider-intoxication" type="range" min="0" max="100" step="5" value="0" />
                 </label>
               </div>
 

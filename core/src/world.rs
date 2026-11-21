@@ -7,8 +7,8 @@ use glam::{Quat, Vec3};
 use crate::balance::{update_ragdoll_balance, BehaviorState, RecoveryStage};
 use crate::body::{ColliderShape, RigidBody};
 use crate::collision::{
-    body_world_aabb, detect_contacts, solve_contacts_position, solve_contacts_velocity, Contact,
-    StaticBox,
+    body_world_aabb, detect_contacts, solve_contacts_position_ordered,
+    solve_contacts_velocity_ordered, Contact, StaticBox,
 };
 use crate::joint::Joint;
 use crate::reflex::{apply_procedural_reflexes, IncomingThreat, WoundRegion};
@@ -245,6 +245,18 @@ impl ArsaWorld {
         }
     }
 
+    /// Sets the procedural stagger/intoxication level (`0.0..=1.0`) for all ragdolls in the world.
+    pub fn set_all_ragdolls_intoxication(&mut self, level: f32) {
+        let clamped = if level.is_finite() {
+            level.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        for r in &mut self.ragdolls {
+            r.balance.intoxication = clamped;
+        }
+    }
+
     /// Sets an external target pose (16 parent-relative joint orientations in `JointId` order)
     /// blended onto the ragdoll's active motor targets with weight `blend_weight` (`0.0..=1.0`).
     /// Returns `false` if `ragdoll_id` is out of range or any input quaternion / weight is non-finite or zero.
@@ -463,6 +475,7 @@ impl ArsaWorld {
         } else {
             Vec::new()
         };
+        let mut ragdoll_max_falloffs = vec![0.0_f32; self.ragdolls.len()];
 
         for b in &mut self.bodies {
             if b.inv_mass == 0.0 {
@@ -486,11 +499,10 @@ impl ArsaWorld {
             b.linear_velocity += blast_dir * dv;
             affected += 1;
 
-            if track_damage {
-                if let (Some(r_id), Some(bone)) =
-                    (b.ragdoll_id, b.bone_id.and_then(BoneId::from_u8))
-                {
-                    if r_id < self.ragdolls.len() {
+            if let (Some(r_id), Some(bone)) = (b.ragdoll_id, b.bone_id.and_then(BoneId::from_u8)) {
+                if r_id < self.ragdolls.len() {
+                    ragdoll_max_falloffs[r_id] = ragdoll_max_falloffs[r_id].max(falloff);
+                    if track_damage {
                         ragdoll_bone_falloffs[r_id][bone as usize] =
                             ragdoll_bone_falloffs[r_id][bone as usize].max(falloff);
                         let local_pt =
@@ -521,6 +533,16 @@ impl ArsaWorld {
                     let damage = falloff * max_damage;
                     let severity = (falloff * (max_damage / 75.0)).clamp(0.0, 1.0);
                     ragdoll.register_hit(best_bone, local_pt, severity, damage);
+                }
+            }
+        }
+
+        for (r_id, &falloff) in ragdoll_max_falloffs.iter().enumerate() {
+            if falloff > 0.0 {
+                let ragdoll = &mut self.ragdolls[r_id];
+                if !ragdoll.reflex.unconscious {
+                    ragdoll.balance.concussion_timer =
+                        (ragdoll.balance.concussion_timer + 3.5 * falloff).min(5.0);
                 }
             }
         }
@@ -602,7 +624,7 @@ impl ArsaWorld {
                 .map(|r| (r.balance.left_foot_grounded, r.balance.right_foot_grounded)),
         );
 
-        for _ in 0..substeps {
+        for substep in 0..substeps {
             // 1. Save previous state & integrate external forces
             for b in &mut self.bodies {
                 b.prev_position = b.position;
@@ -751,7 +773,10 @@ impl ArsaWorld {
                     sub_dt,
                 );
             }
-            for j in &self.joints {
+            let j_len = self.joints.len();
+            let rev_sub = substep % 2 == 1;
+            for idx in 0..j_len {
+                let j = &self.joints[if rev_sub { j_len - 1 - idx } else { idx }];
                 j.apply_muscle_motor(&mut self.bodies, sub_dt);
             }
 
@@ -799,7 +824,7 @@ impl ArsaWorld {
                 }
             }
 
-            // Track per-ragdoll foot grounding from detected contacts
+            // Track per-ragdoll foot grounding from detected contacts & near-support fallback
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
                 let lf_idx = ragdoll.body_indices[BoneId::LeftFoot as usize];
                 let rf_idx = ragdoll.body_indices[BoneId::RightFoot as usize];
@@ -817,14 +842,42 @@ impl ArsaWorld {
                         rf_grounded = true;
                     }
                 }
+                let s_h = ragdoll.profile.height_m / 1.78;
+                let foot_near_support = |foot_idx: usize| -> bool {
+                    let foot = &self.bodies[foot_idx];
+                    if foot.linear_velocity.y.abs() >= 0.18 {
+                        return false;
+                    }
+                    let foot_hy = match foot.collider {
+                        ColliderShape::Box { half_extents } => half_extents.y,
+                        _ => 0.035 * s_h,
+                    };
+                    let support_y = sample_support_height_parts(
+                        &self.static_boxes,
+                        &self.bodies,
+                        foot.position.x,
+                        foot.position.z,
+                        foot.position.y + 0.05,
+                    );
+                    ((foot.position.y - foot_hy) - support_y).abs() <= 0.018
+                };
+                if !lf_grounded {
+                    lf_grounded = foot_near_support(lf_idx);
+                }
+                if !rf_grounded {
+                    rf_grounded = foot_near_support(rf_idx);
+                }
                 self.foot_contacts_buf[r_idx] = (lf_grounded, rf_grounded);
                 ragdoll.balance.left_foot_grounded = lf_grounded;
                 ragdoll.balance.right_foot_grounded = rf_grounded;
             }
 
-            // 3. XPBD positional & angular constraint iterations
-            for _ in 0..self.solver_iterations.max(1) {
-                for j in &self.joints {
+            // 3. XPBD positional & angular constraint iterations (symmetric sweep eliminates L/R bias)
+            for iter in 0..self.solver_iterations.max(1) {
+                let reverse = (iter + substep) % 2 == 1;
+                let j_len = self.joints.len();
+                for idx in 0..j_len {
+                    let j = &self.joints[if reverse { j_len - 1 - idx } else { idx }];
                     j.solve_position(&mut self.bodies, sub_dt);
                     j.solve_limits(&mut self.bodies, sub_dt);
                 }
@@ -843,7 +896,7 @@ impl ArsaWorld {
                         body.position += correction;
                     }
                 }
-                solve_contacts_position(&mut self.bodies, &mut self.contacts_buf);
+                solve_contacts_position_ordered(&mut self.bodies, &mut self.contacts_buf, reverse);
             }
 
             // 4. Derive velocities from position & orientation changes
@@ -884,10 +937,19 @@ impl ArsaWorld {
             }
 
             // 5. Velocity pass (joint damping + dynamic friction & restitution)
-            for j in &self.joints {
+            for idx in 0..j_len {
+                let j = &self.joints[if rev_sub { j_len - 1 - idx } else { idx }];
                 j.solve_velocity_damping(&mut self.bodies, sub_dt);
             }
-            solve_contacts_velocity(&mut self.bodies, &self.contacts_buf, sub_dt, gravity_mag);
+            for v_iter in 0..self.solver_iterations.max(1) {
+                solve_contacts_velocity_ordered(
+                    &mut self.bodies,
+                    &self.contacts_buf,
+                    sub_dt,
+                    gravity_mag,
+                    (substep + v_iter) % 2 == 1,
+                );
+            }
         }
 
         // Put calm non-ragdoll, non-dynamite dynamic props to sleep when no earthquake is active

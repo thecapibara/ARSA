@@ -1441,8 +1441,8 @@ fn test_ledge_grab_catches_platform_edge() {
         0.75,
         0.05,
     );
-    // Spawn on the platform brink (right foot on ledge x=1.10, left foot stepping off)
-    let id = world.spawn_ragdoll(Vec3::new(1.15, 2.12, 0.0));
+    // Spawn right off the platform brink (x=1.10) so the ragdoll drops past the ledge within arm's reach
+    let id = world.spawn_ragdoll(Vec3::new(1.26, 2.12, 0.0));
 
     let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
     let chest_pos = world.bodies[chest_idx].position;
@@ -1753,5 +1753,106 @@ fn test_fast_spin_tumble_triggers_fetal_protect() {
         world.bodies[chest_idx].angular_velocity,
         world.bodies[pelvis_idx].angular_velocity,
         r.reflex.high_falling
+    );
+}
+
+#[test]
+fn test_standing_5s_zero_drift_and_zero_yaw_spin() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+
+    // Step 5.0 seconds (300 frames at 1/60s)
+    for _ in 0..300 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during 5s standing test"
+            );
+        }
+    }
+
+    let pelvis = &world.bodies[pelvis_idx];
+    let chest = &world.bodies[chest_idx];
+    let horiz_drift = Vec3::new(pelvis.position.x, 0.0, pelvis.position.z).length();
+    let pelvis_fwd = pelvis.orientation * Vec3::Z;
+    let fwd_xz = Vec3::new(pelvis_fwd.x, 0.0, pelvis_fwd.z).normalize_or_zero();
+    let yaw_angle = fwd_xz.x.atan2(fwd_xz.z).abs();
+    let pelvis_up_dot = (pelvis.orientation * Vec3::Y).y;
+    let chest_up_dot = (chest.orientation * Vec3::Y).y;
+
+    assert!(
+        horiz_drift < 0.04,
+        "standing ragdoll drifted horizontally over 5s: horiz_drift={horiz_drift}, pos={:?}",
+        pelvis.position
+    );
+    assert!(
+        yaw_angle < 0.06,
+        "standing ragdoll spun in yaw over 5s: yaw_angle={yaw_angle} rad, fwd={fwd_xz:?}"
+    );
+    assert!(
+        pelvis_up_dot > 0.96 && chest_up_dot > 0.96,
+        "standing ragdoll leaned off-vertical over 5s: pelvis_up_dot={pelvis_up_dot}, chest_up_dot={chest_up_dot}"
+    );
+    assert_eq!(
+        world.ragdolls[id].balance.state,
+        BehaviorState::Balanced,
+        "expected Balanced after 5s standing, got {:?}",
+        world.ragdolls[id].balance.state
+    );
+}
+
+#[test]
+fn test_intoxication_causes_visible_sway_and_stagger() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+
+    world.set_all_ragdolls_intoxication(0.85);
+    assert!((world.ragdolls[id].balance.intoxication - 0.85).abs() < 1e-6);
+
+    let mut max_pelvis_horiz_disp = 0.0_f32;
+    let mut max_chest_tilt = 0.0_f32;
+    let mut max_com_speed = 0.0_f32;
+    let mut saw_stumble = false;
+
+    // Step 2.5 seconds (150 frames at 1/60s)
+    for _ in 0..150 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during intoxication test"
+            );
+        }
+        let pelvis_pos = world.bodies[pelvis_idx].position;
+        max_pelvis_horiz_disp =
+            max_pelvis_horiz_disp.max(Vec3::new(pelvis_pos.x, 0.0, pelvis_pos.z).length());
+        let chest_up_y = (world.bodies[chest_idx].orientation * Vec3::Y)
+            .y
+            .clamp(-1.0, 1.0);
+        max_chest_tilt = max_chest_tilt.max(chest_up_y.acos());
+        let com_v = world.ragdolls[id].balance.com_vel;
+        max_com_speed = max_com_speed.max(Vec3::new(com_v.x, 0.0, com_v.z).length());
+        if matches!(
+            world.ragdolls[id].balance.state,
+            BehaviorState::Stumbling | BehaviorState::Falling
+        ) {
+            saw_stumble = true;
+        }
+    }
+
+    assert!(
+        max_chest_tilt > 0.12 && (max_pelvis_horiz_disp > 0.06 || saw_stumble || max_com_speed > 0.18),
+        "intoxication did not produce visible sway/stagger: max_chest_tilt={max_chest_tilt}, max_pelvis_horiz_disp={max_pelvis_horiz_disp}, max_com_speed={max_com_speed}, saw_stumble={saw_stumble}"
     );
 }

@@ -253,6 +253,11 @@ impl ArsaSim {
         self.world.set_earthquake(magnitude);
     }
 
+    /// Sets procedural stagger/intoxication level (`0.0..=1.0`, `0.0` disables) for all ragdolls.
+    pub fn set_intoxication(&mut self, level: f32) {
+        self.world.set_all_ragdolls_intoxication(level);
+    }
+
     /// Returns the current earthquake seismic magnitude (`0.0..=9.0`).
     pub fn get_earthquake(&self) -> f32 {
         self.world.earthquake_magnitude

@@ -261,6 +261,17 @@ pub unsafe extern "C" fn arsa_world_set_earthquake(handle: *mut ArsaWorldHandle,
     }
 }
 
+/// Sets the procedural stagger/intoxication level (`0.0..=1.0`) for all ragdolls in the world.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_intoxication(handle: *mut ArsaWorldHandle, level: f32) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.set_all_ragdolls_intoxication(level);
+    }
+}
+
 /// Spawns a dynamic rigid-body box and returns its body index (`usize::MAX` on null).
 ///
 /// # Safety

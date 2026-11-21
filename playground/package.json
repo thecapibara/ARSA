@@ -1,7 +1,7 @@
 {
   "name": "arsa-playground",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.6.0",
   "description": "ARSA Active Ragdoll Simulation Architecture — Interactive Three.js Physics Test Chamber",
   "type": "module",
   "scripts": {

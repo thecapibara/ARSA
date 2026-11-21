@@ -168,6 +168,9 @@ bool arsa_world_clear_target_pose(ArsaWorldHandle *handle, size_t ragdoll_id);
 /** Sets the earthquake seismic magnitude (0.0 .. 9.0, 0.0 disables). */
 void arsa_world_set_earthquake(ArsaWorldHandle *handle, float magnitude);
 
+/** Sets the procedural stagger/intoxication level (0.0 .. 1.0) for all ragdolls. */
+void arsa_world_set_intoxication(ArsaWorldHandle *handle, float level);
+
 /** Spawns a dynamic rigid-body box and returns its body index (SIZE_MAX on null). */
 size_t arsa_world_spawn_box(
     ArsaWorldHandle *handle,

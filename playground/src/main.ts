@@ -24,6 +24,7 @@ type ArsaSimExt = ArsaSim & {
   take_explosions?: () => Float32Array;
   set_auto_get_up?: (enabled: boolean) => void;
   set_earthquake?: (magnitude: number) => void;
+  set_intoxication?: (level: number) => void;
 };
 
 type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
@@ -129,6 +130,7 @@ class PlaygroundApp {
   private activeMuscleMode = true;
   private autoGetUpEnabled = true;
   private earthquakeMagnitude = 0;
+  private intoxicationLevel = 0;
   private debugTelemetry = true;
 
   private bodyProfile: BodyProfile = { ...PROFILE_PRESETS.standard };
@@ -187,9 +189,13 @@ class PlaygroundApp {
   private readonly sliderHeight = document.getElementById('slider-height') as HTMLInputElement;
   private readonly sliderMass = document.getElementById('slider-mass') as HTMLInputElement;
   private readonly sliderStrength = document.getElementById('slider-strength') as HTMLInputElement;
+  private readonly sliderIntoxication = document.getElementById(
+    'slider-intoxication'
+  ) as HTMLInputElement;
   private readonly valHeight = document.getElementById('val-height')!;
   private readonly valMass = document.getElementById('val-mass')!;
   private readonly valStrength = document.getElementById('val-strength')!;
+  private readonly valIntoxication = document.getElementById('val-intoxication')!;
   private readonly sliderSimSpeed = document.getElementById(
     'slider-sim-speed'
   ) as HTMLInputElement;
@@ -221,6 +227,7 @@ class PlaygroundApp {
     this.syncProfileUi();
     this.setActiveMuscleMode(true);
     this.setAutoGetUp(true);
+    this.setIntoxicationPercent(0);
     this.setEarthquakeMagnitude(0);
     this.setDebugTelemetry(true);
     this.setCameraMode('orbit');
@@ -259,12 +266,7 @@ class PlaygroundApp {
       this.sim.reset_lab_scene(scenario);
     }
 
-    if (typeof this.sim.set_active_mode === 'function') {
-      this.sim.set_active_mode(this.activeMuscleMode);
-    }
-    if (typeof this.sim.set_auto_get_up === 'function') {
-      this.sim.set_auto_get_up(this.autoGetUpEnabled);
-    }
+    this.applyRagdollControlModes();
     if (typeof this.sim.set_earthquake === 'function') {
       this.sim.set_earthquake(this.earthquakeMagnitude);
     }
@@ -391,6 +393,29 @@ class PlaygroundApp {
     this.autoGetUpBtn.classList.toggle('active', enabled);
     this.autoGetUpBtn.setAttribute('aria-pressed', String(enabled));
     this.autoGetUpState.textContent = enabled ? 'ON' : 'OFF';
+  }
+
+  private setIntoxicationPercent(percent: number): void {
+    const clamped = Math.max(0, Math.min(100, Math.round(percent)));
+    this.intoxicationLevel = clamped / 100;
+    if (this.sim && typeof this.sim.set_intoxication === 'function') {
+      this.sim.set_intoxication(this.intoxicationLevel);
+    }
+    this.sliderIntoxication.value = String(clamped);
+    this.valIntoxication.textContent = `${clamped}%`;
+  }
+
+  private applyRagdollControlModes(): void {
+    if (!this.sim) return;
+    if (typeof this.sim.set_active_mode === 'function') {
+      this.sim.set_active_mode(this.activeMuscleMode);
+    }
+    if (typeof this.sim.set_auto_get_up === 'function') {
+      this.sim.set_auto_get_up(this.autoGetUpEnabled);
+    }
+    if (typeof this.sim.set_intoxication === 'function') {
+      this.sim.set_intoxication(this.intoxicationLevel);
+    }
   }
 
   private setEarthquakeMagnitude(magnitude: number): void {
@@ -525,12 +550,7 @@ class PlaygroundApp {
       this.sim.spawn_ragdoll(jitterX, spawnY, jitterZ);
     }
 
-    if (typeof this.sim.set_active_mode === 'function') {
-      this.sim.set_active_mode(this.activeMuscleMode);
-    }
-    if (typeof this.sim.set_auto_get_up === 'function') {
-      this.sim.set_auto_get_up(this.autoGetUpEnabled);
-    }
+    this.applyRagdollControlModes();
     this.syncSimulationView();
   }
 
@@ -879,12 +899,7 @@ class PlaygroundApp {
         } else {
           this.sim.spawn_ragdoll(x, y + 0.02, z);
         }
-        if (typeof this.sim.set_active_mode === 'function') {
-          this.sim.set_active_mode(this.activeMuscleMode);
-        }
-        if (typeof this.sim.set_auto_get_up === 'function') {
-          this.sim.set_auto_get_up(this.autoGetUpEnabled);
-        }
+        this.applyRagdollControlModes();
         this.audio.playBoxDrop();
         break;
       }
@@ -1180,6 +1195,10 @@ class PlaygroundApp {
     this.sliderHeight.addEventListener('input', () => onSliderInput(true));
     this.sliderMass.addEventListener('input', () => onSliderInput(true));
     this.sliderStrength.addEventListener('input', () => onSliderInput(false));
+    this.sliderIntoxication.addEventListener('input', () => {
+      const pct = Number(this.sliderIntoxication.value);
+      if (!Number.isNaN(pct)) this.setIntoxicationPercent(pct);
+    });
 
     this.bindCollapsible('btn-profile-collapse', 'profile-body');
     this.bindCollapsible('btn-quake-collapse', 'quake-body');

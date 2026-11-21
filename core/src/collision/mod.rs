@@ -213,7 +213,19 @@ pub fn detect_contacts(
 
 /// Solves positional contact penetration and static friction for one solver iteration.
 pub fn solve_contacts_position(bodies: &mut [RigidBody], contacts: &mut [Contact]) {
-    for c in contacts.iter_mut() {
+    solve_contacts_position_ordered(bodies, contacts, false);
+}
+
+/// Solves positional contact penetration and static friction for one solver iteration,
+/// optionally iterating in reverse order to eliminate corner-order bias across iterations.
+pub fn solve_contacts_position_ordered(
+    bodies: &mut [RigidBody],
+    contacts: &mut [Contact],
+    reverse: bool,
+) {
+    let n = contacts.len();
+    for idx in 0..n {
+        let c = &mut contacts[if reverse { n - 1 - idx } else { idx }];
         let a = c.body_a;
         let pa = bodies[a].world_point(c.local_a);
         let pb = match c.body_b {
@@ -222,41 +234,41 @@ pub fn solve_contacts_position(bodies: &mut [RigidBody], contacts: &mut [Contact
         };
 
         let pen = (pb - pa).dot(c.normal);
-        if pen <= 0.0 {
-            continue;
-        }
-        // Soft depenetration cap per solver iteration so deep initial overlaps
-        // (e.g. spawning an obstacle under a ragdoll's feet) resolve smoothly
-        // over multiple substeps rather than launching bodies into the air.
-        let effective_pen = pen.min(0.008);
+        if pen > 0.0 {
+            // Soft depenetration cap per solver iteration so deep initial overlaps
+            // (e.g. spawning an obstacle under a ragdoll's feet) resolve smoothly
+            // over multiple substeps rather than launching bodies into the air.
+            let effective_pen = pen.min(0.008);
 
-        let r_a = pa - bodies[a].position;
-        let w_a = bodies[a].generalized_inv_mass(r_a, c.normal);
-        let (r_b, w_b) = match c.body_b {
-            Some(b) => {
-                let rb = pb - bodies[b].position;
-                let wb = bodies[b].generalized_inv_mass(rb, c.normal);
-                (rb, wb)
+            let r_a = pa - bodies[a].position;
+            let w_a = bodies[a].generalized_inv_mass(r_a, c.normal);
+            let (r_b, w_b) = match c.body_b {
+                Some(b) => {
+                    let rb = pb - bodies[b].position;
+                    let wb = bodies[b].generalized_inv_mass(rb, c.normal);
+                    (rb, wb)
+                }
+                None => (Vec3::ZERO, 0.0),
+            };
+
+            let w = w_a + w_b;
+            if w >= 1e-12 {
+                // Gently relax micro-penetrations so 4-corner box manifolds don't chatter/bounce
+                let relax = if pen < 0.003 { 0.55 } else { 1.0 };
+                let d_lambda_n = (effective_pen * relax) / w;
+                c.normal_lambda += d_lambda_n;
+                let p_n = c.normal * d_lambda_n;
+
+                bodies[a].apply_pos_correction(p_n, r_a);
+                if let Some(b) = c.body_b {
+                    bodies[b].apply_pos_correction(-p_n, r_b);
+                }
             }
-            None => (Vec3::ZERO, 0.0),
-        };
-
-        let w = w_a + w_b;
-        if w < 1e-12 {
-            continue;
         }
 
-        let d_lambda_n = effective_pen / w;
-        c.normal_lambda += d_lambda_n;
-        let p_n = c.normal * d_lambda_n;
-
-        bodies[a].apply_pos_correction(p_n, r_a);
-        if let Some(b) = c.body_b {
-            bodies[b].apply_pos_correction(-p_n, r_b);
-        }
-
-        // Static friction projection in position space
-        if c.friction > 0.0 {
+        // Static friction projection in position space (runs whenever the contact has
+        // accumulated normal load in this substep, even after normal pen hits 0)
+        if c.friction > 0.0 && c.normal_lambda > 0.0 {
             let pa_after = bodies[a].world_point(c.local_a);
             let prev_pa = bodies[a].prev_position + bodies[a].prev_orientation * c.local_a;
             let (pb_after, prev_pb) = match c.body_b {
@@ -307,13 +319,27 @@ pub fn solve_contacts_velocity(
     dt: f32,
     gravity_mag: f32,
 ) {
+    solve_contacts_velocity_ordered(bodies, contacts, dt, gravity_mag, false);
+}
+
+/// Applies restitution and Coulomb dynamic friction in the velocity pass,
+/// optionally iterating in reverse order to avoid corner-order yaw bias.
+pub fn solve_contacts_velocity_ordered(
+    bodies: &mut [RigidBody],
+    contacts: &[Contact],
+    dt: f32,
+    gravity_mag: f32,
+    reverse: bool,
+) {
     if dt <= 0.0 {
         return;
     }
 
     let restitution_threshold = (2.0 * gravity_mag * dt).max(0.25);
 
-    for c in contacts {
+    let n = contacts.len();
+    for idx in 0..n {
+        let c = &contacts[if reverse { n - 1 - idx } else { idx }];
         if c.normal_lambda <= 0.0 {
             continue;
         }

@@ -74,6 +74,8 @@ pub struct BalanceState {
     pub idle_time: f32,
     pub teetering: bool,
     pub teeter_escape_dir: Vec3,
+    pub intoxication: f32,
+    pub concussion_timer: f32,
 }
 
 impl Default for BalanceState {
@@ -103,6 +105,8 @@ impl Default for BalanceState {
             idle_time: 0.0,
             teetering: false,
             teeter_escape_dir: Vec3::ZERO,
+            intoxication: 0.0,
+            concussion_timer: 0.0,
         }
     }
 }
@@ -123,6 +127,21 @@ pub fn update_ragdoll_balance(
     if dt <= 0.0 {
         return;
     }
+
+    ragdoll.balance.intoxication = if ragdoll.balance.intoxication.is_finite() {
+        ragdoll.balance.intoxication.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    ragdoll.balance.concussion_timer = if ragdoll.balance.concussion_timer.is_finite() {
+        (ragdoll.balance.concussion_timer - 0.12 * dt).max(0.0)
+    } else {
+        0.0
+    };
+    let drunk = ragdoll
+        .balance
+        .intoxication
+        .max((ragdoll.balance.concussion_timer / 4.0).clamp(0.0, 1.0));
 
     // 1. Exact mass-weighted Center of Mass position & velocity across all 17 bones
     let mut total_mass = 0.0_f32;
@@ -315,7 +334,8 @@ pub fn update_ragdoll_balance(
         let exit_cp = (0.18 - 0.06 * quake_crouch) * s_h;
         let enter_vel = 0.48 - 0.24 * quake_crouch;
         let exit_vel = 0.30 - 0.12 * quake_crouch;
-        let settled_wide_stance = quake_crouch < 0.1 && speed_xz < 0.14 && cp_offset < 0.28 * s_h;
+        let settled_wide_stance =
+            grounded_count >= 2 && quake_crouch < 0.1 && speed_xz < 0.14 && cp_offset < 0.28 * s_h;
         if settled_wide_stance {
             BehaviorState::Balanced
         } else if was_stumbling {
@@ -354,6 +374,27 @@ pub fn update_ragdoll_balance(
             } else {
                 (0.0, 0.0)
             };
+            let drunk_gain_scale = if drunk > 0.02 {
+                let scale = 1.0 - 0.35 * drunk;
+                for &j_idx in &ragdoll.joint_indices {
+                    joints[j_idx].motor_stiffness *= scale;
+                    joints[j_idx].max_torque *= scale;
+                }
+                scale
+            } else {
+                1.0
+            };
+
+            let (drunk_pitch, drunk_roll) = if drunk > 0.02 {
+                let t = ragdoll.balance.idle_time;
+                (
+                    (t * 1.4).sin() * 0.16 * drunk + (t * 2.9).cos() * 0.08 * drunk,
+                    (t * 1.1 + 0.8).cos() * 0.18 * drunk + (t * 2.3).sin() * 0.09 * drunk,
+                )
+            } else {
+                (0.0, 0.0)
+            };
+
             let sway = (ragdoll.balance.idle_time * 1.6).sin() * 0.025;
             let counter_pitch = (-local_vel.z * 0.10).clamp(-0.22, 0.22);
             let counter_roll = (local_vel.x * 0.10).clamp(-0.20, 0.20);
@@ -366,9 +407,13 @@ pub fn update_ragdoll_balance(
                 JointId::LowerSpine,
                 Quat::from_euler(
                     glam::EulerRot::XYZ,
-                    counter_pitch * 0.5 + sway + quake_lean + teeter_pitch * 0.5,
+                    counter_pitch * 0.5
+                        + sway
+                        + quake_lean
+                        + teeter_pitch * 0.5
+                        + drunk_pitch * 0.6,
                     0.0,
-                    counter_roll * 0.5 + teeter_roll * 0.5,
+                    counter_roll * 0.5 + teeter_roll * 0.5 + drunk_roll * 0.6,
                 ),
             );
             set_target(
@@ -377,9 +422,13 @@ pub fn update_ragdoll_balance(
                 JointId::ChestSpine,
                 Quat::from_euler(
                     glam::EulerRot::XYZ,
-                    counter_pitch * 0.6 + sway * 0.5 + quake_lean + teeter_pitch * 0.5,
+                    counter_pitch * 0.6
+                        + sway * 0.5
+                        + quake_lean
+                        + teeter_pitch * 0.5
+                        + drunk_pitch * 0.6,
                     0.0,
-                    counter_roll * 0.6 + teeter_roll * 0.5,
+                    counter_roll * 0.6 + teeter_roll * 0.5 + drunk_roll * 0.6,
                 ),
             );
             set_target(
@@ -602,18 +651,45 @@ pub fn update_ragdoll_balance(
             // Virtual upright & CoM support ONLY when grounded
             if grounded_count > 0 {
                 let foot_scale = if grounded_count >= 2 { 1.0 } else { 0.55 };
-                let strength_scale = foot_scale * mu;
+                let strength_scale = foot_scale * mu * drunk_gain_scale;
 
-                // Upright PD on Pelvis and Chest preserving yaw
-                apply_upright_pd(
+                // Upright PD on Pelvis and Chest preserving yaw (tilted by drunk/concussion sway when active)
+                let (pelvis_target_up, chest_target_up) = if drunk > 0.02 {
+                    let yaw_rot = Quat::from_rotation_y(fwd_xz.x.atan2(fwd_xz.z));
+                    (
+                        (yaw_rot
+                            * Quat::from_euler(
+                                glam::EulerRot::XYZ,
+                                drunk_pitch * 0.45,
+                                0.0,
+                                drunk_roll * 0.45,
+                            )
+                            * Vec3::Y)
+                            .normalize(),
+                        (yaw_rot
+                            * Quat::from_euler(
+                                glam::EulerRot::XYZ,
+                                drunk_pitch * 0.85,
+                                0.0,
+                                drunk_roll * 0.85,
+                            )
+                            * Vec3::Y)
+                            .normalize(),
+                    )
+                } else {
+                    (Vec3::Y, Vec3::Y)
+                };
+                apply_pitched_upright_pd(
                     &mut bodies[pelvis_idx],
+                    pelvis_target_up,
                     320.0 * m_ratio * h_ratio * strength_scale,
                     22.0 * damp_scale * foot_scale,
                     165.0 * m_ratio * h_ratio * strength_scale,
                     dt,
                 );
-                apply_upright_pd(
+                apply_pitched_upright_pd(
                     &mut bodies[chest_idx],
+                    chest_target_up,
                     260.0 * m_ratio * h_ratio * strength_scale,
                     18.0 * damp_scale * foot_scale,
                     135.0 * m_ratio * h_ratio * strength_scale,
@@ -628,7 +704,7 @@ pub fn update_ragdoll_balance(
                         foot_ground_y + (0.96 - 0.10 * quake_crouch) * ragdoll.standing_pelvis_y;
                     let height_err = target_y - pelvis_pos.y;
                     let pelvis = &mut bodies[pelvis_idx];
-                    let fy_raw = (total_mass * gravity_mag * 0.55
+                    let fy_raw = (total_mass * gravity_mag * 0.36
                         + height_err * (total_mass * 28.0)
                         - pelvis.linear_velocity.y * (total_mass * 4.5))
                         * strength_scale
@@ -654,25 +730,42 @@ pub fn update_ragdoll_balance(
                     (false, true) => Vec3::new(ra_pos.x, foot_ground_y, ra_pos.z),
                     (false, false) => mid_ankles_xz,
                 };
-                if teeter_active {
-                    support_center += ragdoll.balance.teeter_escape_dir * (0.18 * s_h);
+                if teeter_active && grounded_count >= 2 {
+                    support_center += ragdoll.balance.teeter_escape_dir * (0.12 * s_h);
+                }
+                if drunk > 0.02 {
+                    let t = ragdoll.balance.idle_time;
+                    support_center += Vec3::new(
+                        (t * 1.3).sin() * 0.14 * drunk * s_h,
+                        0.0,
+                        (t * 0.95).cos() * 0.14 * drunk * s_h,
+                    );
                 }
                 let raw_horiz_err = Vec3::new(
                     support_center.x - com_pos.x,
                     0.0,
                     support_center.z - com_pos.z,
                 );
-                // Deadzone covering the real foot support footprint (heel-to-toe & stance width)
-                // prevents phantom sliding when hunched forward (e.g. during Reach-for-Wound)
-                let deadzone = 0.14 * s_h;
+                // Tight deadzone for healthy upright stance; wider only when hunched with a wound
+                let deadzone = if ragdoll.reflex.active_wound.is_none() {
+                    0.025 * s_h
+                } else {
+                    0.12 * s_h
+                };
                 let err_len = raw_horiz_err.length();
                 let horiz_err = if err_len > deadzone {
                     raw_horiz_err * ((err_len - deadzone) / err_len)
                 } else {
                     Vec3::ZERO
                 };
-                let stumble_scale = if is_stumbling { 0.35 } else { 1.0 };
-                let mut f_horiz = (horiz_err * (total_mass * 6.0)
+                let stumble_scale = if teeter_active && grounded_count == 1 {
+                    0.15
+                } else if is_stumbling {
+                    0.35
+                } else {
+                    1.0
+                };
+                let mut f_horiz = (horiz_err * (total_mass * 10.0)
                     - com_vel_xz * (total_mass * 8.0))
                     * strength_scale
                     * stumble_scale;
@@ -684,33 +777,46 @@ pub fn update_ragdoll_balance(
                 let pelvis = &mut bodies[pelvis_idx];
                 pelvis.linear_velocity += f_horiz * (dt * pelvis.inv_mass);
 
-                // Damp idle yaw spin & plant feet firmly on the floor when Balanced (disabled during earthquakes >= 3.0)
-                // (prevents "hovercraft" sliding caused by vertical pelvis support unloading foot normal_lambda)
-                if !is_stumbling && quake_mag < 3.0 {
-                    let foot_grip = (-35.0 * dt).exp();
-                    let foot_yaw_grip = (-25.0 * dt).exp();
+                // Damp idle yaw spin & plant feet firmly on the floor when Balanced (disabled during earthquakes >= 3.0 or stagger/drunk or 1-foot cliff teeter)
+                if !is_stumbling
+                    && quake_mag < 3.0
+                    && drunk < 0.05
+                    && (!teeter_active || grounded_count >= 2)
+                {
+                    let foot_grip = (-45.0 * dt).exp();
+                    let yaw_damp = (-65.0 * dt).exp();
                     if foot_contacts.0 {
                         let lf = &mut bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]];
                         let v_xz = Vec3::new(lf.linear_velocity.x, 0.0, lf.linear_velocity.z);
-                        if v_xz.length() < 0.65 {
+                        if v_xz.length() < 0.55 {
                             lf.linear_velocity.x *= foot_grip;
                             lf.linear_velocity.z *= foot_grip;
-                            lf.angular_velocity.y *= foot_yaw_grip;
+                            lf.angular_velocity *= foot_grip;
                         }
                     }
                     if foot_contacts.1 {
                         let rf = &mut bodies[ragdoll.body_indices[BoneId::RightFoot as usize]];
                         let v_xz = Vec3::new(rf.linear_velocity.x, 0.0, rf.linear_velocity.z);
-                        if v_xz.length() < 0.65 {
+                        if v_xz.length() < 0.55 {
                             rf.linear_velocity.x *= foot_grip;
                             rf.linear_velocity.z *= foot_grip;
-                            rf.angular_velocity.y *= foot_yaw_grip;
+                            rf.angular_velocity *= foot_grip;
                         }
                     }
-                    if grounded_count >= 2 {
-                        let yaw_damp = (-12.0 * dt).exp();
-                        bodies[pelvis_idx].angular_velocity.y *= yaw_damp;
-                        bodies[chest_idx].angular_velocity.y *= yaw_damp;
+                    if grounded_count >= 2 && com_vel_xz.length() < 0.55 {
+                        for bone in [
+                            BoneId::Pelvis,
+                            BoneId::LowerSpine,
+                            BoneId::Chest,
+                            BoneId::LeftThigh,
+                            BoneId::LeftShin,
+                            BoneId::RightThigh,
+                            BoneId::RightShin,
+                        ] {
+                            bodies[ragdoll.body_indices[bone as usize]]
+                                .angular_velocity
+                                .y *= yaw_damp;
+                        }
                     }
                 }
             }
@@ -863,10 +969,6 @@ fn assign_nominal_gains(
     set_gain(JointId::RightKnee, 220.0, 7.0, 200.0);
     set_gain(JointId::LeftAnkle, 110.0, 0.45, 110.0);
     set_gain(JointId::RightAnkle, 110.0, 0.45, 110.0);
-}
-
-fn apply_upright_pd(body: &mut RigidBody, stiffness: f32, damping: f32, max_torque: f32, dt: f32) {
-    apply_pitched_upright_pd(body, Vec3::Y, stiffness, damping, max_torque, dt);
 }
 
 pub(super) fn apply_pitched_upright_pd(
