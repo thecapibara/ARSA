@@ -4,17 +4,86 @@ mod narrowphase;
 
 use std::collections::HashSet;
 
-use glam::{Mat3, Vec3};
+use glam::{Mat3, Quat, Vec3};
 
 use crate::body::{ColliderShape, RigidBody};
+use crate::world::WorldQueryHooks;
 
-/// Axis-aligned static box obstacle in the world.
+/// Static oriented box obstacle in the world.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticBox {
     pub center: Vec3,
     pub half_extents: Vec3,
+    pub orientation: Quat,
     pub friction: f32,
     pub restitution: f32,
+}
+
+/// Uniform-grid heightfield terrain collider in the XZ plane.
+#[derive(Debug, Clone)]
+pub struct Heightfield {
+    pub origin_x: f32,
+    pub origin_z: f32,
+    pub cell_size: f32,
+    pub cols: usize,
+    pub rows: usize,
+    /// Row-major height samples `[row * cols + col]`, length `>= cols * rows`.
+    pub heights: Vec<f32>,
+    pub friction: f32,
+    pub restitution: f32,
+}
+
+impl Heightfield {
+    /// Bilinearly samples terrain height and upward finite-difference unit normal (`normal.y > 0.0`)
+    /// at world `(x, z)`. Returns `None` if invalid or out of bounds.
+    pub fn sample(&self, x: f32, z: f32) -> Option<(f32, Vec3)> {
+        if !x.is_finite()
+            || !z.is_finite()
+            || !self.origin_x.is_finite()
+            || !self.origin_z.is_finite()
+            || !self.cell_size.is_finite()
+            || self.cols < 2
+            || self.rows < 2
+            || self.cell_size <= 1e-4
+        {
+            return None;
+        }
+        let needed = self.cols.checked_mul(self.rows)?;
+        if self.heights.len() < needed {
+            return None;
+        }
+
+        let fx = (x - self.origin_x) / self.cell_size;
+        let fz = (z - self.origin_z) / self.cell_size;
+        let max_c = (self.cols - 1) as f32;
+        let max_r = (self.rows - 1) as f32;
+        if fx < 0.0 || fx > max_c || fz < 0.0 || fz > max_r {
+            return None;
+        }
+
+        let c0 = (fx.floor() as usize).min(self.cols - 2);
+        let r0 = (fz.floor() as usize).min(self.rows - 2);
+        let tx = (fx - c0 as f32).clamp(0.0, 1.0);
+        let tz = (fz - r0 as f32).clamp(0.0, 1.0);
+
+        let h00 = self.heights[r0 * self.cols + c0];
+        let h10 = self.heights[r0 * self.cols + c0 + 1];
+        let h01 = self.heights[(r0 + 1) * self.cols + c0];
+        let h11 = self.heights[(r0 + 1) * self.cols + c0 + 1];
+        if !h00.is_finite() || !h10.is_finite() || !h01.is_finite() || !h11.is_finite() {
+            return None;
+        }
+
+        let h0 = h00 + (h10 - h00) * tx;
+        let h1 = h01 + (h11 - h01) * tx;
+        let height = h0 + (h1 - h0) * tz;
+
+        let dh_dx = ((h10 - h00) * (1.0 - tz) + (h11 - h01) * tz) / self.cell_size;
+        let dh_dz = ((h01 - h00) * (1.0 - tx) + (h11 - h10) * tx) / self.cell_size;
+        let normal = Vec3::new(-dh_dx, 1.0, -dh_dz).normalize();
+
+        Some((height, normal))
+    }
 }
 
 /// Contact manifold point between dynamic `body_a` and either dynamic `body_b` or static world (`None`).
@@ -136,10 +205,26 @@ fn aabbs_overlap(a_min: Vec3, a_max: Vec3, b_min: Vec3, b_max: Vec3) -> bool {
         && a_max.z >= b_min.z
 }
 
-/// Detects all contacts against the `y = 0.0` ground plane, static boxes, and dynamic body pairs.
+#[inline]
+pub(crate) fn static_box_world_aabb(sb: &StaticBox) -> (Vec3, Vec3) {
+    let ext = if sb.orientation.w.abs() > 0.99999 {
+        sb.half_extents
+    } else {
+        let m = Mat3::from_quat(sb.orientation);
+        m.x_axis.abs() * sb.half_extents.x
+            + m.y_axis.abs() * sb.half_extents.y
+            + m.z_axis.abs() * sb.half_extents.z
+    };
+    let margin = Vec3::splat(1e-4);
+    (sb.center - ext - margin, sb.center + ext + margin)
+}
+
+/// Detects all contacts against ground/heightfield/host surfaces, static boxes, and dynamic body pairs.
 pub fn detect_contacts(
     bodies: &[RigidBody],
     static_boxes: &[StaticBox],
+    heightfield: Option<&Heightfield>,
+    query_hooks: Option<&WorldQueryHooks>,
     connected_pairs: &HashSet<(usize, usize)>,
     body_aabbs: &mut Vec<(Vec3, Vec3)>,
     out: &mut Vec<Contact>,
@@ -148,27 +233,20 @@ pub fn detect_contacts(
     body_aabbs.clear();
     body_aabbs.extend(bodies.iter().map(body_world_aabb));
 
-    const GROUND_FRICTION: f32 = 0.75;
-    const GROUND_RESTITUTION: f32 = 0.05;
+    let has_terrain_queries =
+        heightfield.is_some() || query_hooks.and_then(|h| h.ground_height).is_some();
 
     for (idx, body) in bodies.iter().enumerate() {
         if body.inv_mass == 0.0 || body.is_sleeping {
             continue;
         }
         let (b_min, b_max) = body_aabbs[idx];
-        if b_min.y < 0.0 {
-            narrowphase::detect_ground_contacts(
-                bodies,
-                idx,
-                GROUND_FRICTION,
-                GROUND_RESTITUTION,
-                out,
-            );
+        if has_terrain_queries || b_min.y < 0.0 {
+            narrowphase::detect_ground_contacts(bodies, idx, heightfield, query_hooks, out);
         }
 
         for sb in static_boxes {
-            let sb_min = sb.center - sb.half_extents;
-            let sb_max = sb.center + sb.half_extents;
+            let (sb_min, sb_max) = static_box_world_aabb(sb);
             if aabbs_overlap(b_min, b_max, sb_min, sb_max) {
                 narrowphase::detect_static_box_contacts(bodies, idx, sb, out);
             }

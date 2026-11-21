@@ -3,8 +3,9 @@
 use glam::{Quat, Vec3};
 
 use crate::body::{ColliderShape, RigidBody};
+use crate::world::WorldQueryHooks;
 
-use super::{Contact, ContactMaterial, StaticBox};
+use super::{Contact, ContactMaterial, Heightfield, StaticBox};
 
 #[inline]
 fn combine_material(f1: f32, r1: f32, f2: f32, r2: f32) -> ContactMaterial {
@@ -14,35 +15,94 @@ fn combine_material(f1: f32, r1: f32, f2: f32, r2: f32) -> ContactMaterial {
     }
 }
 
+#[inline]
+fn evaluate_ground_surface(
+    pt: Vec3,
+    heightfield: Option<&Heightfield>,
+    query_hooks: Option<&WorldQueryHooks>,
+) -> (f32, Vec3, f32, f32) {
+    let mut best_y = 0.0_f32;
+    let mut best_normal = Vec3::Y;
+    let mut best_friction = 0.75_f32;
+    let mut best_restitution = 0.05_f32;
+
+    if let Some(hf) = heightfield {
+        if let Some((hy, hn)) = hf.sample(pt.x, pt.z) {
+            if hy > best_y {
+                best_y = hy;
+                best_normal = hn;
+                best_friction = hf.friction;
+                best_restitution = hf.restitution;
+            }
+        }
+    }
+
+    if let Some(hooks) = query_hooks {
+        if let Some(cb) = hooks.ground_height {
+            let mut out_y = 0.0_f32;
+            let mut out_normal = [0.0_f32, 1.0, 0.0];
+            if cb(
+                hooks.user_data,
+                pt.x,
+                pt.z,
+                pt.y + 0.15,
+                &mut out_y,
+                &mut out_normal,
+            ) && out_y.is_finite()
+                && out_y > best_y
+            {
+                let raw_n = Vec3::from_array(out_normal);
+                let n = if raw_n.is_finite() && raw_n.length_squared() > 1e-12 {
+                    let norm = raw_n.normalize();
+                    if norm.y > 0.0 {
+                        norm
+                    } else {
+                        Vec3::Y
+                    }
+                } else {
+                    Vec3::Y
+                };
+                best_y = out_y;
+                best_normal = n;
+                best_friction = 0.85;
+                best_restitution = 0.05;
+            }
+        }
+    }
+
+    (best_y, best_normal, best_friction, best_restitution)
+}
+
 pub(super) fn detect_ground_contacts(
     bodies: &[RigidBody],
     idx: usize,
-    ground_friction: f32,
-    ground_restitution: f32,
+    heightfield: Option<&Heightfield>,
+    query_hooks: Option<&WorldQueryHooks>,
     out: &mut Vec<Contact>,
 ) {
     let b = &bodies[idx];
-    let mat = combine_material(
-        b.friction,
-        b.restitution,
-        ground_friction,
-        ground_restitution,
-    );
+    let mut emit_point = |pt: Vec3, radius: f32| {
+        let (ground_y, ground_normal, gf, gr) =
+            evaluate_ground_surface(pt, heightfield, query_hooks);
+        let lowest_y = pt.y - radius;
+        if lowest_y < ground_y {
+            let pen = (ground_y - lowest_y) * ground_normal.y.max(0.25);
+            let pa = pt - ground_normal * radius;
+            let pb = pa + ground_normal * pen;
+            let mat = combine_material(b.friction, b.restitution, gf, gr);
+            out.push(Contact::new(
+                bodies,
+                idx,
+                None,
+                (pa, pb, ground_normal, pen),
+                mat,
+            ));
+        }
+    };
 
     match b.collider {
         ColliderShape::Sphere { radius } => {
-            let lowest_y = b.position.y - radius;
-            if lowest_y < 0.0 {
-                let pa = Vec3::new(b.position.x, lowest_y, b.position.z);
-                let pb = Vec3::new(b.position.x, 0.0, b.position.z);
-                out.push(Contact::new(
-                    bodies,
-                    idx,
-                    None,
-                    (pa, pb, Vec3::Y, -lowest_y),
-                    mat,
-                ));
-            }
+            emit_point(b.position, radius);
         }
         ColliderShape::Capsule {
             radius,
@@ -51,34 +111,12 @@ pub(super) fn detect_ground_contacts(
             let axis = b.orientation * Vec3::Y;
             let p0 = b.position + axis * half_length;
             let p1 = b.position - axis * half_length;
-            for p in [p0, p1] {
-                let lowest_y = p.y - radius;
-                if lowest_y < 0.0 {
-                    let pa = Vec3::new(p.x, lowest_y, p.z);
-                    let pb = Vec3::new(p.x, 0.0, p.z);
-                    out.push(Contact::new(
-                        bodies,
-                        idx,
-                        None,
-                        (pa, pb, Vec3::Y, -lowest_y),
-                        ContactMaterial { ..mat },
-                    ));
-                }
-            }
+            emit_point(p0, radius);
+            emit_point(p1, radius);
         }
         ColliderShape::Box { half_extents } => {
             for corner_local in box_corners(half_extents) {
-                let pa = b.world_point(corner_local);
-                if pa.y < 0.0 {
-                    let pb = Vec3::new(pa.x, 0.0, pa.z);
-                    out.push(Contact::new(
-                        bodies,
-                        idx,
-                        None,
-                        (pa, pb, Vec3::Y, -pa.y),
-                        ContactMaterial { ..mat },
-                    ));
-                }
+                emit_point(b.world_point(corner_local), 0.0);
             }
         }
     }
@@ -92,77 +130,158 @@ pub(super) fn detect_static_box_contacts(
 ) {
     let b = &bodies[idx];
     let mat = combine_material(b.friction, b.restitution, sb.friction, sb.restitution);
+    let is_axis_aligned = sb.orientation.w.abs() > 0.99999;
+
+    if is_axis_aligned {
+        match b.collider {
+            ColliderShape::Sphere { radius } => {
+                if let Some(geom) = sphere_vs_aabb(b.position, radius, sb.center, sb.half_extents) {
+                    out.push(Contact::new(bodies, idx, None, geom, mat));
+                }
+            }
+            ColliderShape::Capsule {
+                radius,
+                half_length,
+            } => {
+                let axis = b.orientation * Vec3::Y;
+                let p0 = b.position + axis * half_length;
+                let p1 = b.position - axis * half_length;
+                let mid = b.position;
+                let closest = closest_point_on_segment_to_aabb(p0, p1, sb.center, sb.half_extents);
+
+                let samples = [p0, p1, mid, closest];
+                let count = if closest.distance_squared(p0) > 1e-6
+                    && closest.distance_squared(p1) > 1e-6
+                    && closest.distance_squared(mid) > 1e-6
+                {
+                    4
+                } else {
+                    3
+                };
+                for &pt in &samples[..count] {
+                    if let Some(geom) = sphere_vs_aabb(pt, radius, sb.center, sb.half_extents) {
+                        out.push(Contact::new(
+                            bodies,
+                            idx,
+                            None,
+                            geom,
+                            ContactMaterial { ..mat },
+                        ));
+                    }
+                }
+            }
+            ColliderShape::Box { half_extents } => {
+                for local_pt in box_sample_points(half_extents) {
+                    let world_pt = b.world_point(local_pt);
+                    if let Some((pb, normal, pen)) =
+                        point_inside_aabb(world_pt, sb.center, sb.half_extents)
+                    {
+                        out.push(Contact::new(
+                            bodies,
+                            idx,
+                            None,
+                            (world_pt, pb, normal, pen),
+                            ContactMaterial { ..mat },
+                        ));
+                    }
+                }
+                let inv_rot = b.orientation.conjugate();
+                for sb_corner_offset in box_corners(sb.half_extents) {
+                    let world_sb_corner = sb.center + sb_corner_offset;
+                    let local_in_b = inv_rot * (world_sb_corner - b.position);
+                    if let Some((local_pa, local_normal_out, pen)) =
+                        point_inside_aabb(local_in_b, Vec3::ZERO, half_extents)
+                    {
+                        let normal = -(b.orientation * local_normal_out);
+                        let pa = b.world_point(local_pa);
+                        out.push(Contact::new(
+                            bodies,
+                            idx,
+                            None,
+                            (pa, world_sb_corner, normal, pen),
+                            ContactMaterial { ..mat },
+                        ));
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    let q = if sb.orientation.length_squared() > 1e-12 {
+        sb.orientation.normalize()
+    } else {
+        Quat::IDENTITY
+    };
+    let inv_q = q.conjugate();
+    let to_world_geom = |(pa_l, pb_l, n_l, pen): (Vec3, Vec3, Vec3, f32)| {
+        (
+            sb.center + q * pa_l,
+            sb.center + q * pb_l,
+            (q * n_l).normalize(),
+            pen,
+        )
+    };
 
     match b.collider {
         ColliderShape::Sphere { radius } => {
-            if let Some(geom) = sphere_vs_aabb(b.position, radius, sb.center, sb.half_extents) {
-                out.push(Contact::new(bodies, idx, None, geom, mat));
+            let local_s = inv_q * (b.position - sb.center);
+            if let Some(geom_l) = sphere_vs_aabb(local_s, radius, Vec3::ZERO, sb.half_extents) {
+                out.push(Contact::new(bodies, idx, None, to_world_geom(geom_l), mat));
             }
         }
         ColliderShape::Capsule {
             radius,
             half_length,
         } => {
-            let axis = b.orientation * Vec3::Y;
-            let p0 = b.position + axis * half_length;
-            let p1 = b.position - axis * half_length;
-            let mid = b.position;
-            let closest = closest_point_on_segment_to_aabb(p0, p1, sb.center, sb.half_extents);
+            let ax_local = inv_q * (b.orientation * Vec3::Y);
+            let center_local = inv_q * (b.position - sb.center);
+            let p0 = center_local + ax_local * half_length;
+            let p1 = center_local - ax_local * half_length;
+            let closest = closest_point_on_segment_to_aabb(p0, p1, Vec3::ZERO, sb.half_extents);
 
-            let samples = [p0, p1, mid, closest];
+            let samples = [p0, p1, center_local, closest];
             let count = if closest.distance_squared(p0) > 1e-6
                 && closest.distance_squared(p1) > 1e-6
-                && closest.distance_squared(mid) > 1e-6
+                && closest.distance_squared(center_local) > 1e-6
             {
                 4
             } else {
                 3
             };
-            for &pt in &samples[..count] {
-                if let Some(geom) = sphere_vs_aabb(pt, radius, sb.center, sb.half_extents) {
+            for &pt_local in &samples[..count] {
+                if let Some(geom_l) = sphere_vs_aabb(pt_local, radius, Vec3::ZERO, sb.half_extents)
+                {
                     out.push(Contact::new(
                         bodies,
                         idx,
                         None,
-                        geom,
+                        to_world_geom(geom_l),
                         ContactMaterial { ..mat },
                     ));
                 }
             }
         }
         ColliderShape::Box { half_extents } => {
-            for local_pt in box_sample_points(half_extents) {
-                let world_pt = b.world_point(local_pt);
-                if let Some((pb, normal, pen)) =
-                    point_inside_aabb(world_pt, sb.center, sb.half_extents)
-                {
+            let local_pos = inv_q * (b.position - sb.center);
+            let local_rot = (inv_q * b.orientation).normalize();
+            detect_obb_vs_obb_poses(
+                local_pos,
+                local_rot,
+                half_extents,
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                sb.half_extents,
+                |geom_l| {
                     out.push(Contact::new(
                         bodies,
                         idx,
                         None,
-                        (world_pt, pb, normal, pen),
+                        to_world_geom(geom_l),
                         ContactMaterial { ..mat },
                     ));
-                }
-            }
-            let inv_rot = b.orientation.conjugate();
-            for sb_corner_offset in box_corners(sb.half_extents) {
-                let world_sb_corner = sb.center + sb_corner_offset;
-                let local_in_b = inv_rot * (world_sb_corner - b.position);
-                if let Some((local_pa, local_normal_out, pen)) =
-                    point_inside_aabb(local_in_b, Vec3::ZERO, half_extents)
-                {
-                    let normal = -(b.orientation * local_normal_out);
-                    let pa = b.world_point(local_pa);
-                    out.push(Contact::new(
-                        bodies,
-                        idx,
-                        None,
-                        (pa, world_sb_corner, normal, pen),
-                        ContactMaterial { ..mat },
-                    ));
-                }
-            }
+                },
+            );
         }
     }
 }
@@ -365,18 +484,37 @@ fn detect_obb_vs_obb(
 ) {
     let a = &bodies[i];
     let b = &bodies[j];
+    detect_obb_vs_obb_poses(
+        a.position,
+        a.orientation,
+        ha,
+        b.position,
+        b.orientation,
+        hb,
+        |geom| {
+            out.push(Contact::new(
+                bodies,
+                i,
+                Some(j),
+                geom,
+                ContactMaterial { ..mat },
+            ));
+        },
+    );
+}
 
-    let axes_a = [
-        a.orientation * Vec3::X,
-        a.orientation * Vec3::Y,
-        a.orientation * Vec3::Z,
-    ];
-    let axes_b = [
-        b.orientation * Vec3::X,
-        b.orientation * Vec3::Y,
-        b.orientation * Vec3::Z,
-    ];
-    let delta = a.position - b.position;
+fn detect_obb_vs_obb_poses(
+    pos_a: Vec3,
+    rot_a: Quat,
+    ha: Vec3,
+    pos_b: Vec3,
+    rot_b: Quat,
+    hb: Vec3,
+    mut emit: impl FnMut((Vec3, Vec3, Vec3, f32)),
+) {
+    let axes_a = [rot_a * Vec3::X, rot_a * Vec3::Y, rot_a * Vec3::Z];
+    let axes_b = [rot_b * Vec3::X, rot_b * Vec3::Y, rot_b * Vec3::Z];
+    let delta = pos_a - pos_b;
 
     // 1. Test the 6 face axes (A.x, A.y, A.z, B.x, B.y, B.z) and 9 edge-edge cross axes
     //    for minimum penetration.
@@ -465,7 +603,7 @@ fn detect_obb_vs_obb(
     }
 
     if let Some((p, q)) = best_edge {
-        let mut c_a = a.position;
+        let mut c_a = pos_a;
         for (k, &ax) in axes_a.iter().enumerate() {
             if k != p {
                 let sign = if (-normal).dot(ax) >= 0.0 { 1.0 } else { -1.0 };
@@ -475,7 +613,7 @@ fn detect_obb_vs_obb(
         let a0 = c_a - axes_a[p] * ha[p];
         let a1 = c_a + axes_a[p] * ha[p];
 
-        let mut c_b = b.position;
+        let mut c_b = pos_b;
         for (k, &ax) in axes_b.iter().enumerate() {
             if k != q {
                 let sign = if normal.dot(ax) >= 0.0 { 1.0 } else { -1.0 };
@@ -486,23 +624,26 @@ fn detect_obb_vs_obb(
         let b1 = c_b + axes_b[q] * hb[q];
 
         let (pa, pb) = closest_points_segment_segment(a0, a1, b0, b1);
-        out.push(Contact::new(
-            bodies,
-            i,
-            Some(j),
-            (pa, pb, normal, best_pen),
-            mat,
-        ));
+        emit((pa, pb, normal, best_pen));
         return;
     }
 
     // 2. Identify reference & incident boxes and clip incident face against reference side planes.
-    let (ref_body, inc_body, ref_half, inc_half, ref_axes, inc_axes, ref_outward_normal) =
-        if ref_is_b {
-            (b, a, hb, ha, axes_b, axes_a, normal)
-        } else {
-            (a, b, ha, hb, axes_a, axes_b, -normal)
-        };
+    let (
+        ref_pos,
+        ref_rot,
+        inc_pos,
+        inc_rot,
+        ref_half,
+        inc_half,
+        ref_axes,
+        inc_axes,
+        ref_outward_normal,
+    ) = if ref_is_b {
+        (pos_b, rot_b, pos_a, rot_a, hb, ha, axes_b, axes_a, normal)
+    } else {
+        (pos_a, rot_a, pos_b, rot_b, ha, hb, axes_a, axes_b, -normal)
+    };
 
     let n_axis = best_local_idx;
     let u_axis = (n_axis + 1) % 3;
@@ -533,7 +674,7 @@ fn detect_obb_vs_obb(
 
     let iu = (inc_n_axis + 1) % 3;
     let iv = (inc_n_axis + 2) % 3;
-    let inv_ref_rot = ref_body.orientation.conjugate();
+    let inv_ref_rot = ref_rot.conjugate();
 
     let mut poly_a = [Vec3::ZERO; 8];
     let mut poly_b = [Vec3::ZERO; 8];
@@ -543,8 +684,8 @@ fn detect_obb_vs_obb(
         p_inc[inc_n_axis] = inc_sign * inc_half[inc_n_axis];
         p_inc[iu] = su * inc_half[iu];
         p_inc[iv] = sv * inc_half[iv];
-        let p_world = inc_body.world_point(p_inc);
-        poly_a[idx] = inv_ref_rot * (p_world - ref_body.position);
+        let p_world = inc_pos + inc_rot * p_inc;
+        poly_a[idx] = inv_ref_rot * (p_world - ref_pos);
     }
 
     let len = clip_polygon_against_plane(&poly_a[..4], &mut poly_b, u_axis, 1.0, ref_half[u_axis]);
@@ -587,19 +728,13 @@ fn detect_obb_vs_obb(
 
     let selected = reduce_manifold_to_4(&cands[..cand_len], u_axis, v_axis);
     for &(v_ref_local, pen) in selected.iter().flatten() {
-        let v_world = ref_body.world_point(v_ref_local);
+        let v_world = ref_pos + ref_rot * v_ref_local;
         let (pa, pb) = if ref_is_b {
             (v_world, v_world + normal * pen)
         } else {
             (v_world - normal * pen, v_world)
         };
-        out.push(Contact::new(
-            bodies,
-            i,
-            Some(j),
-            (pa, pb, normal, pen),
-            ContactMaterial { ..mat },
-        ));
+        emit((pa, pb, normal, pen));
     }
 }
 

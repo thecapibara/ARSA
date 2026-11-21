@@ -1,7 +1,10 @@
 //! Native C ABI bindings (`arsa-c-abi`) for Unreal Engine 5, Unity, Godot, and C/C++.
 
 use arsa_core::glam::{Quat, Vec3};
-use arsa_core::{ArsaWorld, BodyProfile, WeaponKind};
+use arsa_core::{
+    ArsaWorld, BodyProfile, GroundHeightFn, Heightfield, RaycastWorldFn, WeaponKind,
+    WorldQueryHooks,
+};
 
 /// Opaque handle owning an `ArsaWorld` simulation instance and a reusable scratch buffer.
 pub struct ArsaWorldHandle {
@@ -329,6 +332,131 @@ pub unsafe extern "C" fn arsa_world_add_static_box(
         )
     } else {
         usize::MAX
+    }
+}
+
+/// Adds a static oriented box obstacle (XYZW quaternion) and returns its index (`usize::MAX` on null).
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_add_static_oriented_box(
+    handle: *mut ArsaWorldHandle,
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    hx: f32,
+    hy: f32,
+    hz: f32,
+    qx: f32,
+    qy: f32,
+    qz: f32,
+    qw: f32,
+    friction: f32,
+    restitution: f32,
+) -> usize {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.add_static_oriented_box(
+            Vec3::new(cx, cy, cz),
+            Vec3::new(hx, hy, hz),
+            Quat::from_xyzw(qx, qy, qz, qw),
+            friction,
+            restitution,
+        )
+    } else {
+        usize::MAX
+    }
+}
+
+/// Sets a uniform-grid heightfield terrain collider from row-major `heights_ptr` (`cols * rows` floats).
+/// Returns `false` if `handle` or `heights_ptr` is null, dimensions/cell_size are invalid, or any value is non-finite.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+/// If `heights_ptr` is non-null, it must be valid for reads of `cols * rows` `f32` elements.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_heightfield(
+    handle: *mut ArsaWorldHandle,
+    origin_x: f32,
+    origin_z: f32,
+    cell_size: f32,
+    cols: usize,
+    rows: usize,
+    heights_ptr: *const f32,
+    friction: f32,
+    restitution: f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    if heights_ptr.is_null()
+        || cols < 2
+        || rows < 2
+        || !cell_size.is_finite()
+        || cell_size <= 1e-4
+        || !origin_x.is_finite()
+        || !origin_z.is_finite()
+        || !friction.is_finite()
+        || !restitution.is_finite()
+    {
+        return false;
+    }
+    let Some(count) = cols.checked_mul(rows) else {
+        return false;
+    };
+    let heights = unsafe { std::slice::from_raw_parts(heights_ptr, count) };
+    if heights.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    h.world.set_heightfield(Some(Heightfield {
+        origin_x,
+        origin_z,
+        cell_size,
+        cols,
+        rows,
+        heights: heights.to_vec(),
+        friction,
+        restitution,
+    }));
+    true
+}
+
+/// Clears the world's heightfield terrain collider.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_clear_heightfield(handle: *mut ArsaWorldHandle) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.set_heightfield(None);
+    }
+}
+
+/// Registers or clears host engine world-query callbacks (`ground_height_fn` and `raycast_fn`).
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+/// Any non-null callback pointers and `user_data` must remain valid for the duration of simulation calls.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_query_callbacks(
+    handle: *mut ArsaWorldHandle,
+    user_data: *mut std::ffi::c_void,
+    ground_height_fn: Option<GroundHeightFn>,
+    raycast_fn: Option<RaycastWorldFn>,
+) {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return;
+    };
+    if ground_height_fn.is_none() && raycast_fn.is_none() {
+        h.world.set_world_query_callbacks(None);
+    } else {
+        h.world.set_world_query_callbacks(Some(WorldQueryHooks {
+            user_data,
+            ground_height: ground_height_fn,
+            raycast: raycast_fn,
+        }));
     }
 }
 
@@ -669,6 +797,112 @@ mod tests {
             assert_eq!(arsa_world_body_count(world), 0);
             assert_eq!(arsa_world_joint_count(world), 0);
 
+            arsa_world_destroy(world);
+        }
+    }
+
+    extern "C" fn test_ground_cb(
+        _user_data: *mut std::ffi::c_void,
+        _x: f32,
+        _z: f32,
+        max_y: f32,
+        out_y: *mut f32,
+        out_normal: *mut [f32; 3],
+    ) -> bool {
+        if 1.5 <= max_y {
+            unsafe {
+                *out_y = 1.5;
+                *out_normal = [0.0, 1.0, 0.0];
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    extern "C" fn test_ray_cb(
+        _user_data: *mut std::ffi::c_void,
+        _origin: *const [f32; 3],
+        _dir: *const [f32; 3],
+        max_dist: f32,
+        out_dist: *mut f32,
+        out_normal: *mut [f32; 3],
+    ) -> bool {
+        if 1.0 < max_dist {
+            unsafe {
+                *out_dist = 1.0;
+                *out_normal = [0.0, 0.0, -1.0];
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    #[test]
+    fn test_c_abi_level_geometry_and_callbacks() {
+        unsafe {
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+
+            let q = Quat::from_rotation_x(20.0_f32.to_radians());
+            let sb_idx = arsa_world_add_static_oriented_box(
+                world, 0.0, 0.5, 0.0, 1.0, 0.1, 1.0, q.x, q.y, q.z, q.w, 0.85, 0.05,
+            );
+            assert_eq!(sb_idx, 0);
+
+            let heights = [0.2_f32; 4];
+            assert!(!arsa_world_set_heightfield(
+                world,
+                0.0,
+                0.0,
+                1.0,
+                1,
+                2,
+                heights.as_ptr(),
+                0.85,
+                0.05
+            ));
+            assert!(arsa_world_set_heightfield(
+                world,
+                -1.0,
+                -1.0,
+                1.0,
+                2,
+                2,
+                heights.as_ptr(),
+                0.85,
+                0.05
+            ));
+            arsa_world_clear_heightfield(world);
+
+            arsa_world_set_query_callbacks(
+                world,
+                std::ptr::null_mut(),
+                Some(test_ground_cb),
+                Some(test_ray_cb),
+            );
+            let box_idx =
+                arsa_world_spawn_box(world, 0.0, 2.0, 3.0, 0.15, 0.15, 0.15, 5.0, 0.0, 0.0, 0.0);
+            assert_eq!(box_idx, 0);
+
+            for _ in 0..90 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+
+            let mut xform = [0.0_f32; 7];
+            assert_eq!(arsa_world_get_transforms(world, xform.as_mut_ptr(), 7), 7);
+            assert!(
+                (xform[1] - 1.65).abs() < 0.03,
+                "expected box to settle on y=1.5 host ground (center ~1.65), got {}",
+                xform[1]
+            );
+
+            // Raycast toward box at z=3.0 should be occluded by host raycast wall at dist=1.0
+            let hit = arsa_world_apply_punch(world, 0.0, 1.65, 0.0, 0.0, 0.0, 1.0, 10.0);
+            assert_eq!(hit, -1);
+
+            arsa_world_set_query_callbacks(world, std::ptr::null_mut(), None, None);
             arsa_world_destroy(world);
         }
     }

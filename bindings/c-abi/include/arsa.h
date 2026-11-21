@@ -109,6 +109,32 @@ typedef enum ArsaWeaponKind {
 } ArsaWeaponKind;
 
 /**
+ * Host engine ground-height query callback.
+ * Given (user_data, x, z, max_y), writes surface height to *out_y and upward unit normal
+ * to out_normal[3], returning true if a surface exists at y <= max_y.
+ */
+typedef bool (*ArsaGroundHeightFn)(
+    void *user_data,
+    float x,
+    float z,
+    float max_y,
+    float *out_y,
+    float out_normal[3]);
+
+/**
+ * Host engine static-world raycast occlusion callback.
+ * Given (user_data, origin[3], dir[3], max_dist), writes hit distance to *out_dist and hit normal
+ * to out_normal[3], returning true if static host geometry was hit closer than max_dist.
+ */
+typedef bool (*ArsaRaycastWorldFn)(
+    void *user_data,
+    const float origin[3],
+    const float dir[3],
+    float max_dist,
+    float *out_dist,
+    float out_normal[3]);
+
+/**
  * Allocates and initializes a new ARSA physics world.
  * Caller owns the returned handle and must free it with arsa_world_destroy().
  */
@@ -196,6 +222,47 @@ size_t arsa_world_add_static_box(
     float hz,
     float friction,
     float restitution);
+
+/** Adds a static oriented box obstacle (XYZW quaternion) and returns its index (SIZE_MAX on null). */
+size_t arsa_world_add_static_oriented_box(
+    ArsaWorldHandle *handle,
+    float cx,
+    float cy,
+    float cz,
+    float hx,
+    float hy,
+    float hz,
+    float qx,
+    float qy,
+    float qz,
+    float qw,
+    float friction,
+    float restitution);
+
+/**
+ * Sets a uniform-grid heightfield terrain collider from row-major heights_ptr (cols * rows floats).
+ * Returns false if handle or heights_ptr is NULL, dimensions/cell_size are invalid, or any value is non-finite.
+ */
+bool arsa_world_set_heightfield(
+    ArsaWorldHandle *handle,
+    float origin_x,
+    float origin_z,
+    float cell_size,
+    size_t cols,
+    size_t rows,
+    const float *heights_ptr,
+    float friction,
+    float restitution);
+
+/** Clears the world's heightfield terrain collider. */
+void arsa_world_clear_heightfield(ArsaWorldHandle *handle);
+
+/** Registers or clears host engine world-query callbacks (ground height & raycast occlusion). */
+void arsa_world_set_query_callbacks(
+    ArsaWorldHandle *handle,
+    void *user_data,
+    ArsaGroundHeightFn ground_height_fn,
+    ArsaRaycastWorldFn raycast_fn);
 
 /**
  * Raycasts from (ox, oy, oz) along (dx, dy, dz) and applies a broad two-handed shove

@@ -1856,3 +1856,231 @@ fn test_intoxication_causes_visible_sway_and_stagger() {
         "intoxication did not produce visible sway/stagger: max_chest_tilt={max_chest_tilt}, max_pelvis_horiz_disp={max_pelvis_horiz_disp}, max_com_speed={max_com_speed}, saw_stumble={saw_stumble}"
     );
 }
+
+#[test]
+fn test_oriented_static_ramp_collision_and_raycast() {
+    let mut world = ArsaWorld::new();
+    let tilt = Quat::from_rotation_x(20.0_f32.to_radians());
+    // Tilted 20-degree ramp centered at y = 0.85
+    world.add_static_oriented_box(
+        Vec3::new(0.0, 0.85, 0.0),
+        Vec3::new(1.5, 0.1, 2.0),
+        tilt,
+        0.90,
+        0.05,
+    );
+
+    // Support height directly above center of ramp should match 0.85 + 0.1 / cos(20 deg)
+    let expected_top = 0.85 + 0.1 / 20.0_f32.to_radians().cos();
+    let h_center = world.sample_support_height(0.0, 0.0, 2.5);
+    assert!(
+        (h_center - expected_top).abs() < 1e-3,
+        "expected oriented ramp support height ~{expected_top}, got {h_center}"
+    );
+    let h_upslope = world.sample_support_height(0.0, -1.0, 2.5);
+    let h_downslope = world.sample_support_height(0.0, 1.0, 2.5);
+    assert!(
+        (h_upslope - h_downslope).abs() > 0.5,
+        "expected sloped ramp height difference along Z, got upslope={h_upslope}, downslope={h_downslope}"
+    );
+
+    // Dynamic box dropped onto the tilted ramp
+    let box_idx = world.spawn_box(
+        Vec3::new(0.0, 1.35, 0.0),
+        Vec3::splat(0.15),
+        5.0,
+        Vec3::ZERO,
+    );
+    // Dynamic sphere placed underneath the ramp (offset in X from the box) for raycast occlusion check
+    let sphere_idx = world.spawn_sphere(Vec3::new(0.8, 0.25, 0.0), 0.15, 2.0, Vec3::ZERO);
+
+    for _ in 0..60 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf on oriented ramp"
+            );
+        }
+    }
+
+    let box_pos = world.bodies[box_idx].position;
+    let ramp_h_at_box = world.sample_support_height(box_pos.x, box_pos.z, 2.5);
+    assert!(
+        box_pos.y > ramp_h_at_box && box_pos.y > 0.5,
+        "dynamic box fell through tilted ramp: box_pos={box_pos:?}, ramp_h={ramp_h_at_box}"
+    );
+
+    // Raycast from above the ramp toward the sphere underneath must be occluded by the tilted ramp
+    let occluded = world.raycast(Vec3::new(0.8, 3.0, 0.0), Vec3::NEG_Y, 10.0);
+    assert!(
+        occluded.is_none(),
+        "raycast aimed through tilted ramp should be occluded, got {occluded:?}"
+    );
+
+    // Raycast from below the ramp (y = 0.6) hits the sphere
+    let hit = world
+        .raycast(Vec3::new(0.8, 0.6, 0.0), Vec3::NEG_Y, 2.0)
+        .expect("raycast below ramp should hit sphere");
+    assert_eq!(hit.body_idx, sphere_idx);
+}
+
+#[test]
+fn test_heightfield_slope_collision_and_standing_balance() {
+    use arsa_core::Heightfield;
+
+    let cols = 9usize;
+    let rows = 9usize;
+    let cell_size = 1.0_f32;
+    let origin_x = -4.0_f32;
+    let origin_z = -4.0_f32;
+    let mut heights = Vec::with_capacity(cols * rows);
+    for r in 0..rows {
+        let z = origin_z + (r as f32) * cell_size;
+        let h = 1.0 + 0.12 * z;
+        for _c in 0..cols {
+            heights.push(h);
+        }
+    }
+
+    let hf = Heightfield {
+        origin_x,
+        origin_z,
+        cell_size,
+        cols,
+        rows,
+        heights,
+        friction: 0.85,
+        restitution: 0.05,
+    };
+
+    let (h0, n0) = hf.sample(0.0, 0.0).expect("center sample should succeed");
+    assert!((h0 - 1.0).abs() < 1e-5);
+    assert!(n0.y > 0.9 && n0.z < -0.05);
+    assert!(hf.sample(5.0, 0.0).is_none());
+
+    let mut world = ArsaWorld::new();
+    world.set_heightfield(Some(hf));
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 1.02, 0.0));
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+
+    for _ in 0..120 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf on heightfield slope"
+            );
+        }
+    }
+
+    let pelvis_pos = world.bodies[pelvis_idx].position;
+    let terrain_h = world.sample_support_height(pelvis_pos.x, pelvis_pos.z, pelvis_pos.y);
+    assert!(
+        pelvis_pos.y > terrain_h + 0.55,
+        "ragdoll fell through sloped heightfield: pelvis_pos={pelvis_pos:?}, terrain_h={terrain_h}"
+    );
+    assert!(
+        matches!(
+            world.ragdolls[id].balance.state,
+            BehaviorState::Balanced | BehaviorState::Stumbling
+        ),
+        "expected ragdoll to balance on gentle heightfield slope, got {:?}",
+        world.ragdolls[id].balance.state
+    );
+}
+
+#[test]
+fn test_host_world_query_callbacks_ground_and_occlusion() {
+    use arsa_core::WorldQueryHooks;
+
+    extern "C" fn host_ground_height(
+        _user_data: *mut std::ffi::c_void,
+        _x: f32,
+        _z: f32,
+        max_y: f32,
+        out_y: *mut f32,
+        out_normal: *mut [f32; 3],
+    ) -> bool {
+        if 1.5 <= max_y {
+            unsafe {
+                *out_y = 1.5;
+                *out_normal = [0.0, 1.0, 0.0];
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    extern "C" fn host_raycast(
+        _user_data: *mut std::ffi::c_void,
+        _origin: *const [f32; 3],
+        _dir: *const [f32; 3],
+        max_dist: f32,
+        out_dist: *mut f32,
+        out_normal: *mut [f32; 3],
+    ) -> bool {
+        if 1.0 < max_dist {
+            unsafe {
+                *out_dist = 1.0;
+                *out_normal = [0.0, 0.0, -1.0];
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    let mut world = ArsaWorld::new();
+    world.set_world_query_callbacks(Some(WorldQueryHooks {
+        user_data: std::ptr::null_mut(),
+        ground_height: Some(host_ground_height),
+        raycast: Some(host_raycast),
+    }));
+
+    let box_idx = world.spawn_box(Vec3::new(0.0, 2.0, 3.0), Vec3::splat(0.15), 5.0, Vec3::ZERO);
+
+    for _ in 0..90 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf in host query callback test"
+            );
+        }
+    }
+
+    let settled_y = world.bodies[box_idx].position.y;
+    assert!(
+        (settled_y - 1.65).abs() < 0.03,
+        "expected box to settle on host y=1.5 ground (center ~1.65), got {settled_y}"
+    );
+
+    // Raycast from (0, 1.65, 0) toward +Z is occluded by host wall at dist = 1.0
+    let occluded = world.raycast(Vec3::new(0.0, 1.65, 0.0), Vec3::Z, 10.0);
+    assert!(
+        occluded.is_none(),
+        "expected raycast toward z=3.0 box to be occluded by host wall at dist=1.0, got {occluded:?}"
+    );
+
+    // Removing the raycast hook allows the ray to hit the dynamic box at z = 3.0
+    world.set_world_query_callbacks(Some(WorldQueryHooks {
+        user_data: std::ptr::null_mut(),
+        ground_height: Some(host_ground_height),
+        raycast: None,
+    }));
+    let hit = world
+        .raycast(Vec3::new(0.0, 1.65, 0.0), Vec3::Z, 10.0)
+        .expect("raycast should hit dynamic box when host occlusion is disabled");
+    assert_eq!(hit.body_idx, box_idx);
+}

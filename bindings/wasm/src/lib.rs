@@ -1,7 +1,7 @@
 //! WebAssembly bindings (`arsa-wasm`) for the ARSA Active Ragdoll Engine.
 
-use arsa_core::glam::Vec3;
-use arsa_core::{ArsaWorld, BodyProfile, WeaponKind};
+use arsa_core::glam::{Quat, Vec3};
+use arsa_core::{ArsaWorld, BodyProfile, Heightfield, WeaponKind};
 use wasm_bindgen::prelude::*;
 
 /// WebAssembly simulation wrapper around `ArsaWorld`.
@@ -508,5 +508,79 @@ impl ArsaSim {
             out.push(hit.body_idx as f32);
         }
         out
+    }
+
+    /// Adds a static oriented box obstacle (XYZW quaternion) and returns its index.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_static_oriented_box(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        cz: f32,
+        hx: f32,
+        hy: f32,
+        hz: f32,
+        qx: f32,
+        qy: f32,
+        qz: f32,
+        qw: f32,
+        friction: f32,
+        restitution: f32,
+    ) -> usize {
+        self.world.add_static_oriented_box(
+            Vec3::new(cx, cy, cz),
+            Vec3::new(hx, hy, hz),
+            Quat::from_xyzw(qx, qy, qz, qw),
+            friction,
+            restitution,
+        )
+    }
+
+    /// Sets a uniform-grid heightfield terrain collider from row-major `heights` (`cols * rows` floats).
+    #[allow(clippy::too_many_arguments)]
+    pub fn set_heightfield(
+        &mut self,
+        origin_x: f32,
+        origin_z: f32,
+        cell_size: f32,
+        cols: usize,
+        rows: usize,
+        heights: &[f32],
+        friction: f32,
+        restitution: f32,
+    ) -> bool {
+        if cols < 2
+            || rows < 2
+            || !cell_size.is_finite()
+            || cell_size <= 1e-4
+            || !origin_x.is_finite()
+            || !origin_z.is_finite()
+            || !friction.is_finite()
+            || !restitution.is_finite()
+        {
+            return false;
+        }
+        let Some(expected) = cols.checked_mul(rows) else {
+            return false;
+        };
+        if heights.len() < expected || heights[..expected].iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        self.world.set_heightfield(Some(Heightfield {
+            origin_x,
+            origin_z,
+            cell_size,
+            cols,
+            rows,
+            heights: heights[..expected].to_vec(),
+            friction,
+            restitution,
+        }));
+        true
+    }
+
+    /// Clears the world's heightfield terrain collider.
+    pub fn clear_heightfield(&mut self) {
+        self.world.set_heightfield(None);
     }
 }

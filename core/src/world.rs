@@ -8,7 +8,7 @@ use crate::balance::{update_ragdoll_balance, BehaviorState, RecoveryStage};
 use crate::body::{ColliderShape, RigidBody};
 use crate::collision::{
     body_world_aabb, detect_contacts, solve_contacts_position_ordered,
-    solve_contacts_velocity_ordered, Contact, StaticBox,
+    solve_contacts_velocity_ordered, Contact, Heightfield, StaticBox,
 };
 use crate::joint::Joint;
 use crate::reflex::{apply_procedural_reflexes, IncomingThreat, WoundRegion};
@@ -79,6 +79,43 @@ pub struct ExplosionEvent {
     pub radius: f32,
 }
 
+/// Host engine ground-height query callback.
+///
+/// Given `(user_data, x, z, max_y)`, writes surface height into `out_y` and upward unit normal
+/// `[nx, ny, nz]` into `out_normal`, returning `true` if a surface exists at `<= max_y`.
+pub type GroundHeightFn = extern "C" fn(
+    user_data: *mut std::ffi::c_void,
+    x: f32,
+    z: f32,
+    max_y: f32,
+    out_y: *mut f32,
+    out_normal: *mut [f32; 3],
+) -> bool;
+
+/// Host engine static-world raycast occlusion callback.
+///
+/// Given `(user_data, origin, dir, max_dist)`, writes hit distance into `out_dist` and hit normal
+/// into `out_normal`, returning `true` if the ray hit static host geometry closer than `max_dist`.
+pub type RaycastWorldFn = extern "C" fn(
+    user_data: *mut std::ffi::c_void,
+    origin: *const [f32; 3],
+    dir: *const [f32; 3],
+    max_dist: f32,
+    out_dist: *mut f32,
+    out_normal: *mut [f32; 3],
+) -> bool;
+
+/// Optional host engine world-query callbacks for terrain height and raycast occlusion.
+#[derive(Debug, Clone, Copy)]
+pub struct WorldQueryHooks {
+    pub user_data: *mut std::ffi::c_void,
+    pub ground_height: Option<GroundHeightFn>,
+    pub raycast: Option<RaycastWorldFn>,
+}
+
+unsafe impl Send for WorldQueryHooks {}
+unsafe impl Sync for WorldQueryHooks {}
+
 /// Main ARSA physics simulation world.
 #[derive(Debug, Clone)]
 pub struct ArsaWorld {
@@ -89,6 +126,8 @@ pub struct ArsaWorld {
     pub joints: Vec<Joint>,
     pub tethers: Vec<TetherConstraint>,
     pub static_boxes: Vec<StaticBox>,
+    pub heightfield: Option<Heightfield>,
+    pub world_query_hooks: Option<WorldQueryHooks>,
     pub ragdolls: Vec<RagdollInstance>,
     pub grab: Option<GrabConstraint>,
     pub dynamites: Vec<DynamiteTimer>,
@@ -121,6 +160,8 @@ impl ArsaWorld {
             joints: Vec::new(),
             tethers: Vec::new(),
             static_boxes: Vec::new(),
+            heightfield: None,
+            world_query_hooks: None,
             ragdolls: Vec::new(),
             grab: None,
             dynamites: Vec::new(),
@@ -142,6 +183,7 @@ impl ArsaWorld {
         self.joints.clear();
         self.tethers.clear();
         self.static_boxes.clear();
+        self.heightfield = None;
         self.ragdolls.clear();
         self.grab = None;
         self.dynamites.clear();
@@ -190,19 +232,55 @@ impl ArsaWorld {
         friction: f32,
         restitution: f32,
     ) -> usize {
+        self.add_static_oriented_box(center, half_extents, Quat::IDENTITY, friction, restitution)
+    }
+
+    /// Adds a static oriented box obstacle and returns its index.
+    pub fn add_static_oriented_box(
+        &mut self,
+        center: Vec3,
+        half_extents: Vec3,
+        orientation: Quat,
+        friction: f32,
+        restitution: f32,
+    ) -> usize {
+        let norm_orientation = if orientation.is_finite() && orientation.length_squared() >= 1e-12 {
+            orientation.normalize()
+        } else {
+            Quat::IDENTITY
+        };
         let idx = self.static_boxes.len();
         self.static_boxes.push(StaticBox {
             center,
             half_extents,
+            orientation: norm_orientation,
             friction,
             restitution,
         });
         idx
     }
 
-    /// Samples the highest static or heavy-dynamic support surface `y <= max_y` at `(x, z)`.
+    /// Sets or clears the world's heightfield terrain collider.
+    pub fn set_heightfield(&mut self, hf: Option<Heightfield>) {
+        self.heightfield = hf;
+    }
+
+    /// Sets or clears host engine world-query callbacks (terrain height & raycast occlusion).
+    pub fn set_world_query_callbacks(&mut self, hooks: Option<WorldQueryHooks>) {
+        self.world_query_hooks = hooks;
+    }
+
+    /// Samples the highest static, heightfield, host-terrain, or heavy-dynamic support surface `y <= max_y` at `(x, z)`.
     pub fn sample_support_height(&self, x: f32, z: f32, max_y: f32) -> f32 {
-        sample_support_height_parts(&self.static_boxes, &self.bodies, x, z, max_y)
+        sample_support_height_parts(
+            &self.static_boxes,
+            &self.bodies,
+            self.heightfield.as_ref(),
+            self.world_query_hooks.as_ref(),
+            x,
+            z,
+            max_y,
+        )
     }
 
     /// Spawns a 17-bone humanoid ragdoll at `origin` with the default profile and returns its ragdoll ID.
@@ -719,6 +797,8 @@ impl ArsaWorld {
                         let probe_h = sample_support_height_parts(
                             &self.static_boxes,
                             &self.bodies,
+                            self.heightfield.as_ref(),
+                            self.world_query_hooks.as_ref(),
                             pelvis_pos.x + d.x * probe_radius,
                             pelvis_pos.z + d.z * probe_radius,
                             pelvis_y,
@@ -742,6 +822,8 @@ impl ArsaWorld {
                 let step_target_ground_y = sample_support_height_parts(
                     &self.static_boxes,
                     &self.bodies,
+                    self.heightfield.as_ref(),
+                    self.world_query_hooks.as_ref(),
                     ragdoll.balance.step_target_xz.x,
                     ragdoll.balance.step_target_xz.z,
                     pelvis_y,
@@ -760,6 +842,8 @@ impl ArsaWorld {
                 let ground_below_pelvis = sample_support_height_parts(
                     &self.static_boxes,
                     &self.bodies,
+                    self.heightfield.as_ref(),
+                    self.world_query_hooks.as_ref(),
                     pelvis_pos.x,
                     pelvis_pos.z,
                     pelvis_pos.y,
@@ -803,6 +887,8 @@ impl ArsaWorld {
             detect_contacts(
                 &self.bodies,
                 &self.static_boxes,
+                self.heightfield.as_ref(),
+                self.world_query_hooks.as_ref(),
                 &self.connected_pairs,
                 &mut self.body_aabbs_buf,
                 &mut self.contacts_buf,
@@ -855,6 +941,8 @@ impl ArsaWorld {
                     let support_y = sample_support_height_parts(
                         &self.static_boxes,
                         &self.bodies,
+                        self.heightfield.as_ref(),
+                        self.world_query_hooks.as_ref(),
                         foot.position.x,
                         foot.position.z,
                         foot.position.y + 0.05,
@@ -1300,9 +1388,36 @@ impl ArsaWorld {
             }
         }
         for sb in &self.static_boxes {
-            if let Some(t) = ray_aabb(origin, d, sb.center, sb.half_extents, best_t) {
+            if let Some(t) = raycast_static_box(origin, d, sb, best_t) {
                 if t > 0.0 && t < best_t {
                     best_t = t;
+                }
+            }
+        }
+        if let Some(hooks) = &self.world_query_hooks {
+            if let Some(cb) = hooks.raycast {
+                let o_arr = origin.to_array();
+                let d_arr = d.to_array();
+                let mut out_dist = 0.0_f32;
+                let mut out_normal = [0.0_f32; 3];
+                if cb(
+                    hooks.user_data,
+                    &o_arr,
+                    &d_arr,
+                    best_t,
+                    &mut out_dist,
+                    &mut out_normal,
+                ) && out_dist.is_finite()
+                    && out_dist > 0.0
+                    && out_dist < best_t
+                {
+                    let raw_n = Vec3::from_array(out_normal);
+                    let _normal = if raw_n.is_finite() && raw_n.length_squared() > 1e-12 {
+                        raw_n.normalize()
+                    } else {
+                        Vec3::Y
+                    };
+                    best_t = out_dist;
                 }
             }
         }
@@ -1722,21 +1837,88 @@ fn ray_capsule(
     }
 }
 
+fn raycast_static_box(origin: Vec3, dir: Vec3, sb: &StaticBox, max_dist: f32) -> Option<f32> {
+    if sb.orientation.w.abs() > 0.99999 {
+        ray_aabb(origin, dir, sb.center, sb.half_extents, max_dist)
+    } else {
+        let inv_q = sb.orientation.conjugate();
+        let ro = inv_q * (origin - sb.center);
+        let rd = inv_q * dir;
+        ray_aabb(ro, rd, Vec3::ZERO, sb.half_extents, max_dist)
+    }
+}
+
 fn sample_support_height_parts(
     static_boxes: &[StaticBox],
     bodies: &[RigidBody],
+    heightfield: Option<&Heightfield>,
+    query_hooks: Option<&WorldQueryHooks>,
     x: f32,
     z: f32,
     max_y: f32,
 ) -> f32 {
     let mut best_y = 0.0_f32;
     for sb in static_boxes {
-        if (x - sb.center.x).abs() <= sb.half_extents.x + 0.05
-            && (z - sb.center.z).abs() <= sb.half_extents.z + 0.05
-        {
-            let top = sb.center.y + sb.half_extents.y;
-            if top <= max_y && top > best_y {
-                best_y = top;
+        if sb.orientation.w.abs() > 0.99999 {
+            if (x - sb.center.x).abs() <= sb.half_extents.x + 0.05
+                && (z - sb.center.z).abs() <= sb.half_extents.z + 0.05
+            {
+                let top = sb.center.y + sb.half_extents.y;
+                if top <= max_y && top > best_y {
+                    best_y = top;
+                }
+            }
+        } else {
+            let inv_q = sb.orientation.conjugate();
+            let o = inv_q * (Vec3::new(x, 0.0, z) - sb.center);
+            let d = inv_q * Vec3::Y;
+            let mut y_min = f32::NEG_INFINITY;
+            let mut y_max = f32::INFINITY;
+            let mut hit = true;
+            for i in 0..3 {
+                let h = sb.half_extents[i];
+                if d[i].abs() < 1e-8 {
+                    if o[i].abs() > h {
+                        hit = false;
+                        break;
+                    }
+                } else {
+                    let inv_d = 1.0 / d[i];
+                    let mut t1 = (-h - o[i]) * inv_d;
+                    let mut t2 = (h - o[i]) * inv_d;
+                    if t1 > t2 {
+                        std::mem::swap(&mut t1, &mut t2);
+                    }
+                    y_min = y_min.max(t1);
+                    y_max = y_max.min(t2);
+                    if y_min > y_max {
+                        hit = false;
+                        break;
+                    }
+                }
+            }
+            if hit && y_max.is_finite() && y_max <= max_y && y_max > best_y {
+                best_y = y_max;
+            }
+        }
+    }
+    if let Some(hf) = heightfield {
+        if let Some((hy, _)) = hf.sample(x, z) {
+            if hy <= max_y && hy > best_y {
+                best_y = hy;
+            }
+        }
+    }
+    if let Some(hooks) = query_hooks {
+        if let Some(cb) = hooks.ground_height {
+            let mut out_y = 0.0_f32;
+            let mut out_normal = [0.0_f32; 3];
+            if cb(hooks.user_data, x, z, max_y, &mut out_y, &mut out_normal)
+                && out_y.is_finite()
+                && out_y <= max_y
+                && out_y > best_y
+            {
+                best_y = out_y;
             }
         }
     }

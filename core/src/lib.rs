@@ -15,7 +15,7 @@ pub use balance::{
     update_ragdoll_balance, BalanceState, BehaviorState, RecoveryStage, RecoveryStrategy,
 };
 pub use body::{ColliderShape, RigidBody};
-pub use collision::{Contact, StaticBox};
+pub use collision::{Contact, Heightfield, StaticBox};
 pub use joint::{Joint, JointKind};
 pub use math::{inertia_box, inertia_capsule, inertia_sphere, swing_twist_decomposition};
 pub use reflex::{
@@ -26,6 +26,6 @@ pub use skeleton::{
     JointId, RagdollInstance,
 };
 pub use world::{
-    ArsaWorld, DynamiteTimer, ExplosionEvent, GrabConstraint, RaycastHit, TetherConstraint,
-    WeaponKind, WeaponShotResult,
+    ArsaWorld, DynamiteTimer, ExplosionEvent, GrabConstraint, GroundHeightFn, RaycastHit,
+    RaycastWorldFn, TetherConstraint, WeaponKind, WeaponShotResult, WorldQueryHooks,
 };

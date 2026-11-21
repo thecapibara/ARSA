@@ -1085,11 +1085,10 @@ fn update_hand_grab(
     let mut best_dist_sq = f32::MAX;
 
     for sb in static_boxes {
-        let top_y = sb.center.y + sb.half_extents.y;
-        if top_y < min_ledge_y || top_y > max_ledge_y {
+        let pt = closest_top_perimeter_point(sb, hand_pos);
+        if pt.y < min_ledge_y || pt.y > max_ledge_y {
             continue;
         }
-        let pt = closest_top_perimeter_point(sb, hand_pos);
         if shoulder_world.distance(pt) <= max_reach {
             let d_sq = hand_pos.distance_squared(pt);
             if d_sq < best_dist_sq {
@@ -1142,20 +1141,25 @@ fn update_hand_grab(
 
 #[inline]
 fn closest_top_perimeter_point(sb: &StaticBox, p: Vec3) -> Vec3 {
-    let min_x = sb.center.x - sb.half_extents.x;
-    let max_x = sb.center.x + sb.half_extents.x;
-    let min_z = sb.center.z - sb.half_extents.z;
-    let max_z = sb.center.z + sb.half_extents.z;
-    let top_y = sb.center.y + sb.half_extents.y;
+    let local_p = if sb.orientation.w.abs() > 0.99999 {
+        p - sb.center
+    } else {
+        sb.orientation.conjugate() * (p - sb.center)
+    };
+    let min_x = -sb.half_extents.x;
+    let max_x = sb.half_extents.x;
+    let min_z = -sb.half_extents.z;
+    let max_z = sb.half_extents.z;
+    let top_y = sb.half_extents.y;
 
-    let mut cx = p.x.clamp(min_x, max_x);
-    let mut cz = p.z.clamp(min_z, max_z);
+    let mut cx = local_p.x.clamp(min_x, max_x);
+    let mut cz = local_p.z.clamp(min_z, max_z);
 
-    if p.x > min_x && p.x < max_x && p.z > min_z && p.z < max_z {
-        let dx_min = p.x - min_x;
-        let dx_max = max_x - p.x;
-        let dz_min = p.z - min_z;
-        let dz_max = max_z - p.z;
+    if local_p.x > min_x && local_p.x < max_x && local_p.z > min_z && local_p.z < max_z {
+        let dx_min = local_p.x - min_x;
+        let dx_max = max_x - local_p.x;
+        let dz_min = local_p.z - min_z;
+        let dz_max = max_z - local_p.z;
         let min_d = dx_min.min(dx_max).min(dz_min).min(dz_max);
         if min_d == dx_min {
             cx = min_x;
@@ -1168,7 +1172,12 @@ fn closest_top_perimeter_point(sb: &StaticBox, p: Vec3) -> Vec3 {
         }
     }
 
-    Vec3::new(cx, top_y, cz)
+    let local_pt = Vec3::new(cx, top_y, cz);
+    if sb.orientation.w.abs() > 0.99999 {
+        sb.center + local_pt
+    } else {
+        sb.center + sb.orientation * local_pt
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
