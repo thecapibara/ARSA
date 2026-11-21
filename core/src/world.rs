@@ -11,7 +11,7 @@ use crate::collision::{
     StaticBox,
 };
 use crate::joint::Joint;
-use crate::reflex::{apply_procedural_reflexes, WoundRegion};
+use crate::reflex::{apply_procedural_reflexes, IncomingThreat, WoundRegion};
 use crate::skeleton::{
     spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId, RagdollInstance,
 };
@@ -684,6 +684,7 @@ impl ArsaWorld {
                     self.earthquake_magnitude,
                     sub_dt,
                 );
+                ragdoll.reflex.incoming_threat = detect_incoming_threat(&self.bodies, ragdoll);
                 apply_procedural_reflexes(
                     ragdoll,
                     &mut self.bodies,
@@ -1630,4 +1631,78 @@ fn sample_support_height_parts(
         }
     }
     best_y
+}
+
+fn detect_incoming_threat(
+    bodies: &[RigidBody],
+    ragdoll: &RagdollInstance,
+) -> Option<IncomingThreat> {
+    if !ragdoll.active_enabled
+        || ragdoll.reflex.unconscious
+        || ragdoll.reflex.health <= 20.0
+        || !matches!(
+            ragdoll.balance.state,
+            BehaviorState::Balanced | BehaviorState::Stumbling
+        )
+    {
+        return None;
+    }
+
+    let chest_idx = ragdoll.body_indices[BoneId::Chest as usize];
+    let chest_pos = bodies[chest_idx].position;
+    let s_h = ragdoll.profile.sanitized().height_m / 1.78;
+    let max_range_sq = (4.5 * s_h).powi(2);
+
+    let mut best: Option<IncomingThreat> = None;
+
+    for b in bodies {
+        if b.ragdoll_id.is_some() || b.inv_mass <= 0.0 || b.is_sleeping || b.mass < 1.0 {
+            continue;
+        }
+
+        let vel = b.linear_velocity;
+        let v_sq = vel.length_squared();
+        if v_sq < 4.0 {
+            continue;
+        }
+
+        let to_chest = chest_pos - b.position;
+        if to_chest.length_squared() > max_range_sq {
+            continue;
+        }
+
+        let t_closest = to_chest.dot(vel) / v_sq;
+        if t_closest <= 0.0 || t_closest > 0.80 {
+            continue;
+        }
+
+        let closest_pt = b.position + vel * t_closest;
+        let miss_dist = (chest_pos - closest_pt).length();
+        let body_radius = match b.collider {
+            ColliderShape::Sphere { radius } => radius,
+            ColliderShape::Box { half_extents } => half_extents.length(),
+            ColliderShape::Capsule {
+                radius,
+                half_length,
+            } => radius + half_length,
+        };
+
+        if miss_dist <= 0.75 * s_h + body_radius {
+            let urgency = (1.0 - t_closest / 0.80).clamp(0.0, 1.0);
+            let is_more_urgent = match best {
+                None => true,
+                Some(prev) => urgency > prev.urgency,
+            };
+            if is_more_urgent {
+                best = Some(IncomingThreat {
+                    world_pos: b.position,
+                    velocity: vel,
+                    time_to_impact: t_closest,
+                    urgency,
+                });
+            }
+        }
+    }
+
+    best
 }

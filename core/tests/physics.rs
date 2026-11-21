@@ -1531,3 +1531,57 @@ fn test_terrain_aware_step_lifts_knee_for_stair() {
         "expected step_target_ground_y > 0.15 on stair, got {max_step_ground_y}"
     );
 }
+
+#[test]
+fn test_threat_anticipation_raises_guard_before_impact() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+
+    // Settle for 0.2s
+    for _ in 0..12 {
+        world.step(1.0 / 60.0);
+    }
+
+    let left_hand_idx = world.ragdolls[id].body_indices[BoneId::LeftHand as usize];
+    let right_hand_idx = world.ragdolls[id].body_indices[BoneId::RightHand as usize];
+    let rest_left_hand_y = world.bodies[left_hand_idx].position.y;
+    let rest_right_hand_y = world.bodies[right_hand_idx].position.y;
+
+    // Fast heavy sphere approaching chest from +Z, arriving in ~0.49s
+    world.spawn_sphere(
+        Vec3::new(0.0, 1.35, 3.2),
+        0.24,
+        30.0,
+        Vec3::new(0.0, 0.0, -6.5),
+    );
+
+    // Step 0.25s (15 frames) -- BEFORE the sphere hits
+    for _ in 0..15 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during threat anticipation test"
+            );
+        }
+    }
+
+    assert!(
+        world.ragdolls[id].reflex.incoming_threat.is_some(),
+        "expected incoming_threat to be detected before impact"
+    );
+
+    let left_hand_y = world.bodies[left_hand_idx].position.y;
+    let right_hand_y = world.bodies[right_hand_idx].position.y;
+    assert!(
+        left_hand_y > rest_left_hand_y + 0.18,
+        "LeftHand did not rise into defensive guard before impact: rest={rest_left_hand_y}, now={left_hand_y}"
+    );
+    assert!(
+        right_hand_y > rest_right_hand_y + 0.18,
+        "RightHand did not rise into defensive guard before impact: rest={rest_right_hand_y}, now={right_hand_y}"
+    );
+}

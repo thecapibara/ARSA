@@ -56,6 +56,15 @@ pub struct HandGrab {
     pub max_hold_time: f32,
 }
 
+/// Approaching dynamic threat detected by the spatial incoming-threat sensor.
+#[derive(Debug, Clone, Copy)]
+pub struct IncomingThreat {
+    pub world_pos: Vec3,
+    pub velocity: Vec3,
+    pub time_to_impact: f32,
+    pub urgency: f32, // 0.0..1.0 (1.0 = imminent impact)
+}
+
 /// Per-ragdoll trauma, health, consciousness, and procedural reflex state.
 #[derive(Debug, Clone)]
 pub struct ReflexState {
@@ -67,6 +76,7 @@ pub struct ReflexState {
     pub writhe_time: f32,
     pub left_grab: Option<HandGrab>,
     pub right_grab: Option<HandGrab>,
+    pub incoming_threat: Option<IncomingThreat>,
 }
 
 impl Default for ReflexState {
@@ -80,6 +90,7 @@ impl Default for ReflexState {
             writhe_time: 0.0,
             left_grab: None,
             right_grab: None,
+            incoming_threat: None,
         }
     }
 }
@@ -345,7 +356,24 @@ pub fn apply_procedural_reflexes(
         ragdoll.reflex.bracing = false;
     }
 
-    // 5. Reach-for-Wound (Guard / Clutch Injury) & Downed Writhe
+    // 5b. Pre-Impact Defensive Reflex (Look-At -> Head Flinch, Defensive Guard Arms, Torso Lean-Away)
+    if let Some(threat) = ragdoll.reflex.incoming_threat {
+        if matches!(state, BehaviorState::Balanced | BehaviorState::Stumbling)
+            && !ragdoll.reflex.bracing
+        {
+            apply_threat_anticipation(
+                ragdoll,
+                bodies,
+                joints,
+                threat,
+                left_grab_active,
+                right_grab_active,
+                grav_scale,
+            );
+        }
+    }
+
+    // 6. Reach-for-Wound (Guard / Clutch Injury) & Downed Writhe
     let Some(mut wound) = ragdoll.reflex.active_wound else {
         return;
     };
@@ -887,4 +915,167 @@ fn set_motor_target(
     let j_idx = ragdoll.joint_indices[joint_id as usize];
     let j = &mut joints[j_idx];
     j.motor_target = (j.frame_parent.conjugate() * target * j.frame_child).normalize();
+}
+
+#[inline]
+fn blend_motor_target(
+    ragdoll: &RagdollInstance,
+    joints: &mut [Joint],
+    joint_id: JointId,
+    target: Quat,
+    weight: f32,
+) {
+    let j_idx = ragdoll.joint_indices[joint_id as usize];
+    let j = &mut joints[j_idx];
+    let target_joint = (j.frame_parent.conjugate() * target * j.frame_child).normalize();
+    j.motor_target = j
+        .motor_target
+        .slerp(target_joint, weight.clamp(0.0, 1.0))
+        .normalize();
+}
+
+/// Applies pre-impact look-at/flinch, defensive guard arms, and torso lean-away
+/// toward an approaching dynamic threat.
+fn apply_threat_anticipation(
+    ragdoll: &RagdollInstance,
+    bodies: &[RigidBody],
+    joints: &mut [Joint],
+    threat: IncomingThreat,
+    left_grab_active: bool,
+    right_grab_active: bool,
+    grav_scale: f32,
+) {
+    let chest_idx = ragdoll.body_indices[BoneId::Chest as usize];
+    let chest_rot = bodies[chest_idx].orientation;
+    let to_threat_local = (chest_rot.conjugate() * (threat.world_pos - bodies[chest_idx].position))
+        .normalize_or_zero();
+    if to_threat_local.length_squared() < 1e-6 {
+        return;
+    }
+
+    let u = threat.urgency.clamp(0.0, 1.0);
+
+    // 1. Look-At -> Head Flinch
+    let yaw_to = to_threat_local
+        .x
+        .atan2(to_threat_local.z)
+        .clamp(-1.05, 1.05);
+    if u < 0.50 {
+        let horiz = to_threat_local.x.hypot(to_threat_local.z).max(0.1);
+        let pitch_to = (-to_threat_local.y.atan2(horiz)).clamp(-0.40, 0.40);
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::Neck,
+            (Quat::from_rotation_y(yaw_to * 0.45) * Quat::from_rotation_x(pitch_to * 0.45))
+                .normalize(),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::Head,
+            (Quat::from_rotation_y(yaw_to * 0.55) * Quat::from_rotation_x(pitch_to * 0.55))
+                .normalize(),
+        );
+    } else {
+        // Instinctive flinch away from threat side + chin tuck to protect face
+        let yaw_away = -to_threat_local.x.clamp(-1.0, 1.0) * 0.35 * u;
+        let chin_tuck = 0.28 * u;
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::Neck,
+            (Quat::from_rotation_y(yaw_away * 0.45) * Quat::from_rotation_x(0.12 * u)).normalize(),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::Head,
+            (Quat::from_rotation_y(yaw_away * 0.55) * Quat::from_rotation_x(chin_tuck)).normalize(),
+        );
+    }
+    for jid in [JointId::Neck, JointId::Head] {
+        let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+        j.motor_stiffness = j.motor_stiffness.max(55.0 * grav_scale);
+        j.max_torque = j.max_torque.max(45.0 * grav_scale);
+    }
+
+    // 2. Defensive Guard Arms (healthy, not grabbing a ledge, not clutching an active wound)
+    let (left_clutching, right_clutching) = match ragdoll.reflex.active_wound {
+        Some(wound) => match wound.region {
+            WoundRegion::LeftArm => (false, true),
+            WoundRegion::RightArm => (true, false),
+            WoundRegion::Torso | WoundRegion::Head => (true, true),
+            WoundRegion::LeftLeg => (true, false),
+            WoundRegion::RightLeg => (false, true),
+            WoundRegion::None => (false, false),
+        },
+        None => (false, false),
+    };
+
+    let blend = u.clamp(0.25, 1.0);
+    let elbow_angle = (-1.45 * u - 0.30).clamp(-1.85, -0.35);
+    let arms = [
+        (
+            1.0_f32,
+            left_grab_active,
+            left_clutching,
+            BoneId::LeftUpperArm,
+            BoneId::LeftForearm,
+            BoneId::LeftHand,
+            JointId::LeftShoulder,
+            JointId::LeftElbow,
+        ),
+        (
+            -1.0_f32,
+            right_grab_active,
+            right_clutching,
+            BoneId::RightUpperArm,
+            BoneId::RightForearm,
+            BoneId::RightHand,
+            JointId::RightShoulder,
+            JointId::RightElbow,
+        ),
+    ];
+
+    for (side_sign, grab_active, busy_wound, ua_bid, fa_bid, ha_bid, sh_jid, el_jid) in arms {
+        let healthy = ragdoll.reflex.bone_damage[ua_bid as usize] < 0.5
+            && ragdoll.reflex.bone_damage[fa_bid as usize] < 0.5
+            && ragdoll.reflex.bone_damage[ha_bid as usize] < 0.5;
+        if !healthy || grab_active || busy_wound {
+            continue;
+        }
+
+        let aim_dir =
+            (to_threat_local * 0.65 + Vec3::new(side_sign * 0.22, 0.55, 0.45)).normalize_or_zero();
+        if aim_dir.length_squared() > 0.25 {
+            let q_shoulder = Quat::from_rotation_arc(-Vec3::Y, aim_dir);
+            blend_motor_target(ragdoll, joints, sh_jid, q_shoulder, blend);
+        }
+        blend_motor_target(
+            ragdoll,
+            joints,
+            el_jid,
+            Quat::from_rotation_x(elbow_angle),
+            blend,
+        );
+
+        let sh = &mut joints[ragdoll.joint_indices[sh_jid as usize]];
+        sh.motor_stiffness = sh.motor_stiffness.max(75.0 * grav_scale * u);
+        sh.max_torque = sh.max_torque.max(85.0 * grav_scale * u);
+
+        let el = &mut joints[ragdoll.joint_indices[el_jid as usize]];
+        el.motor_stiffness = el.motor_stiffness.max(75.0 * grav_scale * u);
+        el.max_torque = el.max_torque.max(85.0 * grav_scale * u);
+    }
+
+    // 3. Torso Lean-Away & Stiffen
+    let spine_pitch = -to_threat_local.z * 0.22 * u;
+    let spine_roll = to_threat_local.x * 0.20 * u;
+    let spine_offset = Quat::from_euler(EulerRot::XYZ, spine_pitch, 0.0, spine_roll);
+    for jid in [JointId::LowerSpine, JointId::ChestSpine] {
+        let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+        j.motor_target = (j.motor_target * spine_offset).normalize();
+        j.motor_stiffness *= 1.15;
+    }
 }
