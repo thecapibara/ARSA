@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
+  base: './',
   assetsInclude: ['**/*.wasm'],
   server: {
     port: 5173,

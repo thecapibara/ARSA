@@ -9,6 +9,12 @@
 </p>
 
 <p align="center">
+  <a href="https://thecapibara.github.io/ARSA/">
+    <img src="https://img.shields.io/badge/Live%20Demo-Play%20in%20Browser-e8942c?style=for-the-badge" alt="Live Demo" />
+  </a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20XPBD-orange?style=flat-square" alt="Rust Core" />
   <img src="https://img.shields.io/badge/Web%20Showcase-Three.js%20%2B%20WASM-blue?style=flat-square" alt="Three.js + WASM" />
   <img src="https://img.shields.io/badge/Engines-UE5%20%7C%20Unity%20%7C%20C%20ABI-lightgrey?style=flat-square" alt="UE5 Unity C ABI" />
