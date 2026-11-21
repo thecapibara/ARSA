@@ -790,7 +790,7 @@ kbd,
 
 /* Continuous Simulation Speed slider in bottom dock */
 .speed-val {
-  color: var(--accent);
+  color: var(--accent-amber);
   font-family: 'JetBrains Mono', monospace;
   font-weight: 600;
   margin-left: 4px;
@@ -799,7 +799,7 @@ kbd,
 .speed-slider {
   width: 82px;
   height: 4px;
-  accent-color: var(--accent);
+  accent-color: var(--accent-amber);
   cursor: pointer;
   margin: 0 4px;
   align-self: center;
@@ -810,7 +810,7 @@ kbd,
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--text-dim);
+  color: var(--text-muted);
   padding: 0 4px 0 6px;
   white-space: nowrap;
   user-select: none;
@@ -858,7 +858,7 @@ kbd,
   margin: 0 2px;
   border-radius: 3px;
   background: rgba(255, 255, 255, 0.1);
-  color: var(--text-main);
+  color: var(--text-primary);
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
 }

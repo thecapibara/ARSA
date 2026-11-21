@@ -568,9 +568,23 @@ export class LabScene {
       }
 
       const tOff = i * 7;
+      const py = transforms[tOff + 1];
+      const fuseTip = entry.object.userData.fuseTip as DynamiteFuseTip | undefined;
+      if (py < -20.0) {
+        entry.object.visible = false;
+        if (fuseTip) {
+          this.dynamiteFuseTips.delete(fuseTip);
+        }
+        continue;
+      }
+
+      entry.object.visible = true;
+      if (fuseTip) {
+        this.dynamiteFuseTips.add(fuseTip);
+      }
       entry.object.position.set(
         transforms[tOff],
-        transforms[tOff + 1],
+        py,
         transforms[tOff + 2]
       );
       entry.object.quaternion.set(

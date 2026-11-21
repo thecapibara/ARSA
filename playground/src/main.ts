@@ -596,12 +596,17 @@ class PlaygroundApp {
 
     if (this.grabbedBodyIndex >= 0 && this.grabbedBodyIndex < count) {
       const tOff = this.grabbedBodyIndex * 7;
-      this.grabbedBodyPos.set(
-        transforms[tOff],
-        transforms[tOff + 1],
-        transforms[tOff + 2]
-      );
-      this.lab.setGrabTether(true, this.grabbedBodyPos, this.dragTarget);
+      const py = transforms[tOff + 1];
+      if (py < -20.0) {
+        this.releaseGrab();
+      } else {
+        this.grabbedBodyPos.set(
+          transforms[tOff],
+          py,
+          transforms[tOff + 2]
+        );
+        this.lab.setGrabTether(true, this.grabbedBodyPos, this.dragTarget);
+      }
     }
 
     const ragdollIds = new Set<number>();
