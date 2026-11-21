@@ -171,6 +171,28 @@ int main(void) {
         return 1;
     }
 
+    /* Verify Bidirectional Host-Physics Mode: brain-only tick + computed world-space joint torques. */
+    arsa_world_step_brain_only(world, dt);
+    float host_torques[48];
+    if (!arsa_world_compute_host_joint_torques(
+            world, ragdoll_id, ARSA_SPACE_UNREAL_LH_Z_UP, host_torques)) {
+        fprintf(stderr, "FAIL: arsa_world_compute_host_joint_torques failed\n");
+        arsa_world_destroy(world);
+        return 1;
+    }
+    for (size_t i = 0; i < 48; ++i) {
+        if (!isfinite(host_torques[i])) {
+            fprintf(stderr, "FAIL: non-finite host joint torque at index %zu\n", i);
+            arsa_world_destroy(world);
+            return 1;
+        }
+    }
+    if (arsa_world_compute_host_joint_torques(world, ragdoll_id, 99, host_torques)) {
+        fprintf(stderr, "FAIL: arsa_world_compute_host_joint_torques should reject invalid coord_space\n");
+        arsa_world_destroy(world);
+        return 1;
+    }
+
     printf("PASS: Heavy Brute (2.17m/135kg) Balanced (pelvis_y=%.3fm), "
            "LeftArm wound=%d, health=%.1f, motors=%zu floats\n",
            pelvis_y, wound_region, post_health, m_written);

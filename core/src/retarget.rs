@@ -19,6 +19,18 @@ pub enum CoordinateSpace {
     UnrealLeftHandedZUp = 2,
 }
 
+impl CoordinateSpace {
+    /// Converts a raw `u32` coordinate space ID (`0..=2`) into a [`CoordinateSpace`].
+    pub fn from_u32(val: u32) -> Option<Self> {
+        match val {
+            0 => Some(Self::ArsaRightHandedYUp),
+            1 => Some(Self::UnityLeftHandedYUp),
+            2 => Some(Self::UnrealLeftHandedZUp),
+            _ => None,
+        }
+    }
+}
+
 /// Built-in skeleton retargeting presets aligned with standard humanoid rigs.
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -270,6 +282,21 @@ impl SkeletonRetargeter {
         }
     }
 
+    /// Converts an axial vector (angular velocity or torque pseudovector) from ARSA space (RH Y-up)
+    /// into `space` using the exact same axis permutation and sign rules as the `(x, y, z)`
+    /// imaginary components of [`Self::convert_quat_to_target`].
+    #[inline]
+    pub fn convert_angular_vec_to_target(space: CoordinateSpace, v: Vec3) -> Vec3 {
+        convert_angular_vec_to_target(space, v)
+    }
+
+    /// Converts an axial vector (angular velocity or torque pseudovector) from `space` back into
+    /// ARSA space (RH Y-up).
+    #[inline]
+    pub fn convert_angular_vec_from_target(space: CoordinateSpace, v: Vec3) -> Vec3 {
+        convert_angular_vec_from_target(space, v)
+    }
+
     /// Retargets 17 ARSA world-space bone positions and orientations into the target engine's
     /// coordinate space, unit scale, and bind-pose frame.
     pub fn retarget_bones_to_target(
@@ -332,4 +359,27 @@ fn arm_angle_bind_offsets(arm_angle_rad: f32) -> [BoneRetargetConfig; 17] {
         bones[idx].bind_offset = right_offset;
     }
     bones
+}
+
+/// Converts an axial vector (angular velocity or torque pseudovector) from ARSA space (RH Y-up)
+/// into `space` using the exact same axis permutation and sign rules as the `(x, y, z)`
+/// imaginary components of [`SkeletonRetargeter::convert_quat_to_target`].
+#[inline]
+pub fn convert_angular_vec_to_target(space: CoordinateSpace, v: Vec3) -> Vec3 {
+    match space {
+        CoordinateSpace::ArsaRightHandedYUp => v,
+        CoordinateSpace::UnityLeftHandedYUp => Vec3::new(v.x, -v.y, -v.z),
+        CoordinateSpace::UnrealLeftHandedZUp => Vec3::new(-v.z, v.x, -v.y),
+    }
+}
+
+/// Converts an axial vector (angular velocity or torque pseudovector) from `space` back into
+/// ARSA space (RH Y-up).
+#[inline]
+pub fn convert_angular_vec_from_target(space: CoordinateSpace, v: Vec3) -> Vec3 {
+    match space {
+        CoordinateSpace::ArsaRightHandedYUp => v,
+        CoordinateSpace::UnityLeftHandedYUp => Vec3::new(v.x, -v.y, -v.z),
+        CoordinateSpace::UnrealLeftHandedZUp => Vec3::new(v.y, -v.z, -v.x),
+    }
 }

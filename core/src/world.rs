@@ -14,6 +14,7 @@ use crate::collision::{
 };
 use crate::joint::Joint;
 use crate::reflex::{apply_procedural_reflexes, IncomingThreat, WoundRegion};
+use crate::retarget::{convert_angular_vec_to_target, CoordinateSpace};
 use crate::skeleton::{
     spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId, RagdollInstance,
     RagdollLod,
@@ -916,96 +917,16 @@ impl ArsaWorld {
                 } else {
                     sub_dt
                 };
-
-                let pelvis_idx = ragdoll.body_indices[BoneId::Pelvis as usize];
-                let pelvis_pos = self.bodies[pelvis_idx].position;
-                let pelvis_y = pelvis_pos.y;
-                let foot_contacts = self.foot_contacts_buf[r_idx];
-                let s_h = ragdoll.profile.height_m / 1.78;
-                let foot_half_y = 0.035 * s_h;
-                let lf_pos = self.bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]].position;
-                let rf_pos = self.bodies[ragdoll.body_indices[BoneId::RightFoot as usize]].position;
-                let foot_ground_y = match foot_contacts {
-                    (true, true) => 0.5 * (lf_pos.y + rf_pos.y) - foot_half_y,
-                    (true, false) => lf_pos.y - foot_half_y,
-                    (false, true) => rf_pos.y - foot_half_y,
-                    (false, false) => (lf_pos.y.min(rf_pos.y) - foot_half_y).max(0.0),
-                };
-
-                if matches!(
-                    ragdoll.balance.state,
-                    BehaviorState::Balanced | BehaviorState::Stumbling
-                ) && foot_ground_y > 0.35
-                {
-                    let probe_radius = 0.42 * s_h;
-                    let dirs = [
-                        Vec3::new(1.0, 0.0, 0.0),
-                        Vec3::new(-1.0, 0.0, 0.0),
-                        Vec3::new(0.0, 0.0, 1.0),
-                        Vec3::new(0.0, 0.0, -1.0),
-                    ];
-                    let mut escape = Vec3::ZERO;
-                    for d in dirs {
-                        let probe_h = sample_support_height_parts(
-                            &self.static_boxes,
-                            &self.bodies,
-                            self.heightfield.as_ref(),
-                            self.world_query_hooks.as_ref(),
-                            pelvis_pos.x + d.x * probe_radius,
-                            pelvis_pos.z + d.z * probe_radius,
-                            pelvis_y,
-                        );
-                        if probe_h < foot_ground_y - 0.50 {
-                            escape -= d;
-                        }
-                    }
-                    if escape.length_squared() > 0.1 {
-                        ragdoll.balance.teetering = true;
-                        ragdoll.balance.teeter_escape_dir = escape.normalize();
-                    } else {
-                        ragdoll.balance.teetering = false;
-                        ragdoll.balance.teeter_escape_dir = Vec3::ZERO;
-                    }
-                } else {
-                    ragdoll.balance.teetering = false;
-                    ragdoll.balance.teeter_escape_dir = Vec3::ZERO;
-                }
-
-                let step_target_ground_y = sample_support_height_parts(
-                    &self.static_boxes,
-                    &self.bodies,
-                    self.heightfield.as_ref(),
-                    self.world_query_hooks.as_ref(),
-                    ragdoll.balance.step_target_xz.x,
-                    ragdoll.balance.step_target_xz.z,
-                    pelvis_y,
-                );
-                update_ragdoll_balance(
+                step_ragdoll_controllers(
                     ragdoll,
                     &mut self.bodies,
                     &mut self.joints,
-                    foot_contacts,
-                    step_target_ground_y,
+                    &self.static_boxes,
+                    self.heightfield.as_ref(),
+                    self.world_query_hooks.as_ref(),
+                    self.foot_contacts_buf[r_idx],
                     gravity_mag,
                     self.earthquake_magnitude,
-                    ctrl_dt,
-                );
-                ragdoll.reflex.incoming_threat = detect_incoming_threat(&self.bodies, ragdoll);
-                let ground_below_pelvis = sample_support_height_parts(
-                    &self.static_boxes,
-                    &self.bodies,
-                    self.heightfield.as_ref(),
-                    self.world_query_hooks.as_ref(),
-                    pelvis_pos.x,
-                    pelvis_pos.z,
-                    pelvis_pos.y,
-                );
-                apply_procedural_reflexes(
-                    ragdoll,
-                    &mut self.bodies,
-                    &mut self.joints,
-                    &self.static_boxes,
-                    ground_below_pelvis,
                     ctrl_dt,
                 );
             }
@@ -1094,31 +1015,25 @@ impl ArsaWorld {
                     }
                 }
                 let s_h = ragdoll.profile.height_m / 1.78;
-                let foot_near_support = |foot_idx: usize| -> bool {
-                    let foot = &self.bodies[foot_idx];
-                    if foot.linear_velocity.y.abs() >= 0.18 {
-                        return false;
-                    }
-                    let foot_hy = match foot.collider {
-                        ColliderShape::Box { half_extents } => half_extents.y,
-                        _ => 0.035 * s_h,
-                    };
-                    let support_y = sample_support_height_parts(
+                if !lf_grounded {
+                    lf_grounded = foot_near_support_parts(
+                        &self.bodies[lf_idx],
+                        s_h,
                         &self.static_boxes,
                         &self.bodies,
                         self.heightfield.as_ref(),
                         self.world_query_hooks.as_ref(),
-                        foot.position.x,
-                        foot.position.z,
-                        foot.position.y + 0.05,
                     );
-                    ((foot.position.y - foot_hy) - support_y).abs() <= 0.018
-                };
-                if !lf_grounded {
-                    lf_grounded = foot_near_support(lf_idx);
                 }
                 if !rf_grounded {
-                    rf_grounded = foot_near_support(rf_idx);
+                    rf_grounded = foot_near_support_parts(
+                        &self.bodies[rf_idx],
+                        s_h,
+                        &self.static_boxes,
+                        &self.bodies,
+                        self.heightfield.as_ref(),
+                        self.world_query_hooks.as_ref(),
+                    );
                 }
                 self.foot_contacts_buf[r_idx] = (lf_grounded, rf_grounded);
                 ragdoll.balance.left_foot_grounded = lf_grounded;
@@ -1711,6 +1626,128 @@ impl ArsaWorld {
         true
     }
 
+    /// Runs a brain-only controller tick for Bidirectional Host-Physics Mode (UE5 Chaos / Unity
+    /// PhysX) over currently synced bone transforms, updating foot grounding, balance state,
+    /// procedural reflexes, and all joint motor targets/gains without integrating positions or
+    /// orientations or running XPBD positional/velocity solvers.
+    pub fn step_brain_only(&mut self, dt: f32) {
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
+        let clamped_dt = dt.clamp(1.0 / 240.0, 1.0 / 20.0);
+
+        for ragdoll in &self.ragdolls {
+            for &b_idx in &ragdoll.body_indices {
+                if let Some(b) = self.bodies.get_mut(b_idx) {
+                    b.update_world_inertia();
+                }
+            }
+        }
+
+        self.foot_contacts_buf.clear();
+        for ragdoll in &mut self.ragdolls {
+            let s_h = ragdoll.profile.height_m / 1.78;
+            let lf_idx = ragdoll.body_indices[BoneId::LeftFoot as usize];
+            let rf_idx = ragdoll.body_indices[BoneId::RightFoot as usize];
+            let lf_grounded = foot_near_support_parts(
+                &self.bodies[lf_idx],
+                s_h,
+                &self.static_boxes,
+                &self.bodies,
+                self.heightfield.as_ref(),
+                self.world_query_hooks.as_ref(),
+            );
+            let rf_grounded = foot_near_support_parts(
+                &self.bodies[rf_idx],
+                s_h,
+                &self.static_boxes,
+                &self.bodies,
+                self.heightfield.as_ref(),
+                self.world_query_hooks.as_ref(),
+            );
+            ragdoll.balance.left_foot_grounded = lf_grounded;
+            ragdoll.balance.right_foot_grounded = rf_grounded;
+            self.foot_contacts_buf.push((lf_grounded, rf_grounded));
+        }
+
+        let gravity_mag = self.gravity.length();
+        for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
+            if ragdoll.lod == RagdollLod::Sleep {
+                continue;
+            }
+            step_ragdoll_controllers(
+                ragdoll,
+                &mut self.bodies,
+                &mut self.joints,
+                &self.static_boxes,
+                self.heightfield.as_ref(),
+                self.world_query_hooks.as_ref(),
+                self.foot_contacts_buf[r_idx],
+                gravity_mag,
+                self.earthquake_magnitude,
+                clamped_dt,
+            );
+        }
+    }
+
+    /// Computes the 16 world-space PD muscle motor torques (in SI `N·m`) for `ragdoll_id`
+    /// converted into `space` coordinate axes for Bidirectional Host-Physics Mode.
+    pub fn compute_host_joint_torques(
+        &self,
+        ragdoll_id: usize,
+        space: CoordinateSpace,
+    ) -> Option<[Vec3; 16]> {
+        let ragdoll = self.ragdolls.get(ragdoll_id)?;
+        let mut torques = [Vec3::ZERO; 16];
+        for (i, &j_idx) in ragdoll.joint_indices.iter().enumerate() {
+            let j = &self.joints[j_idx];
+            if !ragdoll.active_enabled
+                || !j.motor_stiffness.is_finite()
+                || j.motor_stiffness <= 0.0
+                || !j.max_torque.is_finite()
+                || j.max_torque <= 0.0
+                || !j.damage_scale.is_finite()
+                || j.damage_scale <= 0.0
+            {
+                torques[i] = Vec3::ZERO;
+                continue;
+            }
+
+            let parent = &self.bodies[j.parent];
+            let child = &self.bodies[j.child];
+            let q_p = parent.orientation * j.frame_parent;
+            let q_c = child.orientation * j.frame_child;
+            let q_desired = (q_p * j.motor_target).normalize();
+            let mut q_err = q_desired * q_c.conjugate();
+            if q_err.w < 0.0 {
+                q_err = -q_err;
+            }
+            let (axis, angle) = q_err.to_axis_angle();
+            let rot_err = if angle.is_finite() && axis.is_finite() {
+                axis * angle
+            } else {
+                Vec3::ZERO
+            };
+            let rel_omega = child.angular_velocity - parent.angular_velocity;
+            let k_eff = j.motor_stiffness * j.damage_scale;
+            let d_eff = j.motor_damping * j.damage_scale;
+            let max_t = j.max_torque * j.damage_scale;
+            let raw_tau = rot_err * k_eff - rel_omega * d_eff;
+            let tau = if raw_tau.is_finite() {
+                let mag = raw_tau.length();
+                if mag > max_t && mag > 1e-9 {
+                    raw_tau * (max_t / mag)
+                } else {
+                    raw_tau
+                }
+            } else {
+                Vec3::ZERO
+            };
+            torques[i] = convert_angular_vec_to_target(space, tau);
+        }
+        Some(torques)
+    }
+
     /// Begins grabbing `body_idx` at `local_point` toward `target`.
     pub fn start_grab(&mut self, body_idx: usize, local_point: Vec3, target: Vec3) {
         if !local_point.is_finite() || !target.is_finite() {
@@ -2104,6 +2141,138 @@ fn raycast_static_box(origin: Vec3, dir: Vec3, sb: &StaticBox, max_dist: f32) ->
         let rd = inv_q * dir;
         ray_aabb(ro, rd, Vec3::ZERO, sb.half_extents, max_dist)
     }
+}
+
+fn foot_near_support_parts(
+    foot: &RigidBody,
+    s_h: f32,
+    static_boxes: &[StaticBox],
+    bodies: &[RigidBody],
+    heightfield: Option<&Heightfield>,
+    query_hooks: Option<&WorldQueryHooks>,
+) -> bool {
+    if foot.linear_velocity.y.abs() >= 0.18 {
+        return false;
+    }
+    let foot_hy = match foot.collider {
+        ColliderShape::Box { half_extents } => half_extents.y,
+        _ => 0.035 * s_h,
+    };
+    let support_y = sample_support_height_parts(
+        static_boxes,
+        bodies,
+        heightfield,
+        query_hooks,
+        foot.position.x,
+        foot.position.z,
+        foot.position.y + 0.05,
+    );
+    ((foot.position.y - foot_hy) - support_y).abs() <= 0.018
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_ragdoll_controllers(
+    ragdoll: &mut RagdollInstance,
+    bodies: &mut [RigidBody],
+    joints: &mut [Joint],
+    static_boxes: &[StaticBox],
+    heightfield: Option<&Heightfield>,
+    query_hooks: Option<&WorldQueryHooks>,
+    foot_contacts: (bool, bool),
+    gravity_mag: f32,
+    earthquake_magnitude: f32,
+    ctrl_dt: f32,
+) {
+    let pelvis_idx = ragdoll.body_indices[BoneId::Pelvis as usize];
+    let pelvis_pos = bodies[pelvis_idx].position;
+    let pelvis_y = pelvis_pos.y;
+    let s_h = ragdoll.profile.height_m / 1.78;
+    let foot_half_y = 0.035 * s_h;
+    let lf_pos = bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]].position;
+    let rf_pos = bodies[ragdoll.body_indices[BoneId::RightFoot as usize]].position;
+    let foot_ground_y = match foot_contacts {
+        (true, true) => 0.5 * (lf_pos.y + rf_pos.y) - foot_half_y,
+        (true, false) => lf_pos.y - foot_half_y,
+        (false, true) => rf_pos.y - foot_half_y,
+        (false, false) => (lf_pos.y.min(rf_pos.y) - foot_half_y).max(0.0),
+    };
+
+    if matches!(
+        ragdoll.balance.state,
+        BehaviorState::Balanced | BehaviorState::Stumbling
+    ) && foot_ground_y > 0.35
+    {
+        let probe_radius = 0.42 * s_h;
+        let dirs = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+        ];
+        let mut escape = Vec3::ZERO;
+        for d in dirs {
+            let probe_h = sample_support_height_parts(
+                static_boxes,
+                bodies,
+                heightfield,
+                query_hooks,
+                pelvis_pos.x + d.x * probe_radius,
+                pelvis_pos.z + d.z * probe_radius,
+                pelvis_y,
+            );
+            if probe_h < foot_ground_y - 0.50 {
+                escape -= d;
+            }
+        }
+        if escape.length_squared() > 0.1 {
+            ragdoll.balance.teetering = true;
+            ragdoll.balance.teeter_escape_dir = escape.normalize();
+        } else {
+            ragdoll.balance.teetering = false;
+            ragdoll.balance.teeter_escape_dir = Vec3::ZERO;
+        }
+    } else {
+        ragdoll.balance.teetering = false;
+        ragdoll.balance.teeter_escape_dir = Vec3::ZERO;
+    }
+
+    let step_target_ground_y = sample_support_height_parts(
+        static_boxes,
+        bodies,
+        heightfield,
+        query_hooks,
+        ragdoll.balance.step_target_xz.x,
+        ragdoll.balance.step_target_xz.z,
+        pelvis_y,
+    );
+    update_ragdoll_balance(
+        ragdoll,
+        bodies,
+        joints,
+        foot_contacts,
+        step_target_ground_y,
+        gravity_mag,
+        earthquake_magnitude,
+        ctrl_dt,
+    );
+    ragdoll.reflex.incoming_threat = detect_incoming_threat(bodies, ragdoll);
+    let ground_below_pelvis = sample_support_height_parts(
+        static_boxes,
+        bodies,
+        heightfield,
+        query_hooks,
+        pelvis_pos.x,
+        pelvis_pos.z,
+        pelvis_pos.y,
+    );
+    apply_procedural_reflexes(
+        ragdoll,
+        bodies,
+        joints,
+        static_boxes,
+        ground_below_pelvis,
+        ctrl_dt,
+    );
 }
 
 fn sample_support_height_parts(

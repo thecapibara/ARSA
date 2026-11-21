@@ -23,8 +23,9 @@ pub use reflex::{
     apply_procedural_reflexes, HandGrab, IncomingThreat, ReflexState, WoundEvent, WoundRegion,
 };
 pub use retarget::{
-    BoneRetargetConfig, CoordinateSpace, RetargetPreset, SkeletonRetargeter, JOINT_BONE_PAIRS,
-    MIXAMO_BONE_NAMES, UE5_MANNY_BONE_NAMES, UNITY_HUMANOID_BONE_NAMES,
+    convert_angular_vec_from_target, convert_angular_vec_to_target, BoneRetargetConfig,
+    CoordinateSpace, RetargetPreset, SkeletonRetargeter, JOINT_BONE_PAIRS, MIXAMO_BONE_NAMES,
+    UE5_MANNY_BONE_NAMES, UNITY_HUMANOID_BONE_NAMES,
 };
 pub use skeleton::{
     spawn_humanoid, spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId,

@@ -2,8 +2,8 @@
 
 use arsa_core::glam::{Quat, Vec3};
 use arsa_core::{
-    ArsaWorld, BodyProfile, GroundHeightFn, Heightfield, RaycastWorldFn, RetargetPreset,
-    SkeletonRetargeter, WeaponKind, WorldQueryHooks,
+    ArsaWorld, BodyProfile, CoordinateSpace, GroundHeightFn, Heightfield, RaycastWorldFn,
+    RetargetPreset, SkeletonRetargeter, WeaponKind, WorldQueryHooks,
 };
 
 /// Opaque handle owning an `ArsaWorld` simulation instance and a reusable scratch buffer.
@@ -127,6 +127,18 @@ pub unsafe extern "C" fn arsa_world_clear(handle: *mut ArsaWorldHandle) {
 pub unsafe extern "C" fn arsa_world_step(handle: *mut ArsaWorldHandle, dt: f32) {
     if let Some(h) = unsafe { handle.as_mut() } {
         h.world.step(dt);
+    }
+}
+
+/// Runs a brain-only controller tick over currently synced bone transforms without integrating
+/// positions/orientations or running XPBD solvers.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_step_brain_only(handle: *mut ArsaWorldHandle, dt: f32) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.step_brain_only(dt);
     }
 }
 
@@ -781,6 +793,43 @@ pub unsafe extern "C" fn arsa_world_get_joint_motor_targets(
     unsafe { copy_floats_to_out(&h.scratch, out_buf, max_floats) }
 }
 
+/// Computes 16 world-space PD muscle motor torques (`48` floats: `16 * (tx, ty, tz)` in `N·m`)
+/// for `ragdoll_id` converted into `coord_space` (`0 = ARSA RH Y-up`, `1 = Unity LH Y-up`,
+/// `2 = Unreal LH Z-up`).
+/// Returns `false` if `handle` or `out_torques_48` is null, `ragdoll_id` is invalid, or
+/// `coord_space` is unknown.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+/// If `out_torques_48` is non-null, it must be valid for writes of `48` `f32` elements.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_compute_host_joint_torques(
+    handle: *const ArsaWorldHandle,
+    ragdoll_id: usize,
+    coord_space: u32,
+    out_torques_48: *mut f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_ref() }) else {
+        return false;
+    };
+    if out_torques_48.is_null() {
+        return false;
+    }
+    let Some(space) = CoordinateSpace::from_u32(coord_space) else {
+        return false;
+    };
+    let Some(torques) = h.world.compute_host_joint_torques(ragdoll_id, space) else {
+        return false;
+    };
+    let out_slice = unsafe { std::slice::from_raw_parts_mut(out_torques_48, 48) };
+    for (i, t) in torques.iter().enumerate() {
+        out_slice[i * 3] = t.x;
+        out_slice[i * 3 + 1] = t.y;
+        out_slice[i * 3 + 2] = t.z;
+    }
+    true
+}
+
 /// Reads all 17 bone transforms of `ragdoll_id` retargeted into the target engine's coordinate space,
 /// unit scale, and bind pose (`ArsaRetargetPreset`: `0=Native`, `1=MixamoTPose`, `2=UnityHumanoid`, `3=UnrealManny`).
 /// Returns `false` if `handle` or `out_bones_17` is null, `ragdoll_id` is out of range, or `preset` is invalid.
@@ -1249,6 +1298,127 @@ mod tests {
             assert_eq!(arsa_world_get_ragdoll_lod(world, r0), 0);
             assert_eq!(arsa_world_get_ragdoll_lod(world, r1), 0);
             assert_eq!(arsa_world_get_ragdoll_lod(world, r2), 0);
+
+            arsa_world_destroy(world);
+        }
+    }
+
+    #[test]
+    fn test_c_abi_host_physics_brain_loop() {
+        unsafe {
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+
+            let rid = arsa_world_spawn_ragdoll(world, 0.0, 0.0, 0.0);
+            assert_eq!(rid, 0);
+
+            let mut xforms_before = [0.0_f32; 17 * 7];
+            assert_eq!(
+                arsa_world_get_transforms(world, xforms_before.as_mut_ptr(), xforms_before.len()),
+                17 * 7
+            );
+
+            // Sync a tilted LowerSpine (body 1) orientation and angular velocity from host engine.
+            let base = 7;
+            let q_tilt = Quat::from_rotation_x(0.30);
+            assert!(arsa_world_sync_bone_pose(
+                world,
+                1,
+                xforms_before[base],
+                xforms_before[base + 1],
+                xforms_before[base + 2],
+                q_tilt.x,
+                q_tilt.y,
+                q_tilt.z,
+                q_tilt.w,
+                0.0,
+                0.0,
+                0.0,
+                0.4,
+                0.0,
+                0.0,
+            ));
+
+            let mut xforms_synced = [0.0_f32; 17 * 7];
+            assert_eq!(
+                arsa_world_get_transforms(world, xforms_synced.as_mut_ptr(), xforms_synced.len()),
+                17 * 7
+            );
+
+            // Brain-only step must NOT move synced transforms.
+            arsa_world_step_brain_only(world, 1.0 / 60.0);
+            let mut xforms_after = [0.0_f32; 17 * 7];
+            assert_eq!(
+                arsa_world_get_transforms(world, xforms_after.as_mut_ptr(), xforms_after.len()),
+                17 * 7
+            );
+            for i in 0..xforms_synced.len() {
+                assert!(
+                    (xforms_after[i] - xforms_synced[i]).abs() < 1e-6,
+                    "step_brain_only modified transform float {i}"
+                );
+            }
+
+            // Reject invalid pointers, ragdoll IDs, and coordinate spaces.
+            let mut torques_arsa = [0.0_f32; 48];
+            let mut torques_unreal = [0.0_f32; 48];
+            assert!(!arsa_world_compute_host_joint_torques(
+                std::ptr::null(),
+                rid,
+                0,
+                torques_arsa.as_mut_ptr()
+            ));
+            assert!(!arsa_world_compute_host_joint_torques(
+                world,
+                rid,
+                0,
+                std::ptr::null_mut()
+            ));
+            assert!(!arsa_world_compute_host_joint_torques(
+                world,
+                99,
+                0,
+                torques_arsa.as_mut_ptr()
+            ));
+            assert!(!arsa_world_compute_host_joint_torques(
+                world,
+                rid,
+                99,
+                torques_arsa.as_mut_ptr()
+            ));
+
+            assert!(arsa_world_compute_host_joint_torques(
+                world,
+                rid,
+                CoordinateSpace::ArsaRightHandedYUp as u32,
+                torques_arsa.as_mut_ptr()
+            ));
+            assert!(arsa_world_compute_host_joint_torques(
+                world,
+                rid,
+                CoordinateSpace::UnrealLeftHandedZUp as u32,
+                torques_unreal.as_mut_ptr()
+            ));
+
+            for i in 0..48 {
+                assert!(torques_arsa[i].is_finite());
+                assert!(torques_unreal[i].is_finite());
+            }
+
+            // Joint 0 (LowerSpine) has a restoring torque in X -> maps to +Y in Unreal LH Z-up.
+            let tau_arsa_spine = Vec3::new(torques_arsa[0], torques_arsa[1], torques_arsa[2]);
+            let tau_unreal_spine =
+                Vec3::new(torques_unreal[0], torques_unreal[1], torques_unreal[2]);
+            assert!(tau_arsa_spine.length() > 1.0);
+            assert!(
+                (tau_unreal_spine
+                    - SkeletonRetargeter::convert_angular_vec_to_target(
+                        CoordinateSpace::UnrealLeftHandedZUp,
+                        tau_arsa_spine
+                    ))
+                .length()
+                    < 1e-4
+            );
 
             arsa_world_destroy(world);
         }

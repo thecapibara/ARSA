@@ -134,6 +134,13 @@ typedef enum ArsaRagdollLod {
     ARSA_LOD_SLEEP = 2
 } ArsaRagdollLod;
 
+/** Target engine coordinate space convention for world-space vectors and torques. */
+typedef enum ArsaCoordinateSpace {
+    ARSA_SPACE_RH_Y_UP = 0,
+    ARSA_SPACE_UNITY_LH_Y_UP = 1,
+    ARSA_SPACE_UNREAL_LH_Z_UP = 2
+} ArsaCoordinateSpace;
+
 /**
  * Host engine ground-height query callback.
  * Given (user_data, x, z, max_y), writes surface height to *out_y and upward unit normal
@@ -174,6 +181,13 @@ void arsa_world_clear(ArsaWorldHandle *handle);
 
 /** Advances the simulation by dt seconds (clamped internally to <= 0.05s). */
 void arsa_world_step(ArsaWorldHandle *handle, float dt);
+
+/**
+ * Runs a brain-only controller tick (foot grounding, balance state machine, and procedural
+ * reflexes) over currently synced bone transforms without integrating positions/orientations
+ * or running XPBD solvers.
+ */
+void arsa_world_step_brain_only(ArsaWorldHandle *handle, float dt);
 
 /** Spawns a default 1.78m / 75kg ragdoll at (x, y, z) and returns its ragdoll ID (SIZE_MAX on null). */
 size_t arsa_world_spawn_ragdoll(ArsaWorldHandle *handle, float x, float y, float z);
@@ -430,6 +444,17 @@ size_t arsa_world_get_joint_motor_targets(
     ArsaWorldHandle *handle,
     float *out_buf,
     size_t max_floats);
+
+/**
+ * Computes 16 world-space PD muscle motor torques (48 floats: 16 * (tx, ty, tz) in N*m)
+ * for ragdoll_id, converted into the target engine's coordinate axes (ArsaCoordinateSpace).
+ * Returns false if handle or out_torques_48 is NULL, ragdoll_id is invalid, or coord_space is unknown.
+ */
+bool arsa_world_compute_host_joint_torques(
+    const ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    uint32_t coord_space,
+    float *out_torques_48);
 
 /**
  * Reads all 17 bone transforms of ragdoll_id retargeted into the target engine's coordinate space,

@@ -2380,3 +2380,180 @@ fn test_ragdoll_lod_transitions_and_wakeup_on_impulse() {
         "expected woken ragdoll pelvis to move after shove, disp={disp:.5}"
     );
 }
+
+#[test]
+fn test_angular_vec_conversion_matches_small_quat_rotation() {
+    let spaces = [
+        CoordinateSpace::ArsaRightHandedYUp,
+        CoordinateSpace::UnityLeftHandedYUp,
+        CoordinateSpace::UnrealLeftHandedZUp,
+    ];
+    let samples = [
+        Vec3::new(1.2, -0.7, 2.3),
+        Vec3::new(-3.1, 0.4, -1.8),
+        Vec3::new(0.0, 2.5, -0.9),
+        Vec3::X,
+        Vec3::Y,
+        Vec3::Z,
+    ];
+    let eps = 1.0e-3_f32;
+
+    for space in spaces {
+        for v in samples {
+            let q = Quat::from_scaled_axis(v * eps);
+            let q_target = SkeletonRetargeter::convert_quat_to_target(space, q);
+            let axis_from_quat = q_target.to_scaled_axis();
+            let vec_from_ang = convert_angular_vec_to_target(space, v) * eps;
+            let err = (axis_from_quat - vec_from_ang).length();
+            assert!(
+                err < 1e-4,
+                "angular vector mismatch for {space:?}, v={v:?}: quat_axis={axis_from_quat:?}, ang_vec={vec_from_ang:?}, err={err}"
+            );
+
+            let v_target = SkeletonRetargeter::convert_angular_vec_to_target(space, v);
+            let v_back = SkeletonRetargeter::convert_angular_vec_from_target(space, v_target);
+            assert!(
+                (v_back - v).length() < 1e-5,
+                "angular vector roundtrip mismatch for {space:?}: expected {v:?}, got {v_back:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_host_physics_brain_only_and_joint_torques() {
+    let mut world = ArsaWorld::new();
+    let rid = world.spawn_ragdoll(Vec3::ZERO);
+
+    assert!(world
+        .compute_host_joint_torques(99, CoordinateSpace::ArsaRightHandedYUp)
+        .is_none());
+
+    // Sync a bent/tilted upper-body and hip pose with angular velocity as if driven by PhysX/Chaos.
+    let spine_idx = world.ragdolls[rid].body_indices[BoneId::LowerSpine as usize];
+    let chest_idx = world.ragdolls[rid].body_indices[BoneId::Chest as usize];
+    let l_thigh_idx = world.ragdolls[rid].body_indices[BoneId::LeftThigh as usize];
+
+    let spine_pos = world.bodies[spine_idx].position;
+    let chest_pos = world.bodies[chest_idx].position;
+    let l_thigh_pos = world.bodies[l_thigh_idx].position;
+
+    assert!(world.sync_bone_pose(
+        spine_idx,
+        spine_pos,
+        Quat::from_euler(glam::EulerRot::XYZ, 0.28, -0.10, 0.12),
+        Vec3::ZERO,
+        Vec3::new(0.4, -0.2, 0.1),
+    ));
+    assert!(world.sync_bone_pose(
+        chest_idx,
+        chest_pos,
+        Quat::from_euler(glam::EulerRot::XYZ, 0.42, -0.15, 0.18),
+        Vec3::ZERO,
+        Vec3::new(0.5, 0.1, -0.2),
+    ));
+    assert!(world.sync_bone_pose(
+        l_thigh_idx,
+        l_thigh_pos,
+        Quat::from_rotation_x(-0.35),
+        Vec3::ZERO,
+        Vec3::new(-0.3, 0.0, 0.0),
+    ));
+
+    let before_positions: Vec<Vec3> = world.bodies.iter().map(|b| b.position).collect();
+    let before_orientations: Vec<Quat> = world.bodies.iter().map(|b| b.orientation).collect();
+
+    // Run multiple brain-only ticks; host-synced bone transforms must remain completely untouched.
+    for _ in 0..5 {
+        world.step_brain_only(1.0 / 60.0);
+    }
+
+    for (i, b) in world.bodies.iter().enumerate() {
+        assert!(
+            (b.position - before_positions[i]).length() < 1e-6,
+            "step_brain_only moved body {i} position from {:?} to {:?}",
+            before_positions[i],
+            b.position
+        );
+        assert!(
+            b.orientation.dot(before_orientations[i]).abs() > 1.0 - 1e-6,
+            "step_brain_only rotated body {i} orientation"
+        );
+    }
+
+    // Both feet remain resting on y = 0.0 floor so foot grounding should be detected.
+    assert!(world.ragdolls[rid].balance.left_foot_grounded);
+    assert!(world.ragdolls[rid].balance.right_foot_grounded);
+
+    let torques_arsa = world
+        .compute_host_joint_torques(rid, CoordinateSpace::ArsaRightHandedYUp)
+        .expect("valid ragdoll id");
+    let torques_unity = world
+        .compute_host_joint_torques(rid, CoordinateSpace::UnityLeftHandedYUp)
+        .expect("valid ragdoll id");
+    let torques_unreal = world
+        .compute_host_joint_torques(rid, CoordinateSpace::UnrealLeftHandedZUp)
+        .expect("valid ragdoll id");
+
+    for i in 0..16 {
+        let max_t = world.joints[world.ragdolls[rid].joint_indices[i]].max_torque;
+        assert!(torques_arsa[i].is_finite());
+        assert!(torques_unity[i].is_finite());
+        assert!(torques_unreal[i].is_finite());
+        assert!(
+            torques_arsa[i].length() <= max_t + 1e-3,
+            "joint {i} torque exceeded max_torque: {} > {}",
+            torques_arsa[i].length(),
+            max_t
+        );
+        assert!(
+            (torques_unity[i]
+                - convert_angular_vec_to_target(
+                    CoordinateSpace::UnityLeftHandedYUp,
+                    torques_arsa[i]
+                ))
+            .length()
+                < 1e-5
+        );
+        assert!(
+            (torques_unreal[i]
+                - convert_angular_vec_to_target(
+                    CoordinateSpace::UnrealLeftHandedZUp,
+                    torques_arsa[i]
+                ))
+            .length()
+                < 1e-5
+        );
+    }
+
+    // Tilted spine, chest, and left hip joints must produce strong non-zero restoring torques.
+    assert!(
+        torques_arsa[JointId::LowerSpine as usize].length() > 1.0,
+        "expected non-zero LowerSpine restoring torque, got {:?}",
+        torques_arsa[JointId::LowerSpine as usize]
+    );
+    assert!(
+        torques_arsa[JointId::ChestSpine as usize].length() > 1.0,
+        "expected non-zero ChestSpine restoring torque, got {:?}",
+        torques_arsa[JointId::ChestSpine as usize]
+    );
+    assert!(
+        torques_arsa[JointId::LeftHip as usize].length() > 1.0,
+        "expected non-zero LeftHip restoring torque, got {:?}",
+        torques_arsa[JointId::LeftHip as usize]
+    );
+
+    // Disabling active mode must zero all computed host joint torques after a brain tick.
+    world.set_all_ragdolls_active(false);
+    world.step_brain_only(1.0 / 60.0);
+    let passive_torques = world
+        .compute_host_joint_torques(rid, CoordinateSpace::ArsaRightHandedYUp)
+        .expect("valid ragdoll id");
+    for (i, tau) in passive_torques.iter().enumerate() {
+        assert_eq!(
+            *tau,
+            Vec3::ZERO,
+            "passive joint {i} should output zero torque"
+        );
+    }
+}
