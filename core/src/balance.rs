@@ -427,21 +427,39 @@ pub fn update_ragdoll_balance(
                     pelvis.linear_velocity.y += (fy * dt) * pelvis.inv_mass;
                 }
 
-                // Horizontal ankle-strategy restoring force toward support polygon
+                // Horizontal ankle-strategy restoring force toward true ankle support polygon
+                // (using ankle joint world positions, NOT forward-shifted toe box centers!)
+                let la_j = &joints[ragdoll.joint_indices[JointId::LeftAnkle as usize]];
+                let ra_j = &joints[ragdoll.joint_indices[JointId::RightAnkle as usize]];
+                let la_pos = bodies[la_j.child].world_point(la_j.anchor_child);
+                let ra_pos = bodies[ra_j.child].world_point(ra_j.anchor_child);
+                let mid_ankles_xz = Vec3::new(
+                    0.5 * (la_pos.x + ra_pos.x),
+                    foot_ground_y,
+                    0.5 * (la_pos.z + ra_pos.z),
+                );
                 let support_center = match foot_contacts {
-                    (true, true) => mid_feet_xz,
-                    (true, false) => Vec3::new(lf_pos.x, foot_ground_y, lf_pos.z),
-                    (false, true) => Vec3::new(rf_pos.x, foot_ground_y, rf_pos.z),
-                    (false, false) => mid_feet_xz,
+                    (true, true) => mid_ankles_xz,
+                    (true, false) => Vec3::new(la_pos.x, foot_ground_y, la_pos.z),
+                    (false, true) => Vec3::new(ra_pos.x, foot_ground_y, ra_pos.z),
+                    (false, false) => mid_ankles_xz,
                 };
-                let horiz_err = Vec3::new(
+                let raw_horiz_err = Vec3::new(
                     support_center.x - com_pos.x,
                     0.0,
                     support_center.z - com_pos.z,
                 );
+                // Deadzone inside comfortable stance footprint prevents phantom forward creeping
+                let deadzone = 0.055 * s_h;
+                let err_len = raw_horiz_err.length();
+                let horiz_err = if err_len > deadzone {
+                    raw_horiz_err * ((err_len - deadzone) / err_len)
+                } else {
+                    Vec3::ZERO
+                };
                 let stumble_scale = if is_stumbling { 0.35 } else { 1.0 };
                 let mut f_horiz = (horiz_err * (total_mass * 14.0)
-                    - com_vel_xz * (total_mass * 4.5))
+                    - com_vel_xz * (total_mass * 6.5))
                     * strength_scale
                     * stumble_scale;
                 let max_f_horiz = total_mass * 2.2 * strength_scale * stumble_scale;
@@ -451,6 +469,13 @@ pub fn update_ragdoll_balance(
                 }
                 let pelvis = &mut bodies[pelvis_idx];
                 pelvis.linear_velocity += f_horiz * (dt * pelvis.inv_mass);
+
+                // Damp idle yaw spin when planted on both feet (prevents spinning in place like on ice)
+                if grounded_count >= 2 && !is_stumbling {
+                    let yaw_damp = (-8.0 * dt).exp();
+                    bodies[pelvis_idx].angular_velocity.y *= yaw_damp;
+                    bodies[chest_idx].angular_velocity.y *= yaw_damp;
+                }
             }
         }
         BehaviorState::Falling => {
