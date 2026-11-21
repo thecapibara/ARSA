@@ -1221,3 +1221,138 @@ fn test_prop_sleeping_and_wakeup() {
         "earthquake failed to wake box_b"
     );
 }
+
+#[test]
+fn test_right_arm_wounded_ragdoll_recovers_using_left_arm() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+
+    for _ in 0..20 {
+        world.step(1.0 / 60.0);
+    }
+
+    // Shoot RightForearm with Pistol -> WoundRegion::RightArm (~78% HP)
+    let right_forearm_idx = world.ragdolls[id].body_indices[BoneId::RightForearm as usize];
+    let forearm_pos = world.bodies[right_forearm_idx].position;
+    let shot = world.fire_weapon(
+        forearm_pos + Vec3::new(0.0, 0.0, 2.0),
+        Vec3::new(0.0, 0.0, -1.0),
+        WeaponKind::Pistol,
+    );
+    assert_eq!(shot.hit_ragdoll_id, Some(id));
+    assert_eq!(shot.hit_region, WoundRegion::RightArm);
+
+    // Knock him down onto the floor
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+    let chest_pos = world.bodies[chest_idx].position;
+    world
+        .apply_shove(
+            chest_pos + Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            650.0,
+        )
+        .expect("shove should hit chest");
+
+    let mut saw_recovering = false;
+    let mut selected_strategy = None;
+    // Step 6.5s (390 frames at 1/60s)
+    for _ in 0..390 {
+        world.step(1.0 / 60.0);
+        if world.ragdolls[id].balance.state == BehaviorState::Recovering {
+            saw_recovering = true;
+            selected_strategy = Some(world.ragdolls[id].balance.recovery_strategy);
+        }
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during right-arm-wounded recovery"
+            );
+        }
+    }
+
+    assert!(
+        saw_recovering,
+        "right-arm-wounded ragdoll never entered Recovering"
+    );
+    assert_eq!(
+        selected_strategy,
+        Some(RecoveryStrategy::OneArmSideRoll { healthy_left: true }),
+        "expected OneArmSideRoll {{ healthy_left: true }}, got {selected_strategy:?}"
+    );
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+    let pelvis_y = world.bodies[pelvis_idx].position.y;
+    let threshold = 0.72 * world.ragdolls[id].standing_pelvis_y;
+    assert!(
+        pelvis_y > threshold,
+        "right-arm-wounded ragdoll did not stand back up: pelvis_y={pelvis_y}, threshold={threshold}, state={:?}, stage={:?}",
+        world.ragdolls[id].balance.state,
+        world.ragdolls[id].balance.recovery_stage
+    );
+}
+
+#[test]
+fn test_heavy_140kg_ragdoll_recovers_via_quadruped() {
+    let mut world = ArsaWorld::new();
+    let heavy_profile = BodyProfile {
+        height_m: 2.05,
+        mass_kg: 140.0,
+        muscle_ratio: 1.0,
+    };
+    let id = world.spawn_ragdoll_with_profile(Vec3::new(0.0, 0.02, 0.0), heavy_profile);
+
+    for _ in 0..20 {
+        world.step(1.0 / 60.0);
+    }
+
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+    let chest_pos = world.bodies[chest_idx].position;
+    world
+        .apply_shove(
+            chest_pos + Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            1250.0,
+        )
+        .expect("shove should hit chest");
+
+    let mut saw_recovering = false;
+    let mut selected_strategy = None;
+    // Step 7.5s (450 frames at 1/60s)
+    for _ in 0..450 {
+        world.step(1.0 / 60.0);
+        if world.ragdolls[id].balance.state == BehaviorState::Recovering {
+            saw_recovering = true;
+            selected_strategy = Some(world.ragdolls[id].balance.recovery_strategy);
+        }
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during heavy 140kg recovery"
+            );
+        }
+    }
+
+    assert!(
+        saw_recovering,
+        "heavy 140kg ragdoll never entered Recovering"
+    );
+    assert_eq!(
+        selected_strategy,
+        Some(RecoveryStrategy::HeavyQuadruped),
+        "expected HeavyQuadruped, got {selected_strategy:?}"
+    );
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+    let pelvis_y = world.bodies[pelvis_idx].position.y;
+    let threshold = 0.72 * world.ragdolls[id].standing_pelvis_y;
+    assert!(
+        pelvis_y > threshold,
+        "heavy 140kg ragdoll did not stand back up: pelvis_y={pelvis_y}, threshold={threshold}, state={:?}, stage={:?}",
+        world.ragdolls[id].balance.state,
+        world.ragdolls[id].balance.recovery_stage
+    );
+}

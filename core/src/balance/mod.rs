@@ -21,6 +21,32 @@ pub enum BehaviorState {
     Recovering = 6,
 }
 
+/// Strategy selected for procedural get-up recovery based on posture, build, surface, and injuries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryStrategy {
+    #[default]
+    SupineAthletic,
+    PronePushUp,
+    HeavyQuadruped,
+    OneArmSideRoll {
+        healthy_left: bool,
+    },
+}
+
+/// Milestone-driven stage within [`BehaviorState::Recovering`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryStage {
+    /// Roll to healthy side / prone / sit-up tuck (zero vertical pelvis levitation).
+    #[default]
+    RollOrPrep,
+    /// Hands-and-knees or deep side-prop tripod base (used by `HeavyQuadruped` & `OneArmSideRoll`).
+    QuadrupedBase,
+    /// Asymmetric lunge with healthy lead leg forward + forward crouch torso lean.
+    HalfKneel,
+    /// Extend legs & un-lean torso into upright stance.
+    StandUp,
+}
+
 /// Per-ragdoll balance telemetry and capture-point stepping state.
 #[derive(Debug, Clone)]
 pub struct BalanceState {
@@ -35,6 +61,10 @@ pub struct BalanceState {
     pub downed_still_time: f32,
     pub recovery_phase: f32,
     pub recovery_prone: bool,
+    pub recovery_strategy: RecoveryStrategy,
+    pub recovery_stage: RecoveryStage,
+    pub recovery_stage_time: f32,
+    pub recovery_lead_left: bool,
     pub step_active: bool,
     pub swing_left: bool,
     pub step_phase: f32,
@@ -56,6 +86,10 @@ impl Default for BalanceState {
             downed_still_time: 0.0,
             recovery_phase: 0.0,
             recovery_prone: false,
+            recovery_strategy: RecoveryStrategy::default(),
+            recovery_stage: RecoveryStage::default(),
+            recovery_stage_time: 0.0,
+            recovery_lead_left: true,
             step_active: false,
             swing_left: false,
             step_phase: 0.0,
@@ -141,6 +175,8 @@ pub fn update_ragdoll_balance(
         ragdoll.balance.step_active = false;
         ragdoll.balance.downed_still_time = 0.0;
         ragdoll.balance.recovery_phase = 0.0;
+        ragdoll.balance.recovery_stage = RecoveryStage::RollOrPrep;
+        ragdoll.balance.recovery_stage_time = 0.0;
         for &j_idx in &ragdoll.joint_indices {
             joints[j_idx].motor_stiffness = 0.0;
             joints[j_idx].motor_damping = 0.0;
@@ -192,32 +228,21 @@ pub fn update_ragdoll_balance(
     let next_state = if ragdoll.balance.state == BehaviorState::Recovering {
         if !can_recover || com_vel.length() > 2.6 {
             ragdoll.balance.recovery_phase = 0.0;
+            ragdoll.balance.recovery_stage = RecoveryStage::RollOrPrep;
+            ragdoll.balance.recovery_stage_time = 0.0;
             ragdoll.balance.downed_still_time = 0.0;
             BehaviorState::Falling
         } else {
-            let recovery_duration = 2.1
-                * s_h.sqrt()
-                * (if ragdoll.reflex.health < 65.0 {
-                    1.35
-                } else {
-                    1.0
-                });
-            ragdoll.balance.recovery_phase += dt / recovery_duration;
-            if ragdoll.balance.recovery_phase >= 1.0 {
-                ragdoll.balance.recovery_phase = 0.0;
-                ragdoll.balance.downed_still_time = 0.0;
-                ragdoll.balance.fallen_time = 0.0;
-                let upright_and_high = pelvis_rel_y >= 0.68 * ragdoll.standing_pelvis_y
-                    && chest_up_dot >= 0.65
-                    && up_dot >= 0.65;
-                if upright_and_high && cp_offset <= 0.26 * s_h && com_vel_xz.length() <= 0.45 {
-                    BehaviorState::Balanced
-                } else {
-                    BehaviorState::Stumbling
-                }
-            } else {
-                BehaviorState::Recovering
-            }
+            recovery::advance_recovery_stage(
+                ragdoll,
+                pelvis_rel_y,
+                chest_up_dot,
+                up_dot,
+                cp_offset,
+                com_vel_xz,
+                s_h,
+                dt,
+            )
         }
     } else if pelvis_rel_y < 0.56 * ragdoll.standing_pelvis_y
         || chest_up_dot < 0.45
@@ -237,8 +262,21 @@ pub fn update_ragdoll_balance(
                     1.5
                 };
             if can_recover && ragdoll.balance.downed_still_time >= required_delay {
+                let (strategy, lead_left, chest_fwd_y) = recovery::select_recovery_strategy(
+                    ragdoll,
+                    bodies,
+                    chest_idx,
+                    lf_pos,
+                    rf_pos,
+                    foot_ground_y,
+                    s_h,
+                );
+                ragdoll.balance.recovery_strategy = strategy;
+                ragdoll.balance.recovery_lead_left = lead_left;
+                ragdoll.balance.recovery_stage = RecoveryStage::RollOrPrep;
+                ragdoll.balance.recovery_stage_time = 0.0;
                 ragdoll.balance.recovery_phase = 0.0;
-                ragdoll.balance.recovery_prone = (bodies[chest_idx].orientation * Vec3::Z).y < 0.0;
+                ragdoll.balance.recovery_prone = chest_fwd_y < 0.0;
                 BehaviorState::Recovering
             } else {
                 BehaviorState::Downed

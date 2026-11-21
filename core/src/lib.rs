@@ -11,7 +11,9 @@ pub mod world;
 
 pub use glam;
 
-pub use balance::{update_ragdoll_balance, BalanceState, BehaviorState};
+pub use balance::{
+    update_ragdoll_balance, BalanceState, BehaviorState, RecoveryStage, RecoveryStrategy,
+};
 pub use body::{ColliderShape, RigidBody};
 pub use collision::{Contact, StaticBox};
 pub use joint::{Joint, JointKind};

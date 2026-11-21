@@ -3,7 +3,7 @@
 
 use glam::{EulerRot, Quat, Vec3};
 
-use crate::balance::BehaviorState;
+use crate::balance::{BehaviorState, RecoveryStage};
 use crate::body::RigidBody;
 use crate::joint::Joint;
 use crate::skeleton::{BoneId, JointId, RagdollInstance};
@@ -105,6 +105,8 @@ impl RagdollInstance {
         self.balance.downed_still_time = 0.0;
         if self.balance.state == BehaviorState::Recovering {
             self.balance.recovery_phase = 0.0;
+            self.balance.recovery_stage = RecoveryStage::RollOrPrep;
+            self.balance.recovery_stage_time = 0.0;
             self.balance.state = BehaviorState::Falling;
         }
     }
@@ -279,6 +281,13 @@ pub fn apply_procedural_reflexes(
             }
         }
         _ => {}
+    }
+
+    // Do not hijack healthy arms or spine hunch while actively standing up (`Recovering`);
+    // per-limb `damage_scale` weakening remains active above, and Reach-for-Wound resumes
+    // once back in `Balanced` / `Stumbling`.
+    if state == BehaviorState::Recovering {
+        return;
     }
 
     // Spine hunch / twist / curl + Downed writhe

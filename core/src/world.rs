@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use glam::{Quat, Vec3};
 
-use crate::balance::{update_ragdoll_balance, BehaviorState};
+use crate::balance::{update_ragdoll_balance, BehaviorState, RecoveryStage};
 use crate::body::{ColliderShape, RigidBody};
 use crate::collision::{
     detect_contacts, solve_contacts_position, solve_contacts_velocity, Contact, StaticBox,
@@ -809,6 +809,8 @@ impl ArsaWorld {
             if ragdoll.balance.state == BehaviorState::Recovering {
                 ragdoll.balance.state = BehaviorState::Falling;
                 ragdoll.balance.recovery_phase = 0.0;
+                ragdoll.balance.recovery_stage = RecoveryStage::RollOrPrep;
+                ragdoll.balance.recovery_stage_time = 0.0;
             }
         }
     }
