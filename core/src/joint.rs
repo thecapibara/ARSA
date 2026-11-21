@@ -92,6 +92,9 @@ impl Joint {
 
     /// Projects the ball-and-socket anchor positions together via XPBD.
     pub fn solve_position(&self, bodies: &mut [RigidBody], dt: f32) {
+        if bodies[self.parent].is_sleeping && bodies[self.child].is_sleeping {
+            return;
+        }
         let p_a = bodies[self.parent].world_point(self.anchor_parent);
         let p_b = bodies[self.child].world_point(self.anchor_child);
         let delta = p_a - p_b;
@@ -121,6 +124,9 @@ impl Joint {
 
     /// Enforces hinge axis alignment + angle clamp, or spherical swing-twist limits.
     pub fn solve_limits(&self, bodies: &mut [RigidBody], dt: f32) {
+        if bodies[self.parent].is_sleeping && bodies[self.child].is_sleeping {
+            return;
+        }
         let alpha_tilde = self.compliance / (dt * dt);
         match self.kind {
             JointKind::Hinge {
@@ -301,7 +307,10 @@ impl Joint {
 
     /// Smoothly damps relative angular velocity across the joint for non-jittery, fleshy motion.
     pub fn solve_velocity_damping(&self, bodies: &mut [RigidBody], dt: f32) {
-        if self.damping <= 0.0 || dt <= 0.0 {
+        if self.damping <= 0.0
+            || dt <= 0.0
+            || (bodies[self.parent].is_sleeping && bodies[self.child].is_sleeping)
+        {
             return;
         }
 
@@ -335,6 +344,7 @@ impl Joint {
             || self.max_torque <= 0.0
             || self.damage_scale <= 0.0
             || dt <= 0.0
+            || (bodies[self.parent].is_sleeping && bodies[self.child].is_sleeping)
         {
             return;
         }

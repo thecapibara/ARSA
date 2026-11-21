@@ -194,4 +194,36 @@ fn main() {
         },
         |_, _| {},
     );
+
+    // 5. 20-NPC mixed-LOD crowd (4 Full <15m, 6 Reduced 18..28m, 10 Sleep 40..60m)
+    run_bench(
+        "crowd_20x_lod_mixed",
+        || {
+            let mut world = ArsaWorld::new();
+            let full_positions = [
+                Vec3::new(-3.0, 0.02, 0.0),
+                Vec3::new(-1.0, 0.02, 0.0),
+                Vec3::new(1.0, 0.02, 0.0),
+                Vec3::new(3.0, 0.02, 0.0),
+            ];
+            for pos in full_positions {
+                world.spawn_ragdoll(pos);
+            }
+            for i in 0..6 {
+                let radius = 18.0 + (i as f32) * 2.0;
+                let angle = (i as f32) * (std::f32::consts::TAU / 6.0);
+                let pos = Vec3::new(radius * angle.cos(), 0.02, radius * angle.sin());
+                world.spawn_ragdoll(pos);
+            }
+            for i in 0..10 {
+                let radius = 40.0 + (i as f32) * 2.0;
+                let angle = (i as f32) * (std::f32::consts::TAU / 10.0);
+                let pos = Vec3::new(radius * angle.cos(), 0.02, radius * angle.sin());
+                world.spawn_ragdoll(pos);
+            }
+            world.set_lod_focus(Some(Vec3::ZERO), 15.0, 35.0);
+            world
+        },
+        |_, _| {},
+    );
 }

@@ -123,6 +123,15 @@ impl BoneId {
     }
 }
 
+/// Crowd-scaling Level of Detail (LOD) tier for a humanoid ragdoll.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RagdollLod {
+    Full = 0,
+    Reduced = 1,
+    Sleep = 2,
+}
+
 /// Spawned humanoid ragdoll handle indexing into `ArsaWorld::bodies` and `ArsaWorld::joints`.
 #[derive(Debug, Clone)]
 pub struct RagdollInstance {
@@ -136,6 +145,8 @@ pub struct RagdollInstance {
     pub balance: BalanceState,
     pub reflex: ReflexState,
     pub external_pose: Option<([Quat; 16], f32)>,
+    pub lod: RagdollLod,
+    pub lod_awake_override: f32,
 }
 
 /// Spawns a default 1.78m, 75.0 kg anthropometric humanoid ragdoll facing `+Z`
@@ -594,6 +605,8 @@ pub fn spawn_humanoid_with_profile(
         balance: BalanceState::default(),
         reflex: ReflexState::default(),
         external_pose: None,
+        lod: RagdollLod::Full,
+        lod_awake_override: 0.0,
     }
 }
 

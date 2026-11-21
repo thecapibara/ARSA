@@ -127,6 +127,13 @@ typedef enum ArsaRetargetPreset {
     ARSA_RETARGET_UNREAL_MANNY = 3
 } ArsaRetargetPreset;
 
+/** Crowd-scaling Level of Detail (LOD) tier for a humanoid ragdoll. */
+typedef enum ArsaRagdollLod {
+    ARSA_LOD_FULL = 0,
+    ARSA_LOD_REDUCED = 1,
+    ARSA_LOD_SLEEP = 2
+} ArsaRagdollLod;
+
 /**
  * Host engine ground-height query callback.
  * Given (user_data, x, z, max_y), writes surface height to *out_y and upward unit normal
@@ -215,6 +222,24 @@ void arsa_world_set_earthquake(ArsaWorldHandle *handle, float magnitude);
 
 /** Sets the procedural stagger/intoxication level (0.0 .. 1.0) for all ragdolls. */
 void arsa_world_set_intoxication(ArsaWorldHandle *handle, float level);
+
+/**
+ * Configures the spatial crowd-scaling LOD focus point and distance thresholds (in meters).
+ * Ignores non-finite focus coordinates; clamps reduced_dist >= 1.0 and sleep_dist >= reduced_dist + 1.0.
+ */
+void arsa_world_set_lod_focus(
+    ArsaWorldHandle *handle,
+    float x,
+    float y,
+    float z,
+    float reduced_dist,
+    float sleep_dist);
+
+/** Clears the LOD focus point and wakes all sleeping ragdolls back to ARSA_LOD_FULL. */
+void arsa_world_clear_lod_focus(ArsaWorldHandle *handle);
+
+/** Returns the current ArsaRagdollLod tier for ragdoll_id, or UINT32_MAX on invalid handle/id. */
+uint32_t arsa_world_get_ragdoll_lod(const ArsaWorldHandle *handle, size_t ragdoll_id);
 
 /** Spawns a dynamic rigid-body box and returns its body index (SIZE_MAX on null). */
 size_t arsa_world_spawn_box(

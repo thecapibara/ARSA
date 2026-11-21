@@ -583,4 +583,25 @@ impl ArsaSim {
     pub fn clear_heightfield(&mut self) {
         self.world.set_heightfield(None);
     }
+
+    /// Configures the spatial crowd-scaling LOD focus point and distance thresholds (in meters).
+    pub fn set_lod_focus(&mut self, x: f32, y: f32, z: f32, reduced_dist: f32, sleep_dist: f32) {
+        self.world
+            .set_lod_focus(Some(Vec3::new(x, y, z)), reduced_dist, sleep_dist);
+    }
+
+    /// Clears the LOD focus point and wakes all sleeping ragdolls back to `Full`.
+    pub fn clear_lod_focus(&mut self) {
+        self.world
+            .set_lod_focus(None, self.world.lod_reduced_dist, self.world.lod_sleep_dist);
+    }
+
+    /// Returns the current LOD tier (`0 = Full, 1 = Reduced, 2 = Sleep`) for `ragdoll_id`,
+    /// or `u32::MAX` if `ragdoll_id` is out of range.
+    pub fn get_ragdoll_lod(&self, ragdoll_id: usize) -> u32 {
+        self.world
+            .ragdoll_lod(ragdoll_id)
+            .map(|l| l as u32)
+            .unwrap_or(u32::MAX)
+    }
 }

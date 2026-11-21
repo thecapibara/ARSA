@@ -28,7 +28,7 @@ pub use retarget::{
 };
 pub use skeleton::{
     spawn_humanoid, spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId,
-    JointId, RagdollInstance,
+    JointId, RagdollInstance, RagdollLod,
 };
 pub use world::{
     ArsaWorld, DynamiteTimer, ExplosionEvent, GrabConstraint, GroundHeightFn, RaycastHit,

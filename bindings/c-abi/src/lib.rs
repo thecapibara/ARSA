@@ -288,6 +288,57 @@ pub unsafe extern "C" fn arsa_world_set_intoxication(handle: *mut ArsaWorldHandl
     }
 }
 
+/// Configures the spatial crowd-scaling LOD focus point and distance thresholds (in meters).
+/// Ignores non-finite focus coordinates; clamps `reduced_dist >= 1.0` and `sleep_dist >= reduced_dist + 1.0`.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_lod_focus(
+    handle: *mut ArsaWorldHandle,
+    x: f32,
+    y: f32,
+    z: f32,
+    reduced_dist: f32,
+    sleep_dist: f32,
+) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world
+            .set_lod_focus(Some(Vec3::new(x, y, z)), reduced_dist, sleep_dist);
+    }
+}
+
+/// Clears the LOD focus point and wakes all sleeping ragdolls back to `ARSA_LOD_FULL`.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_clear_lod_focus(handle: *mut ArsaWorldHandle) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world
+            .set_lod_focus(None, h.world.lod_reduced_dist, h.world.lod_sleep_dist);
+    }
+}
+
+/// Returns the current `ArsaRagdollLod` tier (`0 = Full, 1 = Reduced, 2 = Sleep`) for `ragdoll_id`,
+/// or `u32::MAX` (`UINT32_MAX`) if `handle` is null or `ragdoll_id` is invalid.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_get_ragdoll_lod(
+    handle: *const ArsaWorldHandle,
+    ragdoll_id: usize,
+) -> u32 {
+    let Some(h) = (unsafe { handle.as_ref() }) else {
+        return u32::MAX;
+    };
+    h.world
+        .ragdoll_lod(ragdoll_id)
+        .map(|l| l as u32)
+        .unwrap_or(u32::MAX)
+}
+
 /// Spawns a dynamic rigid-body box and returns its body index (`usize::MAX` on null).
 ///
 /// # Safety
@@ -1158,6 +1209,46 @@ mod tests {
                     "retargeted bone {i} produced NaN/Inf"
                 );
             }
+
+            arsa_world_destroy(world);
+        }
+    }
+
+    #[test]
+    fn test_c_abi_lod_controls() {
+        unsafe {
+            assert_eq!(arsa_world_get_ragdoll_lod(std::ptr::null(), 0), u32::MAX);
+
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+            assert_eq!(arsa_world_get_ragdoll_lod(world, 0), u32::MAX);
+
+            let r0 = arsa_world_spawn_ragdoll(world, 0.0, 0.02, 0.0);
+            let r1 = arsa_world_spawn_ragdoll(world, 20.0, 0.02, 0.0);
+            let r2 = arsa_world_spawn_ragdoll(world, 45.0, 0.02, 0.0);
+
+            arsa_world_set_lod_focus(world, 0.0, 0.0, 0.0, 15.0, 35.0);
+            // Non-finite focus is ignored and preserves existing valid focus.
+            arsa_world_set_lod_focus(world, f32::NAN, 0.0, 0.0, 15.0, 35.0);
+
+            for _ in 0..90 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+            assert_eq!(arsa_world_get_ragdoll_lod(world, r0), 0); // Full
+            assert_eq!(arsa_world_get_ragdoll_lod(world, r1), 1); // Reduced
+            assert_eq!(arsa_world_get_ragdoll_lod(world, r2), 2); // Sleep
+
+            // Shove sleeping ragdoll at x=45 -> wakes immediately to Full
+            let hit = arsa_world_apply_shove(world, 45.0, 1.3, 2.0, 0.0, 0.0, -1.0, 80.0);
+            assert!(hit >= 0);
+            arsa_world_step(world, 1.0 / 60.0);
+            assert_eq!(arsa_world_get_ragdoll_lod(world, r2), 0);
+
+            arsa_world_clear_lod_focus(world);
+            arsa_world_step(world, 1.0 / 60.0);
+            assert_eq!(arsa_world_get_ragdoll_lod(world, r0), 0);
+            assert_eq!(arsa_world_get_ragdoll_lod(world, r1), 0);
+            assert_eq!(arsa_world_get_ragdoll_lod(world, r2), 0);
 
             arsa_world_destroy(world);
         }

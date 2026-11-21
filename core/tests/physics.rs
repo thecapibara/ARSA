@@ -2322,3 +2322,61 @@ fn test_retarget_drives_ragdoll_via_target_pose() {
         );
     }
 }
+
+#[test]
+fn test_ragdoll_lod_transitions_and_wakeup_on_impulse() {
+    use arsa_core::RagdollLod;
+
+    let mut world = ArsaWorld::new();
+    let r_full = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    let r_reduced = world.spawn_ragdoll(Vec3::new(20.0, 0.02, 0.0));
+    let r_sleep = world.spawn_ragdoll(Vec3::new(45.0, 0.02, 0.0));
+
+    world.set_lod_focus(Some(Vec3::ZERO), 15.0, 35.0);
+
+    for _ in 0..90 {
+        world.step(1.0 / 60.0);
+    }
+
+    assert_eq!(world.ragdoll_lod(r_full), Some(RagdollLod::Full));
+    assert_eq!(world.ragdoll_lod(r_reduced), Some(RagdollLod::Reduced));
+    assert_eq!(world.ragdoll_lod(r_sleep), Some(RagdollLod::Sleep));
+
+    for (label, r_id) in [("full", r_full), ("reduced", r_reduced), ("sleep", r_sleep)] {
+        let pelvis_idx = world.ragdolls[r_id].body_indices[BoneId::Pelvis as usize];
+        let pelvis_y = world.bodies[pelvis_idx].position.y;
+        assert!(
+            pelvis_y > 0.75,
+            "ragdoll '{label}' collapsed unexpectedly (pelvis_y={pelvis_y:.3})"
+        );
+        for &b_idx in &world.ragdolls[r_id].body_indices {
+            let b = &world.bodies[b_idx];
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "ragdoll '{label}' produced NaN/Inf on bone {b_idx}"
+            );
+        }
+    }
+
+    let sleep_pelvis_idx = world.ragdolls[r_sleep].body_indices[BoneId::Pelvis as usize];
+    let pelvis_before = world.bodies[sleep_pelvis_idx].position;
+
+    let hit = world.apply_shove(Vec3::new(45.0, 1.30, 2.0), Vec3::new(0.0, 0.0, -1.0), 90.0);
+    assert!(hit.is_some(), "expected shove ray to hit distant ragdoll");
+    assert_eq!(world.ragdoll_lod(r_sleep), Some(RagdollLod::Full));
+
+    for _ in 0..2 {
+        world.step(1.0 / 60.0);
+    }
+
+    assert_eq!(world.ragdoll_lod(r_sleep), Some(RagdollLod::Full));
+    let pelvis_after = world.bodies[sleep_pelvis_idx].position;
+    let disp = (pelvis_after - pelvis_before).length();
+    assert!(
+        disp > 0.005,
+        "expected woken ragdoll pelvis to move after shove, disp={disp:.5}"
+    );
+}

@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "ARSA — Active Ragdoll Simulation Architecture core physics & behavioral engine"
 
+[features]
+parallel = ["dep:rayon"]
+
 [dependencies]
 glam = { workspace = true }
+rayon = { version = "1.10", optional = true }
 
 [[bench]]
 name = "simulation"

@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 
 use glam::{Quat, Vec3};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use crate::balance::{update_ragdoll_balance, BehaviorState, RecoveryStage};
 use crate::body::{ColliderShape, RigidBody};
@@ -14,6 +16,7 @@ use crate::joint::Joint;
 use crate::reflex::{apply_procedural_reflexes, IncomingThreat, WoundRegion};
 use crate::skeleton::{
     spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId, RagdollInstance,
+    RagdollLod,
 };
 
 /// Ballistic weapon presets supported by [`ArsaWorld::fire_weapon`].
@@ -134,6 +137,9 @@ pub struct ArsaWorld {
     pub pending_explosions: Vec<ExplosionEvent>,
     pub earthquake_magnitude: f32,
     earthquake_time: f32,
+    pub lod_focus: Option<Vec3>,
+    pub lod_reduced_dist: f32,
+    pub lod_sleep_dist: f32,
     connected_pairs: HashSet<(usize, usize)>,
     contacts_buf: Vec<Contact>,
     foot_contacts_buf: Vec<(bool, bool)>,
@@ -168,6 +174,9 @@ impl ArsaWorld {
             pending_explosions: Vec::new(),
             earthquake_magnitude: 0.0,
             earthquake_time: 0.0,
+            lod_focus: None,
+            lod_reduced_dist: 15.0,
+            lod_sleep_dist: 35.0,
             connected_pairs: HashSet::new(),
             contacts_buf: Vec::new(),
             foot_contacts_buf: Vec::new(),
@@ -358,7 +367,69 @@ impl ArsaWorld {
             *dst = q.normalize();
         }
         ragdoll.external_pose = Some((normalized, blend_weight.clamp(0.0, 1.0)));
+        self.wake_ragdoll(ragdoll_id, 2.5);
         true
+    }
+
+    /// Configures the spatial crowd-scaling LOD focus point and distance thresholds (in meters).
+    /// Passing `None` clears the focus and wakes all sleeping ragdolls back to `RagdollLod::Full`.
+    /// Ignores non-finite `focus` vectors; clamps `reduced_dist >= 1.0` and `sleep_dist >= reduced_dist + 1.0`.
+    pub fn set_lod_focus(&mut self, focus: Option<Vec3>, reduced_dist: f32, sleep_dist: f32) {
+        if let Some(f) = focus {
+            if !f.is_finite() {
+                return;
+            }
+        }
+        let clamped_reduced = if reduced_dist.is_finite() {
+            reduced_dist.max(1.0)
+        } else {
+            1.0
+        };
+        let clamped_sleep = if sleep_dist.is_finite() {
+            sleep_dist.max(clamped_reduced + 1.0)
+        } else {
+            clamped_reduced + 1.0
+        };
+        self.lod_focus = focus;
+        self.lod_reduced_dist = clamped_reduced;
+        self.lod_sleep_dist = clamped_sleep;
+
+        if focus.is_none() {
+            for r in &mut self.ragdolls {
+                if r.lod != RagdollLod::Full {
+                    r.lod = RagdollLod::Full;
+                    for &b_idx in &r.body_indices {
+                        if let Some(b) = self.bodies.get_mut(b_idx) {
+                            b.wake_up();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns the current [`RagdollLod`] tier for `ragdoll_id`, or `None` if out of range.
+    pub fn ragdoll_lod(&self, ragdoll_id: usize) -> Option<RagdollLod> {
+        self.ragdolls.get(ragdoll_id).map(|r| r.lod)
+    }
+
+    /// Forces `ragdoll_id` to `RagdollLod::Full` for at least `duration` seconds and wakes all 17 bones.
+    pub fn wake_ragdoll(&mut self, ragdoll_id: usize, duration: f32) {
+        let Some(ragdoll) = self.ragdolls.get_mut(ragdoll_id) else {
+            return;
+        };
+        let safe_duration = if duration.is_finite() {
+            duration.max(0.0)
+        } else {
+            0.0
+        };
+        ragdoll.lod_awake_override = ragdoll.lod_awake_override.max(safe_duration);
+        ragdoll.lod = RagdollLod::Full;
+        for &b_idx in &ragdoll.body_indices {
+            if let Some(b) = self.bodies.get_mut(b_idx) {
+                b.wake_up();
+            }
+        }
     }
 
     /// Clears any external animation target pose on `ragdoll_id`.
@@ -617,6 +688,7 @@ impl ArsaWorld {
 
         for (r_id, &falloff) in ragdoll_max_falloffs.iter().enumerate() {
             if falloff > 0.0 {
+                self.wake_ragdoll(r_id, 2.5);
                 let ragdoll = &mut self.ragdolls[r_id];
                 if !ragdoll.reflex.unconscious {
                     ragdoll.balance.concussion_timer =
@@ -675,6 +747,53 @@ impl ArsaWorld {
             self.apply_explosion(pos, radius, impulse, damage);
         }
 
+        // Update crowd-scaling LOD tiers before substeps when an LOD focus is active.
+        if let Some(focus) = self.lod_focus {
+            for ragdoll in &mut self.ragdolls {
+                ragdoll.lod_awake_override = (ragdoll.lod_awake_override - clamped_dt).max(0.0);
+                let pelvis_pos =
+                    self.bodies[ragdoll.body_indices[BoneId::Pelvis as usize]].position;
+                let dx = pelvis_pos.x - focus.x;
+                let dz = pelvis_pos.z - focus.z;
+                let dist = (dx * dx + dz * dz).sqrt();
+
+                let next_lod = if self.earthquake_magnitude >= 2.0
+                    || ragdoll.lod_awake_override > 0.0
+                    || matches!(
+                        ragdoll.balance.state,
+                        BehaviorState::Falling
+                            | BehaviorState::Stumbling
+                            | BehaviorState::Recovering
+                    ) {
+                    RagdollLod::Full
+                } else if dist >= self.lod_sleep_dist && ragdoll.balance.com_vel.length() < 0.25 {
+                    RagdollLod::Sleep
+                } else if dist >= self.lod_reduced_dist {
+                    RagdollLod::Reduced
+                } else {
+                    RagdollLod::Full
+                };
+
+                if ragdoll.lod != RagdollLod::Sleep && next_lod == RagdollLod::Sleep {
+                    for &b_idx in &ragdoll.body_indices {
+                        if let Some(b) = self.bodies.get_mut(b_idx) {
+                            b.is_sleeping = true;
+                            b.sleep_timer = 0.0;
+                            b.linear_velocity = Vec3::ZERO;
+                            b.angular_velocity = Vec3::ZERO;
+                        }
+                    }
+                } else if ragdoll.lod == RagdollLod::Sleep && next_lod != RagdollLod::Sleep {
+                    for &b_idx in &ragdoll.body_indices {
+                        if let Some(b) = self.bodies.get_mut(b_idx) {
+                            b.wake_up();
+                        }
+                    }
+                }
+                ragdoll.lod = next_lod;
+            }
+        }
+
         let substeps = self.substeps.max(1);
         let sub_dt = clamped_dt / (substeps as f32);
         let inv_dt = 1.0 / sub_dt;
@@ -683,12 +802,21 @@ impl ArsaWorld {
         if self.earthquake_magnitude > 0.1 {
             for b in &mut self.bodies {
                 if b.is_sleeping {
-                    b.wake_up();
+                    let in_sleep_lod = b
+                        .ragdoll_id
+                        .and_then(|id| self.ragdolls.get(id))
+                        .is_some_and(|r| r.lod == RagdollLod::Sleep);
+                    if !in_sleep_lod {
+                        b.wake_up();
+                    }
                 }
             }
         }
         if let Some(grab) = &self.grab {
-            if let Some(body) = self.bodies.get_mut(grab.body_idx) {
+            let grab_ragdoll_id = self.bodies.get(grab.body_idx).and_then(|b| b.ragdoll_id);
+            if let Some(r_id) = grab_ragdoll_id {
+                self.wake_ragdoll(r_id, 2.5);
+            } else if let Some(body) = self.bodies.get_mut(grab.body_idx) {
                 if body.is_sleeping {
                     body.wake_up();
                 }
@@ -704,11 +832,23 @@ impl ArsaWorld {
 
         for substep in 0..substeps {
             // 1. Save previous state & integrate external forces
+            let gravity = self.gravity;
+            #[cfg(feature = "parallel")]
+            if self.bodies.len() >= 64 {
+                self.bodies
+                    .par_iter_mut()
+                    .for_each(|b| integrate_body_step(b, gravity, sub_dt));
+            } else {
+                for b in &mut self.bodies {
+                    integrate_body_step(b, gravity, sub_dt);
+                }
+            }
+            #[cfg(not(feature = "parallel"))]
             for b in &mut self.bodies {
                 b.prev_position = b.position;
                 b.prev_orientation = b.orientation;
                 if b.inv_mass > 0.0 && !b.is_sleeping {
-                    b.linear_velocity += self.gravity * sub_dt;
+                    b.linear_velocity += gravity * sub_dt;
                 }
             }
 
@@ -729,7 +869,7 @@ impl ArsaWorld {
                 let ay = amp * 0.28 * (t * 11.5).sin();
                 let base_dv = Vec3::new(ax, ay, az) * sub_dt;
                 for b in &mut self.bodies {
-                    if b.inv_mass > 0.0 && b.position.y < 2.2 {
+                    if b.inv_mass > 0.0 && !b.is_sleeping && b.position.y < 2.2 {
                         let horiz_scale = if b.position.y < 0.6 { 1.25 } else { 0.65 };
                         let vert_scale = if b.position.y < 0.6 { 1.0 } else { 0.65 };
                         b.linear_velocity += Vec3::new(
@@ -765,6 +905,18 @@ impl ArsaWorld {
 
             // 1b. Update active balance controllers, procedural reflexes & apply PD muscle motors
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
+                if ragdoll.lod == RagdollLod::Sleep {
+                    continue;
+                }
+                if ragdoll.lod == RagdollLod::Reduced && substep % 2 != 0 {
+                    continue;
+                }
+                let ctrl_dt = if ragdoll.lod == RagdollLod::Reduced {
+                    sub_dt * 2.0
+                } else {
+                    sub_dt
+                };
+
                 let pelvis_idx = ragdoll.body_indices[BoneId::Pelvis as usize];
                 let pelvis_pos = self.bodies[pelvis_idx].position;
                 let pelvis_y = pelvis_pos.y;
@@ -836,7 +988,7 @@ impl ArsaWorld {
                     step_target_ground_y,
                     gravity_mag,
                     self.earthquake_magnitude,
-                    sub_dt,
+                    ctrl_dt,
                 );
                 ragdoll.reflex.incoming_threat = detect_incoming_threat(&self.bodies, ragdoll);
                 let ground_below_pelvis = sample_support_height_parts(
@@ -854,7 +1006,7 @@ impl ArsaWorld {
                     &mut self.joints,
                     &self.static_boxes,
                     ground_below_pelvis,
-                    sub_dt,
+                    ctrl_dt,
                 );
             }
             let j_len = self.joints.len();
@@ -895,6 +1047,7 @@ impl ArsaWorld {
             );
 
             // Wake sleeping bodies contacted by an awake body
+            let mut wake_ragdoll_ids: Vec<usize> = Vec::new();
             for c in &self.contacts_buf {
                 if let Some(b_idx) = c.body_b {
                     let a_sleep = self.bodies[c.body_a].is_sleeping;
@@ -902,16 +1055,28 @@ impl ArsaWorld {
                     if a_sleep != b_sleep {
                         if a_sleep {
                             self.bodies[c.body_a].wake_up();
+                            if let Some(r_id) = self.bodies[c.body_a].ragdoll_id {
+                                wake_ragdoll_ids.push(r_id);
+                            }
                         }
                         if b_sleep {
                             self.bodies[b_idx].wake_up();
+                            if let Some(r_id) = self.bodies[b_idx].ragdoll_id {
+                                wake_ragdoll_ids.push(r_id);
+                            }
                         }
                     }
                 }
             }
+            for r_id in wake_ragdoll_ids {
+                self.wake_ragdoll(r_id, 2.5);
+            }
 
             // Track per-ragdoll foot grounding from detected contacts & near-support fallback
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
+                if ragdoll.lod == RagdollLod::Sleep {
+                    continue;
+                }
                 let lf_idx = ragdoll.body_indices[BoneId::LeftFoot as usize];
                 let rf_idx = ragdoll.body_indices[BoneId::RightFoot as usize];
                 let mut lf_grounded = false;
@@ -988,40 +1153,70 @@ impl ArsaWorld {
             }
 
             // 4. Derive velocities from position & orientation changes
-            const MAX_DEPENETRATION_DV: f32 = 6.0;
-            const MAX_DEPENETRATION_DW: f32 = 25.0;
-            for (b_idx, b) in self.bodies.iter_mut().enumerate() {
-                if b.inv_mass == 0.0 || b.is_sleeping {
-                    continue;
+            #[cfg(feature = "parallel")]
+            if self.bodies.len() >= 64 {
+                let pre_vels = &self.pre_solve_vels_buf;
+                let pre_ang_vels = &self.pre_solve_ang_vels_buf;
+                self.bodies
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(b_idx, b)| {
+                        derive_body_velocity_step(
+                            b,
+                            pre_vels[b_idx],
+                            pre_ang_vels[b_idx],
+                            inv_dt,
+                            sub_dt,
+                        );
+                    });
+            } else {
+                for (b_idx, b) in self.bodies.iter_mut().enumerate() {
+                    derive_body_velocity_step(
+                        b,
+                        self.pre_solve_vels_buf[b_idx],
+                        self.pre_solve_ang_vels_buf[b_idx],
+                        inv_dt,
+                        sub_dt,
+                    );
                 }
-                let pre_solve_vel = self.pre_solve_vels_buf[b_idx];
-                let derived_vel = (b.position - b.prev_position) * inv_dt;
-                let dv = derived_vel - pre_solve_vel;
-                let dv_len = dv.length();
-                b.linear_velocity = if dv_len > MAX_DEPENETRATION_DV {
-                    pre_solve_vel + dv * (MAX_DEPENETRATION_DV / dv_len)
-                } else {
-                    derived_vel
-                };
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                const MAX_DEPENETRATION_DV: f32 = 6.0;
+                const MAX_DEPENETRATION_DW: f32 = 25.0;
+                for (b_idx, b) in self.bodies.iter_mut().enumerate() {
+                    if b.inv_mass == 0.0 || b.is_sleeping {
+                        continue;
+                    }
+                    let pre_solve_vel = self.pre_solve_vels_buf[b_idx];
+                    let derived_vel = (b.position - b.prev_position) * inv_dt;
+                    let dv = derived_vel - pre_solve_vel;
+                    let dv_len = dv.length();
+                    b.linear_velocity = if dv_len > MAX_DEPENETRATION_DV {
+                        pre_solve_vel + dv * (MAX_DEPENETRATION_DV / dv_len)
+                    } else {
+                        derived_vel
+                    };
 
-                let pre_solve_ang_vel = self.pre_solve_ang_vels_buf[b_idx];
-                let mut dq = b.orientation * b.prev_orientation.conjugate();
-                if dq.w < 0.0 {
-                    dq = -dq;
+                    let pre_solve_ang_vel = self.pre_solve_ang_vels_buf[b_idx];
+                    let mut dq = b.orientation * b.prev_orientation.conjugate();
+                    if dq.w < 0.0 {
+                        dq = -dq;
+                    }
+                    let derived_ang_vel = Vec3::new(dq.x, dq.y, dq.z) * (2.0 * inv_dt);
+                    let dw = derived_ang_vel - pre_solve_ang_vel;
+                    let dw_len = dw.length();
+                    b.angular_velocity = if dw_len > MAX_DEPENETRATION_DW {
+                        pre_solve_ang_vel + dw * (MAX_DEPENETRATION_DW / dw_len)
+                    } else {
+                        derived_ang_vel
+                    };
+
+                    // Subtle air drag for numerical cleanliness
+                    let drag = (-0.15 * sub_dt).exp();
+                    b.linear_velocity *= drag;
+                    b.angular_velocity *= drag;
                 }
-                let derived_ang_vel = Vec3::new(dq.x, dq.y, dq.z) * (2.0 * inv_dt);
-                let dw = derived_ang_vel - pre_solve_ang_vel;
-                let dw_len = dw.length();
-                b.angular_velocity = if dw_len > MAX_DEPENETRATION_DW {
-                    pre_solve_ang_vel + dw * (MAX_DEPENETRATION_DW / dw_len)
-                } else {
-                    derived_ang_vel
-                };
-
-                // Subtle air drag for numerical cleanliness
-                let drag = (-0.15 * sub_dt).exp();
-                b.linear_velocity *= drag;
-                b.angular_velocity *= drag;
             }
 
             // 5. Velocity pass (joint damping + dynamic friction & restitution)
@@ -1132,6 +1327,8 @@ impl ArsaWorld {
         if imp_len < 1e-9 {
             return;
         }
+        self.wake_ragdoll(r_id, 2.5);
+        let body = &self.bodies[body_idx];
         let max_imp = (body.mass * max_dv).max(1e-4);
         let (applied_imp, overflow_imp) = if imp_len > max_imp {
             let capped = impulse * (max_imp / imp_len);
@@ -1176,6 +1373,7 @@ impl ArsaWorld {
         let total_impulse = dir_n * strength;
 
         if let Some(ragdoll_id) = self.bodies[hit.body_idx].ragdoll_id {
+            self.wake_ragdoll(ragdoll_id, 2.5);
             let chest_idx = self.ragdolls[ragdoll_id].body_indices[BoneId::Chest as usize];
             let pelvis_idx = self.ragdolls[ragdoll_id].body_indices[BoneId::Pelvis as usize];
             let chest_pos = self.bodies[chest_idx].position;
@@ -1270,6 +1468,9 @@ impl ArsaWorld {
             };
             let impulse_dir = (radial * 0.55 + dir_n * 0.45 + Vec3::Y * 0.25).normalize_or_zero();
             let impulse = impulse_dir * (max_impulse * falloff);
+            if let Some(ragdoll_id) = self.bodies[idx].ragdoll_id {
+                self.wake_ragdoll(ragdoll_id, 2.5);
+            }
             self.apply_clamped_ragdoll_impulse(idx, impulse, pos, 10.0, 18.0, 0.0);
             if impulse.length() > 12.0 {
                 if let Some(ragdoll_id) = self.bodies[idx].ragdoll_id {
@@ -1340,6 +1541,7 @@ impl ArsaWorld {
                     b.ragdoll_id.zip(b.bone_id.and_then(BoneId::from_u8))
                 };
                 if let Some((r_id, bone)) = ragdoll_info {
+                    self.wake_ragdoll(r_id, 2.5);
                     let chest_idx = self.ragdolls[r_id].body_indices[BoneId::Chest as usize];
                     let chest_fwd = self.bodies[chest_idx].orientation * Vec3::Z;
                     let hit_from_back = ray_dir.dot(chest_fwd) > 0.25;
@@ -1516,6 +1718,7 @@ impl ArsaWorld {
         }
         if let Some(body) = self.bodies.get_mut(body_idx) {
             body.wake_up();
+            let ragdoll_id = body.ragdoll_id;
             let m = body.mass.max(1.0);
             self.grab = Some(GrabConstraint {
                 body_idx,
@@ -1524,6 +1727,9 @@ impl ArsaWorld {
                 stiffness: m * 220.0,
                 damping: m * 22.0,
             });
+            if let Some(r_id) = ragdoll_id {
+                self.wake_ragdoll(r_id, 2.5);
+            }
         }
     }
 
@@ -1651,6 +1857,58 @@ impl ArsaWorld {
             out.push(wound_world.z);
         }
     }
+}
+
+#[cfg(feature = "parallel")]
+#[inline]
+fn integrate_body_step(b: &mut RigidBody, gravity: Vec3, sub_dt: f32) {
+    b.prev_position = b.position;
+    b.prev_orientation = b.orientation;
+    if b.inv_mass > 0.0 && !b.is_sleeping {
+        b.linear_velocity += gravity * sub_dt;
+    }
+}
+
+#[cfg(feature = "parallel")]
+#[inline]
+fn derive_body_velocity_step(
+    b: &mut RigidBody,
+    pre_solve_vel: Vec3,
+    pre_solve_ang_vel: Vec3,
+    inv_dt: f32,
+    sub_dt: f32,
+) {
+    const MAX_DEPENETRATION_DV: f32 = 6.0;
+    const MAX_DEPENETRATION_DW: f32 = 25.0;
+    if b.inv_mass == 0.0 || b.is_sleeping {
+        return;
+    }
+    let derived_vel = (b.position - b.prev_position) * inv_dt;
+    let dv = derived_vel - pre_solve_vel;
+    let dv_len = dv.length();
+    b.linear_velocity = if dv_len > MAX_DEPENETRATION_DV {
+        pre_solve_vel + dv * (MAX_DEPENETRATION_DV / dv_len)
+    } else {
+        derived_vel
+    };
+
+    let mut dq = b.orientation * b.prev_orientation.conjugate();
+    if dq.w < 0.0 {
+        dq = -dq;
+    }
+    let derived_ang_vel = Vec3::new(dq.x, dq.y, dq.z) * (2.0 * inv_dt);
+    let dw = derived_ang_vel - pre_solve_ang_vel;
+    let dw_len = dw.length();
+    b.angular_velocity = if dw_len > MAX_DEPENETRATION_DW {
+        pre_solve_ang_vel + dw * (MAX_DEPENETRATION_DW / dw_len)
+    } else {
+        derived_ang_vel
+    };
+
+    let drag = (-0.15 * sub_dt).exp();
+    b.linear_velocity *= drag;
+    b.angular_velocity *= drag;
+    b.update_world_inertia();
 }
 
 #[inline]
