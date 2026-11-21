@@ -4,7 +4,7 @@ mod narrowphase;
 
 use std::collections::HashSet;
 
-use glam::Vec3;
+use glam::{Mat3, Vec3};
 
 use crate::body::{ColliderShape, RigidBody};
 
@@ -104,13 +104,49 @@ pub fn should_ragdoll_bones_collide(bone_a: u8, bone_b: u8) -> bool {
         || (is_distal_leg(bone_b) && is_upper_torso_or_head(bone_a))
 }
 
+#[inline]
+fn body_world_aabb(b: &RigidBody) -> (Vec3, Vec3) {
+    let ext = match b.collider {
+        ColliderShape::Sphere { radius } => Vec3::splat(radius),
+        ColliderShape::Capsule {
+            radius,
+            half_length,
+        } => {
+            let axis = b.orientation * Vec3::Y;
+            axis.abs() * half_length + Vec3::splat(radius)
+        }
+        ColliderShape::Box { half_extents } => {
+            let m = Mat3::from_quat(b.orientation);
+            m.x_axis.abs() * half_extents.x
+                + m.y_axis.abs() * half_extents.y
+                + m.z_axis.abs() * half_extents.z
+        }
+    };
+    let margin = Vec3::splat(1e-4);
+    (b.position - ext - margin, b.position + ext + margin)
+}
+
+#[inline]
+fn aabbs_overlap(a_min: Vec3, a_max: Vec3, b_min: Vec3, b_max: Vec3) -> bool {
+    a_min.x <= b_max.x
+        && a_max.x >= b_min.x
+        && a_min.y <= b_max.y
+        && a_max.y >= b_min.y
+        && a_min.z <= b_max.z
+        && a_max.z >= b_min.z
+}
+
 /// Detects all contacts against the `y = 0.0` ground plane, static boxes, and dynamic body pairs.
 pub fn detect_contacts(
     bodies: &[RigidBody],
     static_boxes: &[StaticBox],
     connected_pairs: &HashSet<(usize, usize)>,
-) -> Vec<Contact> {
-    let mut contacts = Vec::with_capacity(bodies.len() * 2);
+    body_aabbs: &mut Vec<(Vec3, Vec3)>,
+    out: &mut Vec<Contact>,
+) {
+    out.clear();
+    body_aabbs.clear();
+    body_aabbs.extend(bodies.iter().map(body_world_aabb));
 
     const GROUND_FRICTION: f32 = 0.75;
     const GROUND_RESTITUTION: f32 = 0.05;
@@ -119,22 +155,31 @@ pub fn detect_contacts(
         if body.inv_mass == 0.0 {
             continue;
         }
-        narrowphase::detect_ground_contacts(
-            bodies,
-            idx,
-            GROUND_FRICTION,
-            GROUND_RESTITUTION,
-            &mut contacts,
-        );
+        let (b_min, b_max) = body_aabbs[idx];
+        if b_min.y < 0.0 {
+            narrowphase::detect_ground_contacts(
+                bodies,
+                idx,
+                GROUND_FRICTION,
+                GROUND_RESTITUTION,
+                out,
+            );
+        }
 
         for sb in static_boxes {
-            narrowphase::detect_static_box_contacts(bodies, idx, sb, &mut contacts);
+            let sb_min = sb.center - sb.half_extents;
+            let sb_max = sb.center + sb.half_extents;
+            if aabbs_overlap(b_min, b_max, sb_min, sb_max) {
+                narrowphase::detect_static_box_contacts(bodies, idx, sb, out);
+            }
         }
     }
 
-    for i in 0..bodies.len() {
-        for j in (i + 1)..bodies.len() {
-            let a = &bodies[i];
+    let n = bodies.len();
+    for i in 0..n {
+        let a = &bodies[i];
+        let (a_min, a_max) = body_aabbs[i];
+        for j in (i + 1)..n {
             let b = &bodies[j];
             if a.inv_mass == 0.0 && b.inv_mass == 0.0 {
                 continue;
@@ -144,10 +189,8 @@ pub fn detect_contacts(
             {
                 continue;
             }
-            if connected_pairs.contains(&(i, j)) {
-                continue;
-            }
-            if a.ragdoll_id.is_some() && a.ragdoll_id == b.ragdoll_id {
+            let same_ragdoll = a.ragdoll_id.is_some() && a.ragdoll_id == b.ragdoll_id;
+            if same_ragdoll {
                 let allow = match (a.bone_id, b.bone_id) {
                     (Some(ba), Some(bb)) => should_ragdoll_bones_collide(ba, bb),
                     _ => false,
@@ -156,11 +199,16 @@ pub fn detect_contacts(
                     continue;
                 }
             }
-            narrowphase::detect_dynamic_pair(bodies, i, j, &mut contacts);
+            let (b_min, b_max) = body_aabbs[j];
+            if !aabbs_overlap(a_min, a_max, b_min, b_max) {
+                continue;
+            }
+            if same_ragdoll && connected_pairs.contains(&(i, j)) {
+                continue;
+            }
+            narrowphase::detect_dynamic_pair(bodies, i, j, out);
         }
     }
-
-    contacts
 }
 
 /// Solves positional contact penetration and static friction for one solver iteration.

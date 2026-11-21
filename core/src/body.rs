@@ -55,18 +55,28 @@ impl RigidBody {
     /// Creates a new `RigidBody` with inertia derived automatically from `mass` and `collider`.
     /// Passing `mass <= 0.0` creates an immovable/kinematic body.
     pub fn new(position: Vec3, orientation: Quat, mass: f32, collider: ColliderShape) -> Self {
-        let q = orientation.normalize();
-        let (safe_mass, inv_mass, local_inertia, inv_local_inertia) = if mass > 0.0 {
-            let inertia = collider.compute_inertia(mass).max(Vec3::splat(1e-6));
-            (mass, 1.0 / mass, inertia, Vec3::ONE / inertia)
+        let safe_pos = if position.is_finite() {
+            position
         } else {
-            (0.0, 0.0, Vec3::ZERO, Vec3::ZERO)
+            Vec3::ZERO
         };
+        let q = if orientation.is_finite() && orientation.length_squared() > 1e-12 {
+            orientation.normalize()
+        } else {
+            Quat::IDENTITY
+        };
+        let (safe_mass, inv_mass, local_inertia, inv_local_inertia) =
+            if mass.is_finite() && mass > 0.0 {
+                let inertia = collider.compute_inertia(mass).max(Vec3::splat(1e-6));
+                (mass, 1.0 / mass, inertia, Vec3::ONE / inertia)
+            } else {
+                (0.0, 0.0, Vec3::ZERO, Vec3::ZERO)
+            };
 
         Self {
-            position,
+            position: safe_pos,
             orientation: q,
-            prev_position: position,
+            prev_position: safe_pos,
             prev_orientation: q,
             linear_velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,

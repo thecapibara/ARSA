@@ -359,7 +359,12 @@ impl Joint {
         let rel_omega = bodies[self.child].angular_velocity - bodies[self.parent].angular_velocity;
         let k_eff = self.motor_stiffness * self.damage_scale;
         let d_eff = self.motor_damping * self.damage_scale;
-        let raw_tau = err_vec * k_eff - rel_omega * d_eff;
+        let mut raw_tau = err_vec * k_eff - rel_omega * d_eff;
+
+        if let JointKind::Hinge { axis, .. } = self.kind {
+            let axis_w = (q_p * axis).normalize_or_zero();
+            raw_tau = axis_w * raw_tau.dot(axis_w);
+        }
 
         let raw_mag = raw_tau.length();
         if raw_mag < 1e-9 {

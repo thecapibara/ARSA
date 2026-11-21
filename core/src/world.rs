@@ -4,10 +4,10 @@ use std::collections::HashSet;
 
 use glam::{Quat, Vec3};
 
-use crate::balance::update_ragdoll_balance;
+use crate::balance::{update_ragdoll_balance, BehaviorState};
 use crate::body::{ColliderShape, RigidBody};
 use crate::collision::{
-    detect_contacts, solve_contacts_position, solve_contacts_velocity, StaticBox,
+    detect_contacts, solve_contacts_position, solve_contacts_velocity, Contact, StaticBox,
 };
 use crate::joint::Joint;
 use crate::reflex::{apply_procedural_reflexes, WoundRegion};
@@ -95,6 +95,11 @@ pub struct ArsaWorld {
     pub earthquake_magnitude: f32,
     earthquake_time: f32,
     connected_pairs: HashSet<(usize, usize)>,
+    contacts_buf: Vec<Contact>,
+    foot_contacts_buf: Vec<(bool, bool)>,
+    pre_solve_vels_buf: Vec<Vec3>,
+    pre_solve_ang_vels_buf: Vec<Vec3>,
+    body_aabbs_buf: Vec<(Vec3, Vec3)>,
 }
 
 impl Default for ArsaWorld {
@@ -122,6 +127,11 @@ impl ArsaWorld {
             earthquake_magnitude: 0.0,
             earthquake_time: 0.0,
             connected_pairs: HashSet::new(),
+            contacts_buf: Vec::new(),
+            foot_contacts_buf: Vec::new(),
+            pre_solve_vels_buf: Vec::new(),
+            pre_solve_ang_vels_buf: Vec::new(),
+            body_aabbs_buf: Vec::new(),
         }
     }
 
@@ -137,6 +147,11 @@ impl ArsaWorld {
         self.pending_explosions.clear();
         self.earthquake_time = 0.0;
         self.connected_pairs.clear();
+        self.contacts_buf.clear();
+        self.foot_contacts_buf.clear();
+        self.pre_solve_vels_buf.clear();
+        self.pre_solve_ang_vels_buf.clear();
+        self.body_aabbs_buf.clear();
     }
 
     /// Adds a distance tether constraint anchoring `body_idx` within `length` meters of `anchor_world`.
@@ -255,23 +270,70 @@ impl ArsaWorld {
 
     /// Spawns a dynamic box rigid body and returns its body index.
     pub fn spawn_box(&mut self, pos: Vec3, half_extents: Vec3, mass: f32, vel: Vec3) -> usize {
+        let safe_pos = if pos.is_finite() { pos } else { Vec3::ZERO };
+        let safe_half = Vec3::new(
+            if half_extents.x.is_finite() && half_extents.x > 0.0 {
+                half_extents.x
+            } else {
+                0.25
+            },
+            if half_extents.y.is_finite() && half_extents.y > 0.0 {
+                half_extents.y
+            } else {
+                0.25
+            },
+            if half_extents.z.is_finite() && half_extents.z > 0.0 {
+                half_extents.z
+            } else {
+                0.25
+            },
+        );
+        let safe_mass = if mass.is_finite() && mass > 0.0 {
+            mass
+        } else {
+            0.0
+        };
+        let safe_vel = if vel.is_finite() { vel } else { Vec3::ZERO };
+
         let idx = self.bodies.len();
         let mut rb = RigidBody::new(
-            pos,
+            safe_pos,
             Quat::IDENTITY,
-            mass,
-            ColliderShape::Box { half_extents },
+            safe_mass,
+            ColliderShape::Box {
+                half_extents: safe_half,
+            },
         );
-        rb.linear_velocity = vel;
+        rb.linear_velocity = safe_vel;
         self.bodies.push(rb);
         idx
     }
 
     /// Spawns a dynamic sphere rigid body and returns its body index.
     pub fn spawn_sphere(&mut self, pos: Vec3, radius: f32, mass: f32, vel: Vec3) -> usize {
+        let safe_pos = if pos.is_finite() { pos } else { Vec3::ZERO };
+        let safe_radius = if radius.is_finite() && radius > 0.0 {
+            radius
+        } else {
+            0.25
+        };
+        let safe_mass = if mass.is_finite() && mass > 0.0 {
+            mass
+        } else {
+            0.0
+        };
+        let safe_vel = if vel.is_finite() { vel } else { Vec3::ZERO };
+
         let idx = self.bodies.len();
-        let mut rb = RigidBody::new(pos, Quat::IDENTITY, mass, ColliderShape::Sphere { radius });
-        rb.linear_velocity = vel;
+        let mut rb = RigidBody::new(
+            safe_pos,
+            Quat::IDENTITY,
+            safe_mass,
+            ColliderShape::Sphere {
+                radius: safe_radius,
+            },
+        );
+        rb.linear_velocity = safe_vel;
         self.bodies.push(rb);
         idx
     }
@@ -340,9 +402,18 @@ impl ArsaWorld {
 
         const MAX_BLAST_DV: f32 = 24.0;
         let mut affected = 0usize;
+        let track_damage = max_damage > 0.0;
         // Track the strongest blast hit per ragdoll so 17 bones don't multiply health damage 17x.
-        let mut ragdoll_best_hit: Vec<Option<(BoneId, Vec3, f32)>> =
-            vec![None; self.ragdolls.len()];
+        let mut ragdoll_best_hit: Vec<Option<(BoneId, Vec3, f32)>> = if track_damage {
+            vec![None; self.ragdolls.len()]
+        } else {
+            Vec::new()
+        };
+        let mut ragdoll_bone_falloffs: Vec<[f32; 17]> = if track_damage {
+            vec![[0.0; 17]; self.ragdolls.len()]
+        } else {
+            Vec::new()
+        };
 
         for b in &mut self.bodies {
             if b.inv_mass == 0.0 {
@@ -365,27 +436,42 @@ impl ArsaWorld {
             b.linear_velocity += blast_dir * dv;
             affected += 1;
 
-            if let (Some(r_id), Some(bone)) = (b.ragdoll_id, b.bone_id.and_then(BoneId::from_u8)) {
-                if let Some(ragdoll) = self.ragdolls.get_mut(r_id) {
-                    ragdoll.reflex.bone_damage[bone as usize] =
-                        (ragdoll.reflex.bone_damage[bone as usize] + falloff * 0.45).min(1.0);
-                    let local_pt = b.orientation.conjugate() * (-offset.normalize_or_zero() * 0.05);
-                    let replace = match ragdoll_best_hit[r_id] {
-                        Some((_, _, best_f)) => falloff > best_f,
-                        None => true,
-                    };
-                    if replace {
-                        ragdoll_best_hit[r_id] = Some((bone, local_pt, falloff));
+            if track_damage {
+                if let (Some(r_id), Some(bone)) =
+                    (b.ragdoll_id, b.bone_id.and_then(BoneId::from_u8))
+                {
+                    if r_id < self.ragdolls.len() {
+                        ragdoll_bone_falloffs[r_id][bone as usize] =
+                            ragdoll_bone_falloffs[r_id][bone as usize].max(falloff);
+                        let local_pt =
+                            b.orientation.conjugate() * (-offset.normalize_or_zero() * 0.05);
+                        let replace = match ragdoll_best_hit[r_id] {
+                            Some((_, _, best_f)) => falloff > best_f,
+                            None => true,
+                        };
+                        if replace {
+                            ragdoll_best_hit[r_id] = Some((bone, local_pt, falloff));
+                        }
                     }
                 }
             }
         }
 
-        for (r_id, hit_opt) in ragdoll_best_hit.into_iter().enumerate() {
-            if let Some((bone, local_pt, falloff)) = hit_opt {
-                let damage = falloff * max_damage;
-                let severity = (falloff * (max_damage / 75.0)).clamp(0.0, 1.0);
-                self.ragdolls[r_id].register_hit(bone, local_pt, severity, damage);
+        if track_damage {
+            for (r_id, hit_opt) in ragdoll_best_hit.into_iter().enumerate() {
+                if let Some((best_bone, local_pt, falloff)) = hit_opt {
+                    let ragdoll = &mut self.ragdolls[r_id];
+                    let best_idx = best_bone as usize;
+                    for (bone_idx, &f) in ragdoll_bone_falloffs[r_id].iter().enumerate() {
+                        if bone_idx != best_idx && f > 0.0 {
+                            ragdoll.reflex.bone_damage[bone_idx] =
+                                (ragdoll.reflex.bone_damage[bone_idx] + f * 0.45).min(1.0);
+                        }
+                    }
+                    let damage = falloff * max_damage;
+                    let severity = (falloff * (max_damage / 75.0)).clamp(0.0, 1.0);
+                    ragdoll.register_hit(best_bone, local_pt, severity, damage);
+                }
             }
         }
 
@@ -442,12 +528,12 @@ impl ArsaWorld {
         let sub_dt = clamped_dt / (substeps as f32);
         let inv_dt = 1.0 / sub_dt;
         let gravity_mag = self.gravity.length();
-        let mut foot_contacts: Vec<(bool, bool)> = self
-            .ragdolls
-            .iter()
-            .map(|r| (r.balance.left_foot_grounded, r.balance.right_foot_grounded))
-            .collect();
-        let mut pre_solve_vels = Vec::with_capacity(self.bodies.len());
+        self.foot_contacts_buf.clear();
+        self.foot_contacts_buf.extend(
+            self.ragdolls
+                .iter()
+                .map(|r| (r.balance.left_foot_grounded, r.balance.right_foot_grounded)),
+        );
 
         for _ in 0..substeps {
             // 1. Save previous state & integrate external forces
@@ -516,7 +602,7 @@ impl ArsaWorld {
                     ragdoll,
                     &mut self.bodies,
                     &mut self.joints,
-                    foot_contacts[r_idx],
+                    self.foot_contacts_buf[r_idx],
                     gravity_mag,
                     self.earthquake_magnitude,
                     sub_dt,
@@ -527,8 +613,12 @@ impl ArsaWorld {
                 j.apply_muscle_motor(&mut self.bodies, sub_dt);
             }
 
-            pre_solve_vels.clear();
-            pre_solve_vels.extend(self.bodies.iter().map(|b| b.linear_velocity));
+            self.pre_solve_vels_buf.clear();
+            self.pre_solve_vels_buf
+                .extend(self.bodies.iter().map(|b| b.linear_velocity));
+            self.pre_solve_ang_vels_buf.clear();
+            self.pre_solve_ang_vels_buf
+                .extend(self.bodies.iter().map(|b| b.angular_velocity));
 
             // Predict positions and orientations
             for b in &mut self.bodies {
@@ -542,8 +632,13 @@ impl ArsaWorld {
             }
 
             // 2. Collision detection
-            let mut contacts =
-                detect_contacts(&self.bodies, &self.static_boxes, &self.connected_pairs);
+            detect_contacts(
+                &self.bodies,
+                &self.static_boxes,
+                &self.connected_pairs,
+                &mut self.body_aabbs_buf,
+                &mut self.contacts_buf,
+            );
 
             // Track per-ragdoll foot grounding from detected contacts
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
@@ -551,7 +646,7 @@ impl ArsaWorld {
                 let rf_idx = ragdoll.body_indices[BoneId::RightFoot as usize];
                 let mut lf_grounded = false;
                 let mut rf_grounded = false;
-                for c in &contacts {
+                for c in &self.contacts_buf {
                     if (c.body_a == lf_idx && c.normal.y > 0.45)
                         || (c.body_b == Some(lf_idx) && -c.normal.y > 0.45)
                     {
@@ -563,7 +658,7 @@ impl ArsaWorld {
                         rf_grounded = true;
                     }
                 }
-                foot_contacts[r_idx] = (lf_grounded, rf_grounded);
+                self.foot_contacts_buf[r_idx] = (lf_grounded, rf_grounded);
                 ragdoll.balance.left_foot_grounded = lf_grounded;
                 ragdoll.balance.right_foot_grounded = rf_grounded;
             }
@@ -589,16 +684,17 @@ impl ArsaWorld {
                         body.position += correction;
                     }
                 }
-                solve_contacts_position(&mut self.bodies, &mut contacts);
+                solve_contacts_position(&mut self.bodies, &mut self.contacts_buf);
             }
 
             // 4. Derive velocities from position & orientation changes
             const MAX_DEPENETRATION_DV: f32 = 6.0;
+            const MAX_DEPENETRATION_DW: f32 = 25.0;
             for (b_idx, b) in self.bodies.iter_mut().enumerate() {
                 if b.inv_mass == 0.0 {
                     continue;
                 }
-                let pre_solve_vel = pre_solve_vels[b_idx];
+                let pre_solve_vel = self.pre_solve_vels_buf[b_idx];
                 let derived_vel = (b.position - b.prev_position) * inv_dt;
                 let dv = derived_vel - pre_solve_vel;
                 let dv_len = dv.length();
@@ -607,11 +703,20 @@ impl ArsaWorld {
                 } else {
                     derived_vel
                 };
+
+                let pre_solve_ang_vel = self.pre_solve_ang_vels_buf[b_idx];
                 let mut dq = b.orientation * b.prev_orientation.conjugate();
                 if dq.w < 0.0 {
                     dq = -dq;
                 }
-                b.angular_velocity = Vec3::new(dq.x, dq.y, dq.z) * (2.0 * inv_dt);
+                let derived_ang_vel = Vec3::new(dq.x, dq.y, dq.z) * (2.0 * inv_dt);
+                let dw = derived_ang_vel - pre_solve_ang_vel;
+                let dw_len = dw.length();
+                b.angular_velocity = if dw_len > MAX_DEPENETRATION_DW {
+                    pre_solve_ang_vel + dw * (MAX_DEPENETRATION_DW / dw_len)
+                } else {
+                    derived_ang_vel
+                };
 
                 // Subtle air drag for numerical cleanliness
                 let drag = (-0.15 * sub_dt).exp();
@@ -623,12 +728,26 @@ impl ArsaWorld {
             for j in &self.joints {
                 j.solve_velocity_damping(&mut self.bodies, sub_dt);
             }
-            solve_contacts_velocity(&mut self.bodies, &contacts, sub_dt, gravity_mag);
+            solve_contacts_velocity(&mut self.bodies, &self.contacts_buf, sub_dt, gravity_mag);
+        }
+    }
+
+    #[inline]
+    fn interrupt_ragdoll_recovery(&mut self, ragdoll_id: usize) {
+        if let Some(ragdoll) = self.ragdolls.get_mut(ragdoll_id) {
+            ragdoll.balance.downed_still_time = 0.0;
+            if ragdoll.balance.state == BehaviorState::Recovering {
+                ragdoll.balance.state = BehaviorState::Falling;
+                ragdoll.balance.recovery_phase = 0.0;
+            }
         }
     }
 
     /// Applies an instantaneous world-space `impulse` to `body_idx` at `world_point`.
     pub fn apply_impulse_at_point(&mut self, body_idx: usize, impulse: Vec3, world_point: Vec3) {
+        if !impulse.is_finite() || !world_point.is_finite() {
+            return;
+        }
         let Some(body) = self.bodies.get_mut(body_idx) else {
             return;
         };
@@ -644,6 +763,9 @@ impl ArsaWorld {
     /// Raycasts from `origin` along `dir` and applies a broad two-handed shove impulse
     /// distributed across the hit bone, Chest, and Pelvis when hitting a ragdoll.
     pub fn apply_shove(&mut self, origin: Vec3, dir: Vec3, strength: f32) -> Option<RaycastHit> {
+        if !strength.is_finite() {
+            return None;
+        }
         let hit = self.raycast(origin, dir, 100.0)?;
         let dir_n = dir.normalize_or_zero();
         let total_impulse = dir_n * strength;
@@ -657,6 +779,9 @@ impl ArsaWorld {
             self.apply_impulse_at_point(hit.body_idx, total_impulse * 0.40, hit.point);
             self.apply_impulse_at_point(chest_idx, total_impulse * 0.35, chest_pos);
             self.apply_impulse_at_point(pelvis_idx, total_impulse * 0.25, pelvis_pos);
+            if total_impulse.length() > 12.0 {
+                self.interrupt_ragdoll_recovery(ragdoll_id);
+            }
         } else {
             self.apply_impulse_at_point(hit.body_idx, total_impulse, hit.point);
         }
@@ -666,9 +791,18 @@ impl ArsaWorld {
     /// Raycasts from `origin` along `dir` and applies a sharp, localized punch impulse
     /// at the exact hit point.
     pub fn apply_punch(&mut self, origin: Vec3, dir: Vec3, strength: f32) -> Option<RaycastHit> {
+        if !strength.is_finite() {
+            return None;
+        }
         let hit = self.raycast(origin, dir, 100.0)?;
         let dir_n = dir.normalize_or_zero();
-        self.apply_impulse_at_point(hit.body_idx, dir_n * strength, hit.point);
+        let impulse = dir_n * strength;
+        self.apply_impulse_at_point(hit.body_idx, impulse, hit.point);
+        if impulse.length() > 12.0 {
+            if let Some(ragdoll_id) = self.bodies[hit.body_idx].ragdoll_id {
+                self.interrupt_ragdoll_recovery(ragdoll_id);
+            }
+        }
         Some(hit)
     }
 
@@ -683,6 +817,9 @@ impl ArsaWorld {
         radius: f32,
         max_impulse: f32,
     ) -> usize {
+        if !origin.is_finite() || !dir.is_finite() {
+            return 0;
+        }
         let dir_n = dir.normalize_or_zero();
         if dir_n.length_squared() < 1e-12
             || !radius.is_finite()
@@ -722,6 +859,11 @@ impl ArsaWorld {
             let impulse_dir = (radial * 0.55 + dir_n * 0.45 + Vec3::Y * 0.25).normalize_or_zero();
             let impulse = impulse_dir * (max_impulse * falloff);
             self.apply_impulse_at_point(idx, impulse, pos);
+            if impulse.length() > 12.0 {
+                if let Some(ragdoll_id) = self.bodies[idx].ragdoll_id {
+                    self.interrupt_ragdoll_recovery(ragdoll_id);
+                }
+            }
             affected += 1;
         }
         affected
@@ -796,18 +938,43 @@ impl ArsaWorld {
         }
     }
 
-    /// Raycasts against all dynamic bodies up to `max_dist` and returns the closest hit.
+    /// Raycasts against all dynamic bodies up to `max_dist` (occluded by the `y = 0` ground plane
+    /// and all `static_boxes`) and returns the closest hit.
     pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RaycastHit> {
-        let dir_len_sq = dir.length_squared();
-        if dir_len_sq < 1e-12 || max_dist <= 0.0 {
+        if !origin.is_finite()
+            || !dir.is_finite()
+            || !max_dist.is_finite()
+            || max_dist <= 0.0
+            || dir.length_squared() < 1e-12
+        {
             return None;
         }
-        let d = dir / dir_len_sq.sqrt();
+        let d = dir.normalize();
 
+        // 1. Compute nearest static occlusion distance (ground plane y = 0 and static boxes)
+        let mut best_t = max_dist;
+        if d.y < -1e-6 {
+            let t = -origin.y / d.y;
+            if t > 0.0 && t < best_t {
+                best_t = t;
+            }
+        }
+        for sb in &self.static_boxes {
+            if let Some(t) = ray_aabb(origin, d, sb.center, sb.half_extents, best_t) {
+                if t > 0.0 && t < best_t {
+                    best_t = t;
+                }
+            }
+        }
+
+        // 2. Test dynamic bodies strictly closer than best_t
         let mut best: Option<RaycastHit> = None;
-        let mut best_dist = max_dist;
+        let mut best_dist = best_t;
 
         for (idx, body) in self.bodies.iter().enumerate() {
+            if body.inv_mass == 0.0 && body.collision_group == 0 {
+                continue;
+            }
             let hit = match body.collider {
                 ColliderShape::Sphere { radius } => {
                     ray_sphere(origin, d, body.position, radius, best_dist)
@@ -835,24 +1002,62 @@ impl ArsaWorld {
             };
 
             if let Some((t, normal)) = hit {
-                best_dist = t;
-                let point = origin + d * t;
-                let local_point = body.orientation.conjugate() * (point - body.position);
-                best = Some(RaycastHit {
-                    body_idx: idx,
-                    distance: t,
-                    point,
-                    normal,
-                    local_point,
-                });
+                if t < best_dist {
+                    best_dist = t;
+                    let point = origin + d * t;
+                    let local_point = body.orientation.conjugate() * (point - body.position);
+                    best = Some(RaycastHit {
+                        body_idx: idx,
+                        distance: t,
+                        point,
+                        normal,
+                        local_point,
+                    });
+                }
             }
         }
 
         best
     }
 
+    /// Synchronizes a body's simulated pose and velocities from an external host physics engine
+    /// (e.g. UE5 Chaos / Unity PhysX) so ARSA balance/reflex controllers can compute updated
+    /// `joint.motor_target` values. Returns `false` if `body_idx` is invalid or any input is
+    /// non-finite / degenerate.
+    pub fn sync_bone_pose(
+        &mut self,
+        body_idx: usize,
+        pos: Vec3,
+        rot: Quat,
+        lin_vel: Vec3,
+        ang_vel: Vec3,
+    ) -> bool {
+        if !pos.is_finite()
+            || !rot.is_finite()
+            || rot.length_squared() < 1e-12
+            || !lin_vel.is_finite()
+            || !ang_vel.is_finite()
+        {
+            return false;
+        }
+        let Some(body) = self.bodies.get_mut(body_idx) else {
+            return false;
+        };
+        let q = rot.normalize();
+        body.position = pos;
+        body.prev_position = pos;
+        body.orientation = q;
+        body.prev_orientation = q;
+        body.linear_velocity = lin_vel;
+        body.angular_velocity = ang_vel;
+        true
+    }
+
     /// Begins grabbing `body_idx` at `local_point` toward `target`.
     pub fn start_grab(&mut self, body_idx: usize, local_point: Vec3, target: Vec3) {
+        if !local_point.is_finite() || !target.is_finite() {
+            return;
+        }
         if let Some(body) = self.bodies.get(body_idx) {
             let m = body.mass.max(1.0);
             self.grab = Some(GrabConstraint {
@@ -867,6 +1072,9 @@ impl ArsaWorld {
 
     /// Updates the active grab target position.
     pub fn move_grab(&mut self, target: Vec3) {
+        if !target.is_finite() {
+            return;
+        }
         if let Some(grab) = &mut self.grab {
             grab.target_world = target;
         }
@@ -1022,6 +1230,41 @@ fn ray_sphere(
     let hit_pt = origin + dir * t;
     let normal = (hit_pt - center).normalize_or_zero();
     Some((t, normal))
+}
+
+fn ray_aabb(origin: Vec3, dir: Vec3, center: Vec3, half: Vec3, max_dist: f32) -> Option<f32> {
+    let ro = origin - center;
+    let mut tmin = 0.0_f32;
+    let mut tmax = max_dist;
+
+    for i in 0..3 {
+        let o = ro[i];
+        let d = dir[i];
+        let h = half[i];
+        if d.abs() < 1e-8 {
+            if o < -h || o > h {
+                return None;
+            }
+        } else {
+            let inv_d = 1.0 / d;
+            let mut t1 = (-h - o) * inv_d;
+            let mut t2 = (h - o) * inv_d;
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+            }
+            tmin = tmin.max(t1);
+            tmax = tmax.min(t2);
+            if tmin > tmax {
+                return None;
+            }
+        }
+    }
+
+    if tmin > 0.0 && tmin < max_dist {
+        Some(tmin)
+    } else {
+        None
+    }
 }
 
 fn ray_obb(

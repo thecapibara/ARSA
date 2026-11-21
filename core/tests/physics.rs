@@ -1014,3 +1014,112 @@ fn test_arms_do_not_clip_through_chest() {
         }
     }
 }
+
+#[test]
+fn test_raycast_occluded_by_static_wall() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::ZERO);
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+    let chest_pos = world.bodies[chest_idx].position;
+
+    // Place a static wall between ray origin and ragdoll chest
+    world.add_static_box(
+        Vec3::new(0.0, 1.0, 1.5),
+        Vec3::new(2.0, 2.0, 0.2),
+        0.75,
+        0.05,
+    );
+
+    let origin = chest_pos + Vec3::new(0.0, 0.0, 3.0);
+    let dir = Vec3::new(0.0, 0.0, -1.0);
+
+    // Raycast through static wall must be occluded and return None
+    assert!(
+        world.raycast(origin, dir, 20.0).is_none(),
+        "raycast should not shoot through a StaticBox wall"
+    );
+
+    // Weapon shot through the wall must also record no hits
+    let shot = world.fire_weapon(origin, dir, WeaponKind::Rifle);
+    assert!(shot.hits.is_empty());
+    assert_eq!(shot.hit_ragdoll_id, None);
+
+    // Raycast starting in front of the wall (between wall and ragdoll) still hits Chest
+    let clear_hit = world
+        .raycast(chest_pos + Vec3::new(0.0, 0.0, 1.0), dir, 20.0)
+        .expect("raycast in front of wall should hit ragdoll chest");
+    assert_eq!(clear_hit.body_idx, chest_idx);
+}
+
+#[test]
+fn test_shove_interrupts_recovering() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::ZERO);
+
+    world.ragdolls[id].balance.state = BehaviorState::Recovering;
+    world.ragdolls[id].balance.recovery_phase = 0.55;
+    world.ragdolls[id].balance.downed_still_time = 2.0;
+
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+    let chest_pos = world.bodies[chest_idx].position;
+
+    let hit = world
+        .apply_shove(
+            chest_pos + Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            120.0,
+        )
+        .expect("shove should hit chest");
+    assert_eq!(hit.body_idx, chest_idx);
+
+    assert_eq!(world.ragdolls[id].balance.state, BehaviorState::Falling);
+    assert_eq!(world.ragdolls[id].balance.downed_still_time, 0.0);
+    assert_eq!(world.ragdolls[id].balance.recovery_phase, 0.0);
+}
+
+#[test]
+fn test_sync_bone_pose_host_physics() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::ZERO);
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+
+    let new_pos = Vec3::new(1.5, 2.25, -0.75);
+    let unnorm_rot = Quat::from_xyzw(0.2, 0.4, -0.1, 1.2);
+    let expected_rot = unnorm_rot.normalize();
+    let lin_vel = Vec3::new(0.5, -1.2, 3.0);
+    let ang_vel = Vec3::new(-0.3, 0.8, 0.1);
+
+    assert!(world.sync_bone_pose(pelvis_idx, new_pos, unnorm_rot, lin_vel, ang_vel));
+
+    let b = &world.bodies[pelvis_idx];
+    assert_eq!(b.position, new_pos);
+    assert_eq!(b.prev_position, new_pos);
+    assert!((b.orientation.dot(expected_rot) - 1.0).abs() < 1e-6);
+    assert!((b.prev_orientation.dot(expected_rot) - 1.0).abs() < 1e-6);
+    assert_eq!(b.linear_velocity, lin_vel);
+    assert_eq!(b.angular_velocity, ang_vel);
+
+    // Out-of-range and non-finite / zero-quat inputs must fail without corrupting state
+    assert!(!world.sync_bone_pose(9999, new_pos, expected_rot, lin_vel, ang_vel));
+    assert!(!world.sync_bone_pose(pelvis_idx, Vec3::NAN, expected_rot, lin_vel, ang_vel));
+    assert!(!world.sync_bone_pose(pelvis_idx, new_pos, Quat::NAN, lin_vel, ang_vel));
+    assert!(!world.sync_bone_pose(
+        pelvis_idx,
+        new_pos,
+        Quat::from_xyzw(0.0, 0.0, 0.0, 0.0),
+        lin_vel,
+        ang_vel
+    ));
+    assert!(!world.sync_bone_pose(pelvis_idx, new_pos, expected_rot, Vec3::INFINITY, ang_vel));
+    assert!(!world.sync_bone_pose(
+        pelvis_idx,
+        new_pos,
+        expected_rot,
+        lin_vel,
+        Vec3::NEG_INFINITY
+    ));
+
+    let b_after = &world.bodies[pelvis_idx];
+    assert_eq!(b_after.position, new_pos);
+    assert_eq!(b_after.linear_velocity, lin_vel);
+}
