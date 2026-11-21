@@ -423,10 +423,10 @@ class PlaygroundApp {
   private applyProfilePreset(key: ProfilePresetKey): void {
     this.bodyProfile = { ...PROFILE_PRESETS[key] };
     this.syncProfileUi();
-    this.applyLiveBodyProfile();
+    this.applyLiveBodyProfile(true);
   }
 
-  private applyLiveBodyProfile(): void {
+  private applyLiveBodyProfile(rebuildGeometry = true): void {
     if (!this.sim) return;
     if (typeof this.sim.update_all_ragdolls_profile === 'function') {
       this.sim.update_all_ragdolls_profile(
@@ -435,7 +435,7 @@ class PlaygroundApp {
         this.bodyProfile.strength
       );
     }
-    this.syncSimulationView(true);
+    this.syncSimulationView(rebuildGeometry);
     if (this.activeTool === 'placer' && this.hasLastPointer) {
       this.updatePlacePreview(this.lastPointerX, this.lastPointerY);
     }
@@ -1168,18 +1168,18 @@ class PlaygroundApp {
         });
       });
 
-    const onSliderInput = () => {
+    const onSliderInput = (rebuildGeometry: boolean) => {
       this.bodyProfile = {
         heightCm: Number(this.sliderHeight.value),
         massKg: Number(this.sliderMass.value),
         strength: Number(this.sliderStrength.value),
       };
       this.syncProfileUi();
-      this.applyLiveBodyProfile();
+      this.applyLiveBodyProfile(rebuildGeometry);
     };
-    this.sliderHeight.addEventListener('input', onSliderInput);
-    this.sliderMass.addEventListener('input', onSliderInput);
-    this.sliderStrength.addEventListener('input', onSliderInput);
+    this.sliderHeight.addEventListener('input', () => onSliderInput(true));
+    this.sliderMass.addEventListener('input', () => onSliderInput(true));
+    this.sliderStrength.addEventListener('input', () => onSliderInput(false));
 
     this.bindCollapsible('btn-profile-collapse', 'profile-body');
     this.bindCollapsible('btn-quake-collapse', 'quake-body');
