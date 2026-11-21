@@ -18,6 +18,7 @@
   <a href="https://github.com/thecapibara/ARSA/actions/workflows/ci.yml">
     <img src="https://github.com/thecapibara/ARSA/actions/workflows/ci.yml/badge.svg" alt="CI" />
   </a>
+  <img src="https://img.shields.io/badge/Version-v0.5-e8942c?style=flat-square" alt="Version v0.5" />
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20XPBD-orange?style=flat-square" alt="Rust Core" />
   <img src="https://img.shields.io/badge/Web%20Showcase-Three.js%20%2B%20WASM-blue?style=flat-square" alt="Three.js + WASM" />
   <img src="https://img.shields.io/badge/Engines-UE5%20%7C%20Unity%20%7C%20C%20ABI-lightgrey?style=flat-square" alt="UE5 Unity C ABI" />
@@ -63,6 +64,10 @@ Because the entire physics & behavioral core lives in pure **Rust (`arsa-core`)*
   - **Vestibular Head Stabilization**: Counter-rotates neck & head toward level / chin-tuck during stumbles and falls.
   - **Brace-for-Impact & Airborne Flail**: Extends arms toward impending ground collision and windmills when launched high.
   - **Downed Writhe & Unconscious KO**: Grounded injured reactions when conscious; heavy headshots or depleted health transition to limp ragdoll physics.
+- **3-Phase Biomechanical Auto Get-Up (`RECOVERING`)** — Conscious downed ragdolls wait through a realistic floor delay, roll/tuck through a crouch-lean rise back to standing, abort immediately if interrupted by a hit, and never wake when `Unconscious`.
+- **Richter-Scale Earthquake Simulation** — Interactive `M 0.0–9.0` multi-frequency ground waves driving defensive crouching, stumbling, dynamic object toppling, camera shake, and procedural seismic audio.
+- **GMod-Style `Placer` & `Thrower` Menus + Dynamite Explosions** — Spawn arbitrary `Curb`, `Mannequin`, `Cube`, `Sphere`, or timed `Dynamite` bundles with 4-point SAT box stacking on boxes and stairs, or launch `Cube` / `Crate` / `Sphere` projectiles.
+- **Selective Distal Self-Collision** — Arms and hands physically collide against torso, chest, and back without clipping while staying stable and helicopter-free all the way up to `160 kg / 1.80×` muscle scaling.
 - **Cross-Engine SDK** — Supports both **Standalone Simulation Mode** and **Host-Physics Motor Target Mode** (`arsa_world_get_joint_motor_targets`) for UE5 Chaos and Unity PhysX.
 
 ---
@@ -113,20 +118,35 @@ See [docs/INTEGRATION.md](docs/INTEGRATION.md) for Unity, Unreal Engine 5, and C
 
 ---
 
+## Performance Benchmarks
+
+Measured via `cargo bench -p arsa-core --bench simulation` at `60Hz × 10 substeps = 600Hz XPBD`:
+
+| Benchmark | Frame Time (`60Hz` step) | Notes |
+| :--- | :--- | :--- |
+| **`single_active_ragdoll`** | **~`0.34 ms`** | 1× 17-bone active ragdoll with full balance & reflexes |
+| **`crowd_4x_standing`** | **~`0.90 ms`** | 4× active ragdolls balancing simultaneously (`68` rigid bodies) |
+| **`crowd_4x_chaos_impact`** | **~`1.21 ms`** *(median)* | 4× active ragdolls under continuous multi-body collision & impacts |
+| **`stacked_box_tower_5x`** | **~`0.09 ms`** | 5-box vertical stack with 4-point SAT contact solving |
+
+---
+
 ## Playground Controls
 
 All keyboard shortcuts use layout-independent physical keys (`e.code`).
 
 | Input | Action |
 | :--- | :--- |
-| **`1` – `3`** | Grab & Drag any limb · Shove · Punch |
+| **`1` – `3`** | Grab & Drag · Shove · Punch |
 | **`4` – `6`** | Pistol (9mm) · Shotgun (12ga) · Rifle (5.56) |
-| **`7` – `9` / `0`** | Place Obstacle Box · Throw Box · Throw Heavy Sphere · Kinetic Force Wave |
-| **`T`** / **`[` `]`** | Bullet-Time (`0.15×` ↔ `1.0×`) · Step Simulation Speed (`0.05×` – `2.0×`) |
-| **`Space` / `P`** | Pause / Resume simulation |
-| **`F`** | Toggle Orbit / Free Fly Camera (`WASD` + `Q/E` + RMB look) |
-| **`M`** / **`D`** | Toggle Active/Passive Muscles · Debug Telemetry (CoM, Capture Point, Wound) |
-| **`R`** / **`+`** | Reset Scenario · Spawn Additional Ragdoll |
+| **`7`** | Placer (`Curb` / `Mannequin` / `Cube` / `Sphere` / `Dynamite`) — supports stacking on boxes & stairs |
+| **`8`** | Thrower (`Cube` / `Crate` / `Sphere`) |
+| **`9` / `0`** | Kinetic Force Wave |
+| **`T`** / **`[` `]`** | Bullet-Time (`0.15×` ↔ `1.0×`) · Simulation Speed (`0.05×` – `2.0×`) |
+| **`Space` / `P`** | Pause / Resume |
+| **`F`** | Orbit / Free Fly Camera (`WASD` + `Q/E` + RMB look) |
+| **`M` / `D` / `Tab`** | Active/Passive Muscles · Debug Telemetry · Hide/Show HUD |
+| **`R` / `+`** | Reset Scenario · Spawn Additional Ragdoll |
 
 ---
 
