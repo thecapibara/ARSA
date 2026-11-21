@@ -635,6 +635,7 @@ kbd,
   display: flex;
   flex-direction: column;
   gap: 4px;
+  max-width: 100%;
 }
 
 .dock-label {

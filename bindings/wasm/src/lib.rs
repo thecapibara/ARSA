@@ -35,6 +35,10 @@ impl ArsaSim {
     /// - `3`: Trip Test
     /// - `4`: Wrecking Ball
     /// - `5`: Crowd (4x Diverse Builds)
+    /// - `6`: Slope Ramp (Ramp & Slide)
+    /// - `7`: Rolling Hills (Terrain Hills)
+    /// - `8`: Cliff Ledge (Cliff Teeter)
+    /// - `9`: Crowd 16x LOD
     pub fn reset_lab_scene(&mut self, scenario: u32) {
         self.reset_lab_scene_with_profile(scenario, 1.78, 75.0, 1.0);
     }
@@ -46,6 +50,10 @@ impl ArsaSim {
     /// - `3`: Trip Test (standing mannequin + low obstacle box behind heels)
     /// - `4`: Wrecking Ball (standing mannequin + gantry beam + tethered 85kg wrecking ball)
     /// - `5`: Crowd (4x diverse builds in tight staggered formation facing +Z)
+    /// - `6`: Slope Ramp (elevated start platform + 20° ramp + 2 tumbling crates)
+    /// - `7`: Rolling Hills (33x33 procedural heightfield terrain + 2 ragdolls + 3 crates)
+    /// - `8`: Cliff Ledge (4.4m tower + mid-cliff ledge + ragdoll near front brink)
+    /// - `9`: Crowd 16x LOD (4x4 formation with spatial camera-distance LOD)
     pub fn reset_lab_scene_with_profile(
         &mut self,
         scenario: u32,
@@ -54,6 +62,8 @@ impl ArsaSim {
         muscle_ratio: f32,
     ) {
         self.world.clear();
+        self.world.set_heightfield(None);
+        self.world.set_lod_focus(None, 15.0, 35.0);
         let profile = BodyProfile {
             height_m,
             mass_kg,
@@ -159,6 +169,126 @@ impl ArsaSim {
                     },
                 );
             }
+            6 => {
+                // Slope Ramp: elevated start platform + 20-deg sloped ramp + 2 tumbling crates
+                self.world.add_static_box(
+                    Vec3::new(0.0, 1.55, -2.6),
+                    Vec3::new(1.6, 0.15, 1.0),
+                    0.75,
+                    0.05,
+                );
+                self.world.add_static_oriented_box(
+                    Vec3::new(0.0, 0.78, 0.85),
+                    Vec3::new(1.5, 0.12, 2.6),
+                    Quat::from_rotation_x(20.0_f32.to_radians()),
+                    0.55,
+                    0.05,
+                );
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 1.72, -2.0), profile);
+                self.world.spawn_box(
+                    Vec3::new(-0.75, 1.98, -1.4),
+                    Vec3::splat(0.22),
+                    12.0,
+                    Vec3::ZERO,
+                );
+                self.world.spawn_box(
+                    Vec3::new(0.75, 1.98, -1.4),
+                    Vec3::splat(0.22),
+                    12.0,
+                    Vec3::ZERO,
+                );
+            }
+            7 => {
+                // Rolling Hills: 33x33 procedural heightfield terrain + 2 ragdolls + 3 crates
+                let cols = 33usize;
+                let rows = 33usize;
+                let origin_x = -10.0_f32;
+                let origin_z = -10.0_f32;
+                let cell_size = 0.625_f32;
+                let hill_height = |x: f32, z: f32| -> f32 {
+                    0.65 * (0.5 + 0.5 * (x * 0.45).sin() * (z * 0.45).cos())
+                        + 0.25 * ((x * 0.25 + z * 0.3).sin() + 1.0) * 0.5
+                };
+                let mut heights = Vec::with_capacity(cols * rows);
+                for r in 0..rows {
+                    let z = origin_z + r as f32 * cell_size;
+                    for c in 0..cols {
+                        let x = origin_x + c as f32 * cell_size;
+                        heights.push(hill_height(x, z));
+                    }
+                }
+                self.world.set_heightfield(Some(Heightfield {
+                    origin_x,
+                    origin_z,
+                    cell_size,
+                    cols,
+                    rows,
+                    heights,
+                    friction: 0.75,
+                    restitution: 0.05,
+                }));
+                self.world.spawn_ragdoll_with_profile(
+                    Vec3::new(-1.2, hill_height(-1.2, 0.0) + 0.03, 0.0),
+                    profile,
+                );
+                self.world.spawn_ragdoll_with_profile(
+                    Vec3::new(1.6, hill_height(1.6, -1.2) + 0.03, -1.2),
+                    BodyProfile {
+                        height_m: 1.88,
+                        mass_kg: 92.0,
+                        muscle_ratio: 1.1,
+                    },
+                );
+                for (cx, cz) in [(3.2, 0.2), (-2.8, -3.5), (0.4, 3.2)] {
+                    self.world.spawn_box(
+                        Vec3::new(cx, hill_height(cx, cz) + 0.55, cz),
+                        Vec3::splat(0.24),
+                        16.0,
+                        Vec3::ZERO,
+                    );
+                }
+            }
+            8 => {
+                // Cliff Ledge: 4.4m tower + mid-cliff ledge + ragdoll near front brink
+                self.world.add_static_box(
+                    Vec3::new(0.0, 2.2, -0.8),
+                    Vec3::new(1.35, 2.2, 1.35),
+                    0.75,
+                    0.05,
+                );
+                self.world.add_static_box(
+                    Vec3::new(0.0, 2.4, 1.05),
+                    Vec3::new(1.1, 0.12, 0.45),
+                    0.75,
+                    0.05,
+                );
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 4.42, 0.36), profile);
+            }
+            9 => {
+                // Crowd 16x LOD: 4x4 formation spanning Full / Reduced / Sleep LOD tiers
+                let xs = [-6.0_f32, -2.0, 2.0, 6.0];
+                let zs = [0.0_f32, -6.0, -16.0, -28.0];
+                for (row, &z) in zs.iter().enumerate() {
+                    for (col, &x) in xs.iter().enumerate() {
+                        let idx = row * 4 + col;
+                        let h = 1.62 + ((idx * 7) % 16) as f32 / 15.0 * (2.05 - 1.62);
+                        let m = 58.0 + ((idx * 11 + 3) % 16) as f32 / 15.0 * (115.0 - 58.0);
+                        let s = 0.85 + ((idx * 5 + 1) % 16) as f32 / 15.0 * (1.35 - 0.85);
+                        self.world.spawn_ragdoll_with_profile(
+                            Vec3::new(x, 0.03, z),
+                            BodyProfile {
+                                height_m: h,
+                                mass_kg: m,
+                                muscle_ratio: s,
+                            },
+                        );
+                    }
+                }
+                self.world
+                    .set_lod_focus(Some(Vec3::new(0.0, 1.5, 4.0)), 10.0, 22.0);
+            }
             _ => {
                 // 0: Flat Lab
                 self.world
@@ -204,6 +334,49 @@ impl ArsaSim {
             out.push(sb.half_extents.z);
         }
         out
+    }
+
+    /// Returns packed oriented static box obstacles (10 floats per box:
+    /// `cx, cy, cz, hx, hy, hz, qx, qy, qz, qw`).
+    pub fn get_static_boxes_oriented(&self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.world.static_boxes.len() * 10);
+        for sb in &self.world.static_boxes {
+            out.push(sb.center.x);
+            out.push(sb.center.y);
+            out.push(sb.center.z);
+            out.push(sb.half_extents.x);
+            out.push(sb.half_extents.y);
+            out.push(sb.half_extents.z);
+            out.push(sb.orientation.x);
+            out.push(sb.orientation.y);
+            out.push(sb.orientation.z);
+            out.push(sb.orientation.w);
+        }
+        out
+    }
+
+    /// Returns heightfield metadata `[origin_x, origin_z, cell_size, cols, rows]`,
+    /// or an empty `Vec` if no heightfield is active.
+    pub fn get_heightfield_meta(&self) -> Vec<f32> {
+        let Some(hf) = &self.world.heightfield else {
+            return Vec::new();
+        };
+        vec![
+            hf.origin_x,
+            hf.origin_z,
+            hf.cell_size,
+            hf.cols as f32,
+            hf.rows as f32,
+        ]
+    }
+
+    /// Returns a copy of the active heightfield's row-major height samples,
+    /// or an empty `Vec` if no heightfield is active.
+    pub fn get_heightfield_heights(&self) -> Vec<f32> {
+        let Some(hf) = &self.world.heightfield else {
+            return Vec::new();
+        };
+        hf.heights.clone()
     }
 
     /// Returns packed active tether segments (6 floats per tether: `ax, ay, az, bx, by, bz`).

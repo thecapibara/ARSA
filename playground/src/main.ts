@@ -25,6 +25,16 @@ type ArsaSimExt = ArsaSim & {
   set_auto_get_up?: (enabled: boolean) => void;
   set_earthquake?: (magnitude: number) => void;
   set_intoxication?: (level: number) => void;
+  get_static_boxes_oriented?: () => Float32Array;
+  get_heightfield_meta?: () => Float32Array;
+  get_heightfield_heights?: () => Float32Array;
+  set_lod_focus?: (
+    x: number,
+    y: number,
+    z: number,
+    reduced_dist: number,
+    sleep_dist: number
+  ) => void;
 };
 
 type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
@@ -271,11 +281,34 @@ class PlaygroundApp {
       this.sim.set_earthquake(this.earthquakeMagnitude);
     }
 
-    this.lab.syncStaticBoxes(this.sim.get_static_boxes());
+    if (typeof this.sim.get_static_boxes_oriented === 'function') {
+      this.lab.syncStaticBoxesOriented(this.sim.get_static_boxes_oriented());
+    } else {
+      this.lab.syncStaticBoxes(this.sim.get_static_boxes());
+    }
+    if (
+      typeof this.sim.get_heightfield_meta === 'function' &&
+      typeof this.sim.get_heightfield_heights === 'function'
+    ) {
+      this.lab.syncHeightfield(
+        this.sim.get_heightfield_meta(),
+        this.sim.get_heightfield_heights()
+      );
+    } else {
+      this.lab.syncHeightfield([], []);
+    }
     this.syncSimulationView();
 
     if (scenario === 4 || scenario === 5) {
       this.lab.frameCamera([0, 2.1, 5.4], [0, 1.1, 0]);
+    } else if (scenario === 6) {
+      this.lab.frameCamera([5.5, 2.8, 3.8], [0, 1.1, 0.0]);
+    } else if (scenario === 7) {
+      this.lab.frameCamera([5.5, 3.8, 6.0], [0, 0.8, -0.5]);
+    } else if (scenario === 8) {
+      this.lab.frameCamera([4.2, 5.2, 4.2], [0, 4.2, 0.2]);
+    } else if (scenario === 9) {
+      this.lab.frameCamera([0.0, 7.0, 10.0], [0, 1.2, -10.0]);
     }
 
     document
@@ -835,6 +868,15 @@ class PlaygroundApp {
     }
 
     this.lab.updateCamera(rawDt);
+
+    if (
+      this.sim &&
+      this.activeScenario === 9 &&
+      typeof this.sim.set_lod_focus === 'function'
+    ) {
+      const cam = this.lab.camera.position;
+      this.sim.set_lod_focus(cam.x, cam.y, cam.z, 12.0, 24.0);
+    }
 
     if (this.sim && !this.paused) {
       if (this.timeScale < 1.0) {

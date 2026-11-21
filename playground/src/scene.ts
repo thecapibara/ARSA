@@ -79,6 +79,10 @@ export class LabScene {
   private readonly dynamiteCordMat: THREE.MeshStandardMaterial;
   private readonly staticBoxMat: THREE.MeshStandardMaterial;
   private readonly staticEdgeMat: THREE.LineBasicMaterial;
+  private readonly terrainGroup = new THREE.Group();
+  private readonly terrainMat: THREE.MeshStandardMaterial;
+  private readonly terrainWireMat: THREE.MeshBasicMaterial;
+  private terrainSurfaceMesh: THREE.Mesh | null = null;
 
   private readonly placePreviewGroup: THREE.Group;
   private readonly placePreviewRagdoll: THREE.Group;
@@ -185,11 +189,30 @@ export class LabScene {
       transparent: true,
       opacity: 0.55,
     });
+    this.terrainMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.78,
+      metalness: 0.12,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
+    });
+    this.terrainWireMat = new THREE.MeshBasicMaterial({
+      color: 0x64748b,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.18,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
 
     this.setupLighting();
     this.setupFloor();
 
     this.scene.add(this.staticGroup);
+    this.scene.add(this.terrainGroup);
     this.scene.add(this.dynamicGroup);
 
     // Multi-mode 3D Placement Ghost Preview
@@ -407,11 +430,7 @@ export class LabScene {
     this.cameraController.update(dt);
   }
 
-  /**
-   * Rebuilds static lab obstacles (stairs, drop platforms, walls) from `get_static_boxes()`.
-   * Expects 6 floats per box: `[cx, cy, cz, hx, hy, hz]`.
-   */
-  public syncStaticBoxes(boxes: Float32Array): void {
+  private clearStaticBoxes(): void {
     while (this.staticGroup.children.length > 0) {
       const child = this.staticGroup.children.pop()!;
       child.traverse((obj) => {
@@ -420,36 +439,188 @@ export class LabScene {
         }
       });
     }
+  }
 
+  private addStaticBoxMesh(
+    cx: number,
+    cy: number,
+    cz: number,
+    hx: number,
+    hy: number,
+    hz: number,
+    qx = 0,
+    qy = 0,
+    qz = 0,
+    qw = 1
+  ): void {
+    // Skip huge ground-plane slabs since our procedural grid floor sits at y = 0
+    if (hx >= 14 && hz >= 14 && cy + hy <= 0.05) {
+      return;
+    }
+
+    const geo = new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2);
+    const mesh = new THREE.Mesh(geo, this.staticBoxMat);
+    mesh.position.set(cx, cy, cz);
+    mesh.quaternion.set(qx, qy, qz, qw);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+
+    const edges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(geo),
+      this.staticEdgeMat
+    );
+    mesh.add(edges);
+
+    this.staticGroup.add(mesh);
+  }
+
+  /**
+   * Rebuilds static lab obstacles (stairs, drop platforms, walls) from `get_static_boxes()`.
+   * Expects 6 floats per box: `[cx, cy, cz, hx, hy, hz]`.
+   */
+  public syncStaticBoxes(boxes: Float32Array | number[]): void {
+    this.clearStaticBoxes();
     const count = Math.floor(boxes.length / 6);
     for (let i = 0; i < count; i++) {
       const o = i * 6;
-      const cx = boxes[o];
-      const cy = boxes[o + 1];
-      const cz = boxes[o + 2];
-      const hx = boxes[o + 3];
-      const hy = boxes[o + 4];
-      const hz = boxes[o + 5];
-
-      // Skip huge ground-plane slabs since our procedural grid floor sits at y = 0
-      if (hx >= 14 && hz >= 14 && cy + hy <= 0.05) {
-        continue;
-      }
-
-      const geo = new THREE.BoxGeometry(hx * 2, hy * 2, hz * 2);
-      const mesh = new THREE.Mesh(geo, this.staticBoxMat);
-      mesh.position.set(cx, cy, cz);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-
-      const edges = new THREE.LineSegments(
-        new THREE.EdgesGeometry(geo),
-        this.staticEdgeMat
+      this.addStaticBoxMesh(
+        boxes[o],
+        boxes[o + 1],
+        boxes[o + 2],
+        boxes[o + 3],
+        boxes[o + 4],
+        boxes[o + 5]
       );
-      mesh.add(edges);
-
-      this.staticGroup.add(mesh);
     }
+  }
+
+  /**
+   * Rebuilds static lab obstacles with full 3D orientation from `get_static_boxes_oriented()`.
+   * Expects 10 floats per box: `[cx, cy, cz, hx, hy, hz, qx, qy, qz, qw]`.
+   */
+  public syncStaticBoxesOriented(flat10: Float32Array | number[]): void {
+    this.clearStaticBoxes();
+    const count = Math.floor(flat10.length / 10);
+    for (let i = 0; i < count; i++) {
+      const o = i * 10;
+      this.addStaticBoxMesh(
+        flat10[o],
+        flat10[o + 1],
+        flat10[o + 2],
+        flat10[o + 3],
+        flat10[o + 4],
+        flat10[o + 5],
+        flat10[o + 6],
+        flat10[o + 7],
+        flat10[o + 8],
+        flat10[o + 9]
+      );
+    }
+  }
+
+  /**
+   * Builds or clears the heightfield terrain mesh from `get_heightfield_meta()`
+   * and `get_heightfield_heights()`.
+   */
+  public syncHeightfield(
+    meta: Float32Array | number[],
+    heights: Float32Array | number[]
+  ): void {
+    while (this.terrainGroup.children.length > 0) {
+      const child = this.terrainGroup.children.pop()!;
+      if (child instanceof THREE.Mesh && child === this.terrainSurfaceMesh) {
+        child.geometry.dispose();
+      }
+    }
+    this.terrainSurfaceMesh = null;
+
+    if (meta.length < 5 || heights.length === 0) {
+      return;
+    }
+
+    const originX = meta[0];
+    const originZ = meta[1];
+    const cellSize = meta[2];
+    const cols = Math.round(meta[3]);
+    const rows = Math.round(meta[4]);
+    if (cols < 2 || rows < 2 || heights.length < cols * rows) {
+      return;
+    }
+
+    const vertexCount = cols * rows;
+    const positions = new Float32Array(vertexCount * 3);
+    const colors = new Float32Array(vertexCount * 3);
+
+    let minH = Infinity;
+    let maxH = -Infinity;
+    for (let i = 0; i < vertexCount; i++) {
+      const h = heights[i];
+      if (h < minH) minH = h;
+      if (h > maxH) maxH = h;
+    }
+    const span = Math.max(0.05, maxH - minH);
+
+    // Subtle elevation tint: deep architectural slate in valleys -> cool slate-blue on peaks
+    const lowR = 0x22 / 255;
+    const lowG = 0x2c / 255;
+    const lowB = 0x3a / 255;
+    const highR = 0x3b / 255;
+    const highG = 0x4f / 255;
+    const highB = 0x6b / 255;
+
+    for (let r = 0; r < rows; r++) {
+      const z = originZ + r * cellSize;
+      for (let c = 0; c < cols; c++) {
+        const idx = r * cols + c;
+        const h = heights[idx];
+        const pOff = idx * 3;
+        positions[pOff] = originX + c * cellSize;
+        positions[pOff + 1] = h;
+        positions[pOff + 2] = z;
+
+        const t = (h - minH) / span;
+        colors[pOff] = lowR + (highR - lowR) * t;
+        colors[pOff + 1] = lowG + (highG - lowG) * t;
+        colors[pOff + 2] = lowB + (highB - lowB) * t;
+      }
+    }
+
+    const quadCount = (cols - 1) * (rows - 1);
+    const indices = new Uint32Array(quadCount * 6);
+    let ptr = 0;
+    for (let r = 0; r < rows - 1; r++) {
+      for (let c = 0; c < cols - 1; c++) {
+        const i00 = r * cols + c;
+        const i10 = i00 + 1;
+        const i01 = i00 + cols;
+        const i11 = i01 + 1;
+
+        indices[ptr++] = i00;
+        indices[ptr++] = i01;
+        indices[ptr++] = i10;
+
+        indices[ptr++] = i10;
+        indices[ptr++] = i01;
+        indices[ptr++] = i11;
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.setIndex(new THREE.BufferAttribute(indices, 1));
+    geo.computeVertexNormals();
+
+    const surface = new THREE.Mesh(geo, this.terrainMat);
+    surface.receiveShadow = true;
+    surface.castShadow = true;
+
+    const wire = new THREE.Mesh(geo, this.terrainWireMat);
+    wire.receiveShadow = false;
+    wire.castShadow = false;
+
+    this.terrainSurfaceMesh = surface;
+    this.terrainGroup.add(surface, wire);
   }
 
   /**
@@ -1200,6 +1371,9 @@ export class LabScene {
    */
   public raycastPlacementSurface(raycaster: THREE.Raycaster): THREE.Vector3 | null {
     const targets: THREE.Object3D[] = [...this.staticGroup.children];
+    if (this.terrainSurfaceMesh) {
+      targets.push(this.terrainSurfaceMesh);
+    }
     for (const child of this.dynamicGroup.children) {
       if (child.userData.isProp === true) {
         targets.push(child);
