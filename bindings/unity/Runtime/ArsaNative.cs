@@ -55,6 +55,28 @@ namespace Arsa
         Rifle = 2
     }
 
+    public enum ArsaRetargetPreset : uint
+    {
+        Native = 0,
+        MixamoTPose = 1,
+        UnityHumanoid = 2,
+        UnrealManny = 3
+    }
+
+    public enum ArsaCoordinateSpace : uint
+    {
+        RhYUp = 0,
+        UnityLhYUp = 1,
+        UnrealLhZUp = 2
+    }
+
+    public enum ArsaRagdollLod : uint
+    {
+        Full = 0,
+        Reduced = 1,
+        Sleep = 2
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct ArsaBodyProfile
     {
@@ -71,6 +93,13 @@ namespace Arsa
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    public struct ArsaBoneTransform
+    {
+        public float px, py, pz;
+        public float qx, qy, qz, qw;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     public struct ArsaJointMotorTarget
     {
         public float qx, qy, qz, qw;
@@ -79,6 +108,26 @@ namespace Arsa
         public float maxTorque;
         public float damageScale;
     }
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public delegate bool ArsaGroundHeightFn(
+        IntPtr userData,
+        float x,
+        float z,
+        float maxY,
+        out float outY,
+        IntPtr outNormal3);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    public delegate bool ArsaRaycastWorldFn(
+        IntPtr userData,
+        IntPtr origin3,
+        IntPtr dir3,
+        float maxDist,
+        out float outDist,
+        IntPtr outNormal3);
 
     /// <summary>
     /// Raw P/Invoke bindings to the native <c>arsa_c_abi</c> library and
@@ -90,6 +139,31 @@ namespace Arsa
         public const int TransformFloatsPerBody = 7;
         public const int TelemetryFloatsPerRagdoll = 16;
         public const int MotorTargetFloatsPerJoint = 8;
+        public const int JointCount = 16;
+        public const int HostTorqueFloatsPerRagdoll = JointCount * 3;
+
+        /// <summary>
+        /// Parent-to-child bone pairs matching <c>JOINT_BONE_PAIRS</c> in <c>arsa-core</c> (0..16).
+        /// </summary>
+        public static readonly (ArsaBoneId parent, ArsaBoneId child)[] JointBonePairs =
+        {
+            (ArsaBoneId.Pelvis, ArsaBoneId.LowerSpine),
+            (ArsaBoneId.LowerSpine, ArsaBoneId.Chest),
+            (ArsaBoneId.Chest, ArsaBoneId.Neck),
+            (ArsaBoneId.Neck, ArsaBoneId.Head),
+            (ArsaBoneId.Chest, ArsaBoneId.LeftUpperArm),
+            (ArsaBoneId.LeftUpperArm, ArsaBoneId.LeftForearm),
+            (ArsaBoneId.LeftForearm, ArsaBoneId.LeftHand),
+            (ArsaBoneId.Chest, ArsaBoneId.RightUpperArm),
+            (ArsaBoneId.RightUpperArm, ArsaBoneId.RightForearm),
+            (ArsaBoneId.RightForearm, ArsaBoneId.RightHand),
+            (ArsaBoneId.Pelvis, ArsaBoneId.LeftThigh),
+            (ArsaBoneId.LeftThigh, ArsaBoneId.LeftShin),
+            (ArsaBoneId.LeftShin, ArsaBoneId.LeftFoot),
+            (ArsaBoneId.Pelvis, ArsaBoneId.RightThigh),
+            (ArsaBoneId.RightThigh, ArsaBoneId.RightShin),
+            (ArsaBoneId.RightShin, ArsaBoneId.RightFoot)
+        };
 
         // ---------------------------------------------------------------------
         // Coordinate System Conversions (ARSA: RH Y-up -> Unity: LH Y-up, mirror X)
@@ -108,6 +182,11 @@ namespace Arsa
         public static Vector3 ToArsaVector(Vector3 unityVec)
         {
             return new Vector3(-unityVec.x, unityVec.y, unityVec.z);
+        }
+
+        public static Vector3 ToArsaAngularVector(Vector3 unityAngularVec)
+        {
+            return new Vector3(unityAngularVec.x, -unityAngularVec.y, -unityAngularVec.z);
         }
 
         public static Quaternion ToArsaRotation(Quaternion unityRot)
@@ -130,6 +209,9 @@ namespace Arsa
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void arsa_world_step(IntPtr handle, float dt);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_step_brain_only(IntPtr handle, float dt);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern UIntPtr arsa_world_spawn_ragdoll(IntPtr handle, float x, float y, float z);
@@ -162,9 +244,46 @@ namespace Arsa
             [MarshalAs(UnmanagedType.I1)] bool enabled);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_set_target_pose(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            [In] float[] quatsXyzw,
+            UIntPtr numJoints,
+            float blendWeight);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_clear_target_pose(
+            IntPtr handle,
+            UIntPtr ragdollId);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void arsa_world_set_earthquake(
             IntPtr handle,
             float magnitude);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_set_intoxication(
+            IntPtr handle,
+            float level);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_set_lod_focus(
+            IntPtr handle,
+            float x,
+            float y,
+            float z,
+            float reducedDist,
+            float sleepDist);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_clear_lod_focus(IntPtr handle);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint arsa_world_get_ragdoll_lod(
+            IntPtr handle,
+            UIntPtr ragdollId);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         [return: MarshalAs(UnmanagedType.I1)]
@@ -210,6 +329,45 @@ namespace Arsa
             float hz,
             float friction,
             float restitution);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern UIntPtr arsa_world_add_static_oriented_box(
+            IntPtr handle,
+            float cx,
+            float cy,
+            float cz,
+            float hx,
+            float hy,
+            float hz,
+            float qx,
+            float qy,
+            float qz,
+            float qw,
+            float friction,
+            float restitution);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_set_heightfield(
+            IntPtr handle,
+            float originX,
+            float originZ,
+            float cellSize,
+            UIntPtr cols,
+            UIntPtr rows,
+            [In] float[] heightsPtr,
+            float friction,
+            float restitution);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_clear_heightfield(IntPtr handle);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_set_query_callbacks(
+            IntPtr handle,
+            IntPtr userData,
+            ArsaGroundHeightFn groundHeightFn,
+            ArsaRaycastWorldFn raycastFn);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern int arsa_world_apply_shove(
@@ -279,5 +437,30 @@ namespace Arsa
             IntPtr handle,
             [Out] float[] outBuf,
             UIntPtr maxFloats);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_compute_host_joint_torques(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            uint coordSpace,
+            [Out] float[] outTorques48);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_get_retargeted_bones(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            uint preset,
+            [Out] ArsaBoneTransform[] outBones17);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_set_retargeted_target_pose(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            uint preset,
+            [In] float[] targetWorldQuats17x4,
+            float blendWeight);
     }
 }

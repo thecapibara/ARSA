@@ -30,6 +30,9 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace
 
+      - name: Run parallel feature tests
+        run: cargo test -p arsa-core --features parallel
+
       - name: Build C ABI release library
         run: cargo build --release -p arsa-c-abi
 
@@ -41,6 +44,55 @@ jobs:
             -Ltarget/release -larsa_c_abi -lm \
             -o /tmp/arsa_smoke_test
           LD_LIBRARY_PATH=target/release /tmp/arsa_smoke_test
+
+  native-sdk:
+    name: Native SDK (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build C ABI release library
+        run: cargo build --release -p arsa-c-abi
+
+      - name: Compile and run C ABI smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          gcc -Wall -Wextra -Werror \
+            -Ibindings/c-abi/include \
+            bindings/c-abi/examples/smoke_test.c \
+            -Ltarget/release -larsa_c_abi -lm \
+            -Wl,-rpath,"$(pwd)/target/release" \
+            -o /tmp/arsa_smoke_test
+          /tmp/arsa_smoke_test
+
+      - name: Compile and run C ABI smoke test (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          clang -Wall -Wextra -Werror \
+            -Ibindings/c-abi/include \
+            bindings/c-abi/examples/smoke_test.c \
+            -Ltarget/release -larsa_c_abi -lm \
+            -Wl,-rpath,"$(pwd)/target/release" \
+            -o /tmp/arsa_smoke_test
+          /tmp/arsa_smoke_test
+
+      - name: Verify C ABI DLL output (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "target/release/arsa_c_abi.dll")) {
+            Write-Error "Missing target/release/arsa_c_abi.dll"
+            exit 1
+          }
+          Get-Item "target/release/arsa_c_abi.dll"
 
   wasm-and-playground:
     name: WASM & Playground

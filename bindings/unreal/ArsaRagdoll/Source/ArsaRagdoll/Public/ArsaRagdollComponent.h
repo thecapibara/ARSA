@@ -4,7 +4,25 @@
 #include "Components/ActorComponent.h"
 #include "ArsaRagdollComponent.generated.h"
 
+class USkeletalMeshComponent;
 struct ArsaWorldHandle;
+struct ArsaBoneTransform;
+
+UENUM(BlueprintType)
+enum class EArsaSimulationMode : uint8
+{
+    Standalone = 0,
+    HostPhysics = 1
+};
+
+UENUM(BlueprintType)
+enum class EArsaRetargetPreset : uint8
+{
+    Native = 0,
+    MixamoTPose = 1,
+    UnityHumanoid = 2,
+    UnrealManny = 3
+};
 
 UENUM(BlueprintType)
 enum class EArsaBoneId : uint8
@@ -82,10 +100,30 @@ public:
     float MuscleRatio = 1.0f;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|Control")
+    EArsaSimulationMode SimulationMode = EArsaSimulationMode::Standalone;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|Control")
+    EArsaRetargetPreset RetargetPreset = EArsaRetargetPreset::UnrealManny;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|Control")
     bool bActiveBalance = true;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|Control")
     bool bAutoGetUp = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|Control", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+    float Intoxication = 0.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|World")
+    bool bEnableChaosWorldQueries = false;
+
+    /** Skeletal mesh driven in HostPhysics mode (auto-resolved from owner actor if unset). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|HostPhysics")
+    USkeletalMeshComponent* TargetSkeletalMesh = nullptr;
+
+    /** 17 skeletal mesh bone names in EArsaBoneId order (defaults to UE5 Manny SK_Manny names). */
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "ARSA|HostPhysics")
+    TArray<FName> BoneNames;
 
     /** Latest 17 bone transforms in Unreal Engine coordinates (relative to owner actor if spawned at origin). */
     UPROPERTY(BlueprintReadOnly, Category = "ARSA|Output")
@@ -117,6 +155,18 @@ public:
     /** Sets earthquake seismic magnitude (0.0 .. 9.0, 0.0 disables). */
     UFUNCTION(BlueprintCallable, Category = "ARSA|Control")
     void SetEarthquake(float Magnitude);
+
+    /** Sets procedural stagger/intoxication level (0.0 .. 1.0). */
+    UFUNCTION(BlueprintCallable, Category = "ARSA|Control")
+    void SetIntoxication(float Level);
+
+    /** Configures spatial crowd-scaling LOD focus point (Unreal world cm) and distance thresholds (meters). */
+    UFUNCTION(BlueprintCallable, Category = "ARSA|Control")
+    void SetLodFocus(FVector Focus, float ReducedDistMeters, float SleepDistMeters);
+
+    /** Clears the crowd-scaling LOD focus point and wakes all ragdolls back to Full LOD. */
+    UFUNCTION(BlueprintCallable, Category = "ARSA|Control")
+    void ClearLodFocus();
 
     /** Fires a ballistic weapon ray (in Unreal world space) into the ragdoll. Returns hit count. */
     UFUNCTION(BlueprintCallable, Category = "ARSA|Interaction")
@@ -153,6 +203,11 @@ public:
         return FVector(Z * 100.0f, -X * 100.0f, Y * 100.0f);
     }
 
+    static FORCEINLINE FVector ArsaToUnrealDirection(float X, float Y, float Z)
+    {
+        return FVector(Z, -X, Y);
+    }
+
     static FORCEINLINE FQuat ArsaToUnrealQuat(float QX, float QY, float QZ, float QW)
     {
         return FQuat(-QZ, QX, -QY, QW);
@@ -172,16 +227,36 @@ public:
         OutZ = Dir.X;
     }
 
+    static FORCEINLINE void UnrealToArsaQuat(const FQuat& Q, float& OutX, float& OutY, float& OutZ, float& OutW)
+    {
+        OutX = Q.Y;
+        OutY = -Q.Z;
+        OutZ = -Q.X;
+        OutW = Q.W;
+    }
+
+    static FORCEINLINE void UnrealToArsaAngular(const FVector& AngVelUE, float& OutX, float& OutY, float& OutZ)
+    {
+        OutX = AngVelUE.Y;
+        OutY = -AngVelUE.Z;
+        OutZ = -AngVelUE.X;
+    }
+
 private:
     ArsaWorldHandle* WorldHandle = nullptr;
-    TArray<float> TransformScratch;
+    size_t RagdollId = 0;
+    bool bChaosCallbacksRegistered = false;
+    TArray<ArsaBoneTransform> RetargetedScratch;
+    TArray<float> HostTorquesScratch;
     TArray<float> TelemetryScratch;
 
     EArsaBehaviorState CachedBehaviorState = EArsaBehaviorState::Balanced;
     float CachedHealth = 100.0f;
     EArsaWoundRegion CachedWoundRegion = EArsaWoundRegion::None;
 
+    void StepHostPhysics(float DeltaTime);
     void SyncOutputs();
+    void UpdateChaosQueryCallbacks();
     void ConvertUnrealRayToArsa(
         const FVector& OriginUnreal,
         const FVector& DirectionUnreal,
@@ -191,4 +266,20 @@ private:
         float& OutDx,
         float& OutDy,
         float& OutDz) const;
+
+    static bool ChaosGroundHeightCallback(
+        void* UserData,
+        float X,
+        float Z,
+        float MaxY,
+        float* OutY,
+        float OutNormal[3]);
+
+    static bool ChaosRaycastCallback(
+        void* UserData,
+        const float Origin[3],
+        const float Dir[3],
+        float MaxDist,
+        float* OutDist,
+        float OutNormal[3]);
 };
