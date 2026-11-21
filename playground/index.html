@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ARSA — Active Ragdoll Physics Test Chamber</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="viewport"></canvas>
+
+      <!-- Tactical HUD Overlay -->
+      <div class="hud-layer">
+        <!-- Top-left: Telemetry & Build Info -->
+        <aside class="hud-panel hud-telemetry" aria-label="Simulation Telemetry">
+          <div class="brand-header">
+            <span class="brand-badge">ARSA</span>
+            <span class="brand-version">v0.1 — Phase 1: XPBD Rig</span>
+            <span class="status-dot" id="status-dot" title="Simulation Running"></span>
+          </div>
+          <div class="telemetry-grid">
+            <div class="metric">
+              <span class="metric-label">FPS</span>
+              <span class="metric-value" id="stat-fps">--</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">BODIES</span>
+              <span class="metric-value" id="stat-bodies">0</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">RAGDOLLS</span>
+              <span class="metric-value" id="stat-ragdolls">0</span>
+            </div>
+            <div class="metric">
+              <span class="metric-label">PHYSICS</span>
+              <span class="metric-value" id="stat-substeps">240 Hz</span>
+            </div>
+          </div>
+          <div class="active-state-bar">
+            <span id="stat-tool-readout">TOOL: GRAB &amp; DRAG</span>
+            <span id="stat-scale-readout">1.00×</span>
+          </div>
+        </aside>
+
+        <!-- Top-right: Controls & Shortcut Legend -->
+        <aside class="hud-panel hud-legend" aria-label="Controls Reference">
+          <div class="legend-title">VIEWPORT &amp; KEYBINDS</div>
+          <ul class="legend-list">
+            <li><kbd>LMB</kbd><span>Use Active Tool</span></li>
+            <li><kbd>RMB</kbd><span>Orbit Camera</span></li>
+            <li><kbd>MMB</kbd><span>Pan Camera</span></li>
+            <li><kbd>Scroll</kbd><span>Zoom</span></li>
+            <li><kbd>1–4</kbd><span>Select Tool</span></li>
+            <li><kbd>Space</kbd><span>Pause / Resume</span></li>
+            <li><kbd>R</kbd><span>Reset Scenario</span></li>
+            <li><kbd>+</kbd><span>Spawn Ragdoll</span></li>
+          </ul>
+        </aside>
+
+        <!-- Center Precision Reticle (shown for projectile / impulse tools) -->
+        <div class="reticle" id="reticle" aria-hidden="true">
+          <span class="reticle-ring"></span>
+          <span class="reticle-dot"></span>
+        </div>
+
+        <!-- Bottom-center: Compact Tactical Toolbar -->
+        <nav class="hud-panel hud-dock" aria-label="Simulation Controls">
+          <div class="dock-group">
+            <span class="dock-label">TOOL</span>
+            <div class="btn-row" role="group" aria-label="Interaction Tools">
+              <button class="hud-btn active" data-tool="grab" title="Grab and drag rigid bodies [1]">
+                <span class="key-cap">1</span> Grab &amp; Drag
+              </button>
+              <button class="hud-btn" data-tool="box" title="Throw dynamic test crate [2]">
+                <span class="key-cap">2</span> Throw Box
+              </button>
+              <button class="hud-btn" data-tool="sphere" title="Throw heavy steel sphere [3]">
+                <span class="key-cap">3</span> Throw Heavy Sphere
+              </button>
+              <button class="hud-btn" data-tool="impulse" title="Apply directional ray impulse [4]">
+                <span class="key-cap">4</span> Impulse Push
+              </button>
+            </div>
+          </div>
+
+          <div class="dock-divider"></div>
+
+          <div class="dock-group">
+            <span class="dock-label">SCENARIO</span>
+            <div class="btn-row" role="group" aria-label="Test Scenarios">
+              <button class="hud-btn active" data-scenario="0">Flat Lab</button>
+              <button class="hud-btn" data-scenario="1">Staircase</button>
+              <button class="hud-btn" data-scenario="2">Drop Platform</button>
+            </div>
+          </div>
+
+          <div class="dock-divider"></div>
+
+          <div class="dock-group">
+            <span class="dock-label">TIME</span>
+            <div class="btn-row" role="group" aria-label="Time Scale">
+              <button class="hud-btn" data-timescale="0.1">0.1x</button>
+              <button class="hud-btn" data-timescale="0.25">0.25x</button>
+              <button class="hud-btn" data-timescale="0.5">0.5x</button>
+              <button class="hud-btn active" data-timescale="1">1.0x</button>
+              <button class="hud-btn" id="btn-pause" title="Toggle pause [Space]">
+                Pause <span class="key-cap">Space</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="dock-divider"></div>
+
+          <div class="dock-group">
+            <span class="dock-label">LAB</span>
+            <div class="btn-row" role="group" aria-label="Lab Actions">
+              <button class="hud-btn btn-accent" id="btn-spawn" title="Spawn another active ragdoll [+]">
+                Spawn Ragdoll <span class="key-cap">+</span>
+              </button>
+              <button class="hud-btn" id="btn-reset" title="Reset active scenario [R]">
+                Reset <span class="key-cap">R</span>
+              </button>
+            </div>
+          </div>
+        </nav>
+
+        <!-- Error / Loading Banner -->
+        <div class="hud-banner" id="loading-banner">
+          Initializing ARSA WASM Physics Kernel...
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

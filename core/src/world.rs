@@ -1,0 +1,523 @@
+//! Top-level simulation world, sub-stepped XPBD loop, raycasting, and grab constraint.
+
+use std::collections::HashSet;
+
+use glam::{Quat, Vec3};
+
+use crate::body::{ColliderShape, RigidBody};
+use crate::collision::{
+    detect_contacts, solve_contacts_position, solve_contacts_velocity, StaticBox,
+};
+use crate::joint::Joint;
+use crate::skeleton::{spawn_humanoid, RagdollInstance};
+
+/// Interactive mouse/pointer spring-damper grab constraint attached to a body point.
+#[derive(Debug, Clone)]
+pub struct GrabConstraint {
+    pub body_idx: usize,
+    pub local_point: Vec3,
+    pub target_world: Vec3,
+    pub stiffness: f32,
+    pub damping: f32,
+}
+
+/// Result of a raycast query against dynamic bodies in `ArsaWorld`.
+#[derive(Debug, Clone, Copy)]
+pub struct RaycastHit {
+    pub body_idx: usize,
+    pub distance: f32,
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub local_point: Vec3,
+}
+
+/// Main ARSA physics simulation world.
+#[derive(Debug, Clone)]
+pub struct ArsaWorld {
+    pub gravity: Vec3,
+    pub substeps: usize,
+    pub solver_iterations: usize,
+    pub bodies: Vec<RigidBody>,
+    pub joints: Vec<Joint>,
+    pub static_boxes: Vec<StaticBox>,
+    pub ragdolls: Vec<RagdollInstance>,
+    pub grab: Option<GrabConstraint>,
+    connected_pairs: HashSet<(usize, usize)>,
+}
+
+impl Default for ArsaWorld {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ArsaWorld {
+    /// Creates an empty `ArsaWorld` with standard Earth gravity (`-9.81` m/s^2),
+    /// 10 substeps, and 4 solver iterations.
+    pub fn new() -> Self {
+        Self {
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            substeps: 10,
+            solver_iterations: 4,
+            bodies: Vec::new(),
+            joints: Vec::new(),
+            static_boxes: Vec::new(),
+            ragdolls: Vec::new(),
+            grab: None,
+            connected_pairs: HashSet::new(),
+        }
+    }
+
+    /// Clears all bodies, joints, static obstacles, ragdolls, and active grabs.
+    pub fn clear(&mut self) {
+        self.bodies.clear();
+        self.joints.clear();
+        self.static_boxes.clear();
+        self.ragdolls.clear();
+        self.grab = None;
+        self.connected_pairs.clear();
+    }
+
+    /// Adds a static axis-aligned box obstacle and returns its index.
+    pub fn add_static_box(
+        &mut self,
+        center: Vec3,
+        half_extents: Vec3,
+        friction: f32,
+        restitution: f32,
+    ) -> usize {
+        let idx = self.static_boxes.len();
+        self.static_boxes.push(StaticBox {
+            center,
+            half_extents,
+            friction,
+            restitution,
+        });
+        idx
+    }
+
+    /// Spawns a 17-bone humanoid ragdoll at `origin` and returns its ragdoll ID.
+    pub fn spawn_ragdoll(&mut self, origin: Vec3) -> usize {
+        let id = self.ragdolls.len();
+        let start_joint = self.joints.len();
+        let instance = spawn_humanoid(&mut self.bodies, &mut self.joints, id, origin);
+        for j in &self.joints[start_joint..] {
+            let pair = canonical_pair(j.parent, j.child);
+            self.connected_pairs.insert(pair);
+        }
+        self.ragdolls.push(instance);
+        id
+    }
+
+    /// Spawns a dynamic box rigid body and returns its body index.
+    pub fn spawn_box(&mut self, pos: Vec3, half_extents: Vec3, mass: f32, vel: Vec3) -> usize {
+        let idx = self.bodies.len();
+        let mut rb = RigidBody::new(
+            pos,
+            Quat::IDENTITY,
+            mass,
+            ColliderShape::Box { half_extents },
+        );
+        rb.linear_velocity = vel;
+        self.bodies.push(rb);
+        idx
+    }
+
+    /// Spawns a dynamic sphere rigid body and returns its body index.
+    pub fn spawn_sphere(&mut self, pos: Vec3, radius: f32, mass: f32, vel: Vec3) -> usize {
+        let idx = self.bodies.len();
+        let mut rb = RigidBody::new(
+            pos,
+            Quat::IDENTITY,
+            mass,
+            ColliderShape::Sphere { radius },
+        );
+        rb.linear_velocity = vel;
+        self.bodies.push(rb);
+        idx
+    }
+
+    /// Advances the simulation by `dt` seconds using sub-stepped XPBD.
+    pub fn step(&mut self, dt: f32) {
+        if dt <= 0.0 || !dt.is_finite() {
+            return;
+        }
+        let clamped_dt = dt.min(0.05);
+        let substeps = self.substeps.max(1);
+        let sub_dt = clamped_dt / (substeps as f32);
+        let inv_dt = 1.0 / sub_dt;
+        let gravity_mag = self.gravity.length();
+
+        for _ in 0..substeps {
+            // 1. Save previous state & integrate external forces
+            for b in &mut self.bodies {
+                b.prev_position = b.position;
+                b.prev_orientation = b.orientation;
+                if b.inv_mass > 0.0 {
+                    b.linear_velocity += self.gravity * sub_dt;
+                }
+            }
+
+            // Apply interactive grab constraint spring-damper force
+            if let Some(grab) = &self.grab {
+                if let Some(body) = self.bodies.get_mut(grab.body_idx) {
+                    if body.inv_mass > 0.0 {
+                        let world_pt = body.world_point(grab.local_point);
+                        let vel_pt = body.velocity_at_point(world_pt);
+                        let mut force = (grab.target_world - world_pt) * grab.stiffness
+                            - vel_pt * grab.damping;
+                        let max_force = body.mass * 250.0;
+                        let f_len = force.length();
+                        if f_len > max_force && f_len > 1e-6 {
+                            force *= max_force / f_len;
+                        }
+                        let impulse = force * sub_dt;
+                        let r = world_pt - body.position;
+                        body.linear_velocity += impulse * body.inv_mass;
+                        let dw = body.inv_inertia_world_mul(r.cross(impulse));
+                        body.angular_velocity += dw;
+                    }
+                }
+            }
+
+            // Predict positions and orientations
+            for b in &mut self.bodies {
+                if b.inv_mass == 0.0 {
+                    continue;
+                }
+                b.position += b.linear_velocity * sub_dt;
+                let w = b.angular_velocity;
+                let dq = Quat::from_xyzw(w.x, w.y, w.z, 0.0) * b.orientation;
+                b.orientation = (b.orientation + dq * (0.5 * sub_dt)).normalize();
+            }
+
+            // 2. Collision detection
+            let mut contacts =
+                detect_contacts(&self.bodies, &self.static_boxes, &self.connected_pairs);
+
+            // 3. XPBD positional & angular constraint iterations
+            for _ in 0..self.solver_iterations.max(1) {
+                for j in &self.joints {
+                    j.solve_position(&mut self.bodies, sub_dt);
+                    j.solve_limits(&mut self.bodies, sub_dt);
+                }
+                solve_contacts_position(&mut self.bodies, &mut contacts);
+            }
+
+            // 4. Derive velocities from position & orientation changes
+            for b in &mut self.bodies {
+                if b.inv_mass == 0.0 {
+                    continue;
+                }
+                b.linear_velocity = (b.position - b.prev_position) * inv_dt;
+                let mut dq = b.orientation * b.prev_orientation.conjugate();
+                if dq.w < 0.0 {
+                    dq = -dq;
+                }
+                b.angular_velocity = Vec3::new(dq.x, dq.y, dq.z) * (2.0 * inv_dt);
+
+                // Subtle air drag for numerical cleanliness
+                let drag = (-0.15 * sub_dt).exp();
+                b.linear_velocity *= drag;
+                b.angular_velocity *= drag;
+            }
+
+            // 5. Velocity pass (joint damping + dynamic friction & restitution)
+            for j in &self.joints {
+                j.solve_velocity_damping(&mut self.bodies, sub_dt);
+            }
+            solve_contacts_velocity(&mut self.bodies, &contacts, sub_dt, gravity_mag);
+        }
+    }
+
+    /// Applies an instantaneous world-space `impulse` to `body_idx` at `world_point`.
+    pub fn apply_impulse_at_point(&mut self, body_idx: usize, impulse: Vec3, world_point: Vec3) {
+        let Some(body) = self.bodies.get_mut(body_idx) else {
+            return;
+        };
+        if body.inv_mass == 0.0 {
+            return;
+        }
+        let r = world_point - body.position;
+        body.linear_velocity += impulse * body.inv_mass;
+        let dw = body.inv_inertia_world_mul(r.cross(impulse));
+        body.angular_velocity += dw;
+    }
+
+    /// Raycasts against all dynamic bodies up to `max_dist` and returns the closest hit.
+    pub fn raycast(&self, origin: Vec3, dir: Vec3, max_dist: f32) -> Option<RaycastHit> {
+        let dir_len_sq = dir.length_squared();
+        if dir_len_sq < 1e-12 || max_dist <= 0.0 {
+            return None;
+        }
+        let d = dir / dir_len_sq.sqrt();
+
+        let mut best: Option<RaycastHit> = None;
+        let mut best_dist = max_dist;
+
+        for (idx, body) in self.bodies.iter().enumerate() {
+            let hit = match body.collider {
+                ColliderShape::Sphere { radius } => {
+                    ray_sphere(origin, d, body.position, radius, best_dist)
+                }
+                ColliderShape::Box { half_extents } => {
+                    ray_obb(origin, d, body.position, body.orientation, half_extents, best_dist)
+                }
+                ColliderShape::Capsule {
+                    radius,
+                    half_length,
+                } => ray_capsule(
+                    origin,
+                    d,
+                    body.position,
+                    body.orientation,
+                    radius,
+                    half_length,
+                    best_dist,
+                ),
+            };
+
+            if let Some((t, normal)) = hit {
+                best_dist = t;
+                let point = origin + d * t;
+                let local_point = body.orientation.conjugate() * (point - body.position);
+                best = Some(RaycastHit {
+                    body_idx: idx,
+                    distance: t,
+                    point,
+                    normal,
+                    local_point,
+                });
+            }
+        }
+
+        best
+    }
+
+    /// Begins grabbing `body_idx` at `local_point` toward `target`.
+    pub fn start_grab(&mut self, body_idx: usize, local_point: Vec3, target: Vec3) {
+        if let Some(body) = self.bodies.get(body_idx) {
+            let m = body.mass.max(1.0);
+            self.grab = Some(GrabConstraint {
+                body_idx,
+                local_point,
+                target_world: target,
+                stiffness: m * 220.0,
+                damping: m * 22.0,
+            });
+        }
+    }
+
+    /// Updates the active grab target position.
+    pub fn move_grab(&mut self, target: Vec3) {
+        if let Some(grab) = &mut self.grab {
+            grab.target_world = target;
+        }
+    }
+
+    /// Releases the active grab constraint.
+    pub fn end_grab(&mut self) {
+        self.grab = None;
+    }
+
+    /// Writes body transforms into `out` (7 floats per body: `px, py, pz, qx, qy, qz, qw`).
+    pub fn write_transforms(&self, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve(self.bodies.len() * 7);
+        for b in &self.bodies {
+            out.push(b.position.x);
+            out.push(b.position.y);
+            out.push(b.position.z);
+            out.push(b.orientation.x);
+            out.push(b.orientation.y);
+            out.push(b.orientation.z);
+            out.push(b.orientation.w);
+        }
+    }
+
+    /// Writes body descriptor metadata into `out` (6 floats per body:
+    /// `type, dim0, dim1, dim2, ragdoll_id, bone_id`).
+    /// - `type = 0.0` (Capsule): `dim0 = radius, dim1 = half_length, dim2 = 0.0`
+    /// - `type = 1.0` (Box): `dim0 = hx, dim1 = hy, dim2 = hz`
+    /// - `type = 2.0` (Sphere): `dim0 = radius, dim1 = 0.0, dim2 = 0.0`
+    pub fn write_body_meta(&self, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve(self.bodies.len() * 6);
+        for b in &self.bodies {
+            match b.collider {
+                ColliderShape::Capsule {
+                    radius,
+                    half_length,
+                } => {
+                    out.push(0.0);
+                    out.push(radius);
+                    out.push(half_length);
+                    out.push(0.0);
+                }
+                ColliderShape::Box { half_extents } => {
+                    out.push(1.0);
+                    out.push(half_extents.x);
+                    out.push(half_extents.y);
+                    out.push(half_extents.z);
+                }
+                ColliderShape::Sphere { radius } => {
+                    out.push(2.0);
+                    out.push(radius);
+                    out.push(0.0);
+                    out.push(0.0);
+                }
+            }
+            out.push(b.ragdoll_id.map(|id| id as f32).unwrap_or(-1.0));
+            out.push(b.bone_id.map(|id| id as f32).unwrap_or(-1.0));
+        }
+    }
+}
+
+#[inline]
+fn canonical_pair(a: usize, b: usize) -> (usize, usize) {
+    if a < b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn ray_sphere(
+    origin: Vec3,
+    dir: Vec3,
+    center: Vec3,
+    radius: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let oc = origin - center;
+    let b = oc.dot(dir);
+    let c = oc.length_squared() - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let sqrt_d = disc.sqrt();
+    let mut t = -b - sqrt_d;
+    if t < 0.0 {
+        t = -b + sqrt_d;
+    }
+    if t < 0.0 || t > max_dist {
+        return None;
+    }
+    let hit_pt = origin + dir * t;
+    let normal = (hit_pt - center).normalize_or_zero();
+    Some((t, normal))
+}
+
+fn ray_obb(
+    origin: Vec3,
+    dir: Vec3,
+    pos: Vec3,
+    rot: Quat,
+    half: Vec3,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let inv = rot.conjugate();
+    let ro = inv * (origin - pos);
+    let rd = inv * dir;
+
+    let mut tmin = 0.0_f32;
+    let mut tmax = max_dist;
+    let mut hit_normal = Vec3::ZERO;
+
+    for i in 0..3 {
+        let o = ro[i];
+        let d = rd[i];
+        let h = half[i];
+        if d.abs() < 1e-8 {
+            if o < -h || o > h {
+                return None;
+            }
+        } else {
+            let inv_d = 1.0 / d;
+            let mut t1 = (-h - o) * inv_d;
+            let mut t2 = (h - o) * inv_d;
+            let mut n_sign = -1.0_f32;
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+                n_sign = 1.0;
+            }
+            if t1 > tmin {
+                tmin = t1;
+                hit_normal = Vec3::ZERO;
+                hit_normal[i] = n_sign;
+            }
+            tmax = tmax.min(t2);
+            if tmin > tmax {
+                return None;
+            }
+        }
+    }
+
+    if tmin <= 0.0 || tmin > max_dist {
+        return None;
+    }
+    if hit_normal.length_squared() < 0.5 {
+        hit_normal = -rd.normalize_or_zero();
+    }
+    Some((tmin, (rot * hit_normal).normalize()))
+}
+
+fn ray_capsule(
+    origin: Vec3,
+    dir: Vec3,
+    pos: Vec3,
+    rot: Quat,
+    radius: f32,
+    half_length: f32,
+    max_dist: f32,
+) -> Option<(f32, Vec3)> {
+    let inv = rot.conjugate();
+    let ro = inv * (origin - pos);
+    let rd = inv * dir;
+
+    let mut best_t = max_dist;
+    let mut best_n = Vec3::ZERO;
+    let mut found = false;
+
+    // 1. Infinite Y-aligned cylinder x^2 + z^2 = r^2
+    let a = rd.x * rd.x + rd.z * rd.z;
+    if a > 1e-8 {
+        let b = ro.x * rd.x + ro.z * rd.z;
+        let c = ro.x * ro.x + ro.z * ro.z - radius * radius;
+        let disc = b * b - a * c;
+        if disc >= 0.0 {
+            let sqrt_d = disc.sqrt();
+            for t in [(-b - sqrt_d) / a, (-b + sqrt_d) / a] {
+                if t > 0.0 && t < best_t {
+                    let y = ro.y + rd.y * t;
+                    if y.abs() <= half_length {
+                        best_t = t;
+                        let hit = ro + rd * t;
+                        best_n = Vec3::new(hit.x, 0.0, hit.z).normalize();
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Endcap spheres at (0, +-half_length, 0)
+    for cap_y in [half_length, -half_length] {
+        let cap_center = Vec3::new(0.0, cap_y, 0.0);
+        if let Some((t, n_local)) = ray_sphere(ro, rd, cap_center, radius, best_t) {
+            if t < best_t {
+                best_t = t;
+                best_n = n_local;
+                found = true;
+            }
+        }
+    }
+
+    if found {
+        Some((best_t, (rot * best_n).normalize()))
+    } else {
+        None
+    }
+}

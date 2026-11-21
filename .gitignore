@@ -1,0 +1,28 @@
+# Rust / Cargo
+/target/
+**/target/
+Cargo.lock
+
+# WASM build outputs
+bindings/wasm/pkg/
+playground/src/wasm/
+
+# Node / Playground
+node_modules/
+playground/node_modules/
+playground/dist/
+playground/.vite/
+
+# Native build artifacts
+*.so
+*.dll
+*.dylib
+*.lib
+*.a
+*.pdb
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

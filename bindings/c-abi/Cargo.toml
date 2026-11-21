@@ -1,0 +1,12 @@
+[package]
+name = "arsa-c-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native C ABI bindings for ARSA (Unreal Engine, Unity, Godot)"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+arsa-core = { path = "../../core" }

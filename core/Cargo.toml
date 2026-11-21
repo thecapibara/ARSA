@@ -1,0 +1,9 @@
+[package]
+name = "arsa-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ARSA — Active Ragdoll Simulation Architecture core physics & behavioral engine"
+
+[dependencies]
+glam = { workspace = true }

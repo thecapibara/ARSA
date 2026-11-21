@@ -1,0 +1,13 @@
+[package]
+name = "arsa-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebAssembly bindings for ARSA Active Ragdoll Engine"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arsa-core = { path = "../../core" }
+wasm-bindgen = { workspace = true }
