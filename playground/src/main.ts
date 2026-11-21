@@ -1070,12 +1070,24 @@ class PlaygroundApp {
   }
 
   private bindKeyboardShortcuts(): void {
+    document
+      .querySelectorAll<HTMLInputElement>('input[type="range"]')
+      .forEach((slider) => {
+        const releaseFocus = () => slider.blur();
+        slider.addEventListener('change', releaseFocus);
+        slider.addEventListener('pointerup', releaseFocus);
+      });
+
     window.addEventListener('keydown', (e: KeyboardEvent) => {
       if (
-        e.target instanceof HTMLInputElement ||
+        (e.target instanceof HTMLInputElement && e.target.type !== 'range') ||
         e.target instanceof HTMLTextAreaElement
       ) {
         return;
+      }
+
+      if (e.target instanceof HTMLInputElement && e.target.type === 'range') {
+        e.target.blur();
       }
 
       this.lab.setFlyKey(e.code, true);
