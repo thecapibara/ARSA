@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-and-c-abi:
+    name: Rust & C ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+      - name: Build C ABI release library
+        run: cargo build --release -p arsa-c-abi
+
+      - name: Compile and run C ABI smoke test
+        run: |
+          gcc -Wall -Wextra -Werror \
+            -Ibindings/c-abi/include \
+            bindings/c-abi/examples/smoke_test.c \
+            -Ltarget/release -larsa_c_abi -lm \
+            -o /tmp/arsa_smoke_test
+          LD_LIBRARY_PATH=target/release /tmp/arsa_smoke_test
+
+  wasm-and-playground:
+    name: WASM & Playground
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM bindings
+        run: wasm-pack build bindings/wasm --target web --out-dir ../../playground/src/wasm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: playground/package-lock.json
+
+      - name: Install playground dependencies
+        working-directory: playground
+        run: npm ci
+
+      - name: Typecheck playground
+        working-directory: playground
+        run: npm run typecheck
+
+      - name: Build playground
+        working-directory: playground
+        run: npm run build

@@ -440,10 +440,25 @@ fn compute_humanoid_spec(profile: BodyProfile) -> HumanoidSpec {
         ]
     };
 
-    let [ls, le, lw] = arm_joint(1.0, BoneId::LeftUpperArm, BoneId::LeftForearm, BoneId::LeftHand);
-    let [rs, re, rw] = arm_joint(-1.0, BoneId::RightUpperArm, BoneId::RightForearm, BoneId::RightHand);
+    let [ls, le, lw] = arm_joint(
+        1.0,
+        BoneId::LeftUpperArm,
+        BoneId::LeftForearm,
+        BoneId::LeftHand,
+    );
+    let [rs, re, rw] = arm_joint(
+        -1.0,
+        BoneId::RightUpperArm,
+        BoneId::RightForearm,
+        BoneId::RightHand,
+    );
     let [lh, lk, la] = leg_joint(1.0, BoneId::LeftThigh, BoneId::LeftShin, BoneId::LeftFoot);
-    let [rh, rk, ra] = leg_joint(-1.0, BoneId::RightThigh, BoneId::RightShin, BoneId::RightFoot);
+    let [rh, rk, ra] = leg_joint(
+        -1.0,
+        BoneId::RightThigh,
+        BoneId::RightShin,
+        BoneId::RightFoot,
+    );
 
     let joints = [
         JointSpec {
@@ -594,8 +609,12 @@ pub fn update_humanoid_profile(
         ColliderShape::Box { half_extents } => half_extents.y,
         _ => 0.0,
     };
-    let old_lf_y = bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]].position.y;
-    let old_rf_y = bodies[ragdoll.body_indices[BoneId::RightFoot as usize]].position.y;
+    let old_lf_y = bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]]
+        .position
+        .y;
+    let old_rf_y = bodies[ragdoll.body_indices[BoneId::RightFoot as usize]]
+        .position
+        .y;
     let old_min_foot_bottom = old_lf_y.min(old_rf_y) - old_foot_hy;
 
     // 1. Update each of the 17 bodies' mass, inertia, and collider in place
@@ -646,8 +665,12 @@ pub fn update_humanoid_profile(
         ColliderShape::Box { half_extents } => half_extents.y,
         _ => 0.0,
     };
-    let new_lf_y = bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]].position.y;
-    let new_rf_y = bodies[ragdoll.body_indices[BoneId::RightFoot as usize]].position.y;
+    let new_lf_y = bodies[ragdoll.body_indices[BoneId::LeftFoot as usize]]
+        .position
+        .y;
+    let new_rf_y = bodies[ragdoll.body_indices[BoneId::RightFoot as usize]]
+        .position
+        .y;
     let new_min_foot_bottom = new_lf_y.min(new_rf_y) - new_foot_hy;
 
     let mut delta_y = old_min_foot_bottom - new_min_foot_bottom;

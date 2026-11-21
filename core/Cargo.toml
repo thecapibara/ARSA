@@ -7,3 +7,7 @@ description = "ARSA — Active Ragdoll Simulation Architecture core physics & be
 
 [dependencies]
 glam = { workspace = true }
+
+[[bench]]
+name = "simulation"
+harness = false

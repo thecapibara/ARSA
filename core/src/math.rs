@@ -70,8 +70,7 @@ pub fn inertia_capsule(mass: f32, radius: f32, half_length: f32) -> Vec3 {
 
     let r2 = r * r;
     let iy = 0.5 * m_cyl * r2 + 0.4 * m_sph * r2;
-    let ixz = m_cyl * (0.25 * r2 + (h * h) / 12.0)
-        + m_sph * (0.4 * r2 + hl * hl + 0.75 * hl * r);
+    let ixz = m_cyl * (0.25 * r2 + (h * h) / 12.0) + m_sph * (0.4 * r2 + hl * hl + 0.75 * hl * r);
 
     Vec3::new(ixz, iy, ixz)
 }

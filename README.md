@@ -15,6 +15,9 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/thecapibara/ARSA/actions/workflows/ci.yml">
+    <img src="https://github.com/thecapibara/ARSA/actions/workflows/ci.yml/badge.svg" alt="CI" />
+  </a>
   <img src="https://img.shields.io/badge/Core-Rust%20%2B%20XPBD-orange?style=flat-square" alt="Rust Core" />
   <img src="https://img.shields.io/badge/Web%20Showcase-Three.js%20%2B%20WASM-blue?style=flat-square" alt="Three.js + WASM" />
   <img src="https://img.shields.io/badge/Engines-UE5%20%7C%20Unity%20%7C%20C%20ABI-lightgrey?style=flat-square" alt="UE5 Unity C ABI" />

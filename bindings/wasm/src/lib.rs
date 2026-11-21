@@ -102,7 +102,8 @@ impl ArsaSim {
                 // Trip Test: standing mannequin + low obstacle box behind heels
                 self.world
                     .spawn_ragdoll_with_profile(Vec3::new(0.0, 0.02, 0.0), profile);
-                self.world.place_obstacle_box(0.0, -0.52, 0.45, 0.14, 0.16, 35.0);
+                self.world
+                    .place_obstacle_box(0.0, -0.52, 0.45, 0.14, 0.16, 35.0);
             }
             4 => {
                 // Wrecking Ball: standing mannequin + overhead gantry + tethered 85kg steel ball
@@ -259,12 +260,7 @@ impl ArsaSim {
 
     /// Updates the anthropometric body profile of all spawned ragdolls in-place
     /// without resetting the scene.
-    pub fn update_all_ragdolls_profile(
-        &mut self,
-        height_m: f32,
-        mass_kg: f32,
-        muscle_ratio: f32,
-    ) {
+    pub fn update_all_ragdolls_profile(&mut self, height_m: f32, mass_kg: f32, muscle_ratio: f32) {
         self.world.update_all_ragdolls_profile(BodyProfile {
             height_m,
             mass_kg,
@@ -472,12 +468,8 @@ impl ArsaSim {
         dy: f32,
         dz: f32,
     ) -> usize {
-        self.world.apply_force_wave(
-            Vec3::new(ox, oy, oz),
-            Vec3::new(dx, dy, dz),
-            3.2,
-            42.0,
-        )
+        self.world
+            .apply_force_wave(Vec3::new(ox, oy, oz), Vec3::new(dx, dy, dz), 3.2, 42.0)
     }
 
     /// Fires a ballistic weapon (`0 = Pistol`, `1 = Shotgun`, `2 = Rifle`) from `(ox, oy, oz)`

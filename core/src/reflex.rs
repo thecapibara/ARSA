@@ -74,13 +74,7 @@ impl Default for ReflexState {
 impl RagdollInstance {
     /// Registers a ballistic or traumatic hit on `bone` at `local_point`, updating per-bone
     /// damage, health, consciousness, and the active wound target.
-    pub fn register_hit(
-        &mut self,
-        bone: BoneId,
-        local_point: Vec3,
-        severity: f32,
-        damage: f32,
-    ) {
+    pub fn register_hit(&mut self, bone: BoneId, local_point: Vec3, severity: f32, damage: f32) {
         let sev = if severity.is_finite() {
             severity.max(0.0)
         } else {
@@ -209,8 +203,8 @@ pub fn apply_procedural_reflexes(
 
         if bodies[pelvis_idx].position.y > 1.45 * ragdoll.standing_pelvis_y {
             let wm = (ragdoll.reflex.writhe_time * 11.0).sin();
-            dir_l = (Quat::from_euler(EulerRot::XYZ, wm * 0.55, 0.0, 0.20) * dir_l)
-                .normalize_or_zero();
+            dir_l =
+                (Quat::from_euler(EulerRot::XYZ, wm * 0.55, 0.0, 0.20) * dir_l).normalize_or_zero();
             dir_r = (Quat::from_euler(EulerRot::XYZ, -wm * 0.55, 0.0, -0.20) * dir_r)
                 .normalize_or_zero();
         }

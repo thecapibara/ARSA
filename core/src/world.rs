@@ -250,12 +250,7 @@ impl ArsaWorld {
         hz: f32,
         mass: f32,
     ) -> usize {
-        self.spawn_box(
-            Vec3::new(x, hy, z),
-            Vec3::new(hx, hy, hz),
-            mass,
-            Vec3::ZERO,
-        )
+        self.spawn_box(Vec3::new(x, hy, z), Vec3::new(hx, hy, hz), mass, Vec3::ZERO)
     }
 
     /// Spawns a dynamic box rigid body and returns its body index.
@@ -275,12 +270,7 @@ impl ArsaWorld {
     /// Spawns a dynamic sphere rigid body and returns its body index.
     pub fn spawn_sphere(&mut self, pos: Vec3, radius: f32, mass: f32, vel: Vec3) -> usize {
         let idx = self.bodies.len();
-        let mut rb = RigidBody::new(
-            pos,
-            Quat::IDENTITY,
-            mass,
-            ColliderShape::Sphere { radius },
-        );
+        let mut rb = RigidBody::new(pos, Quat::IDENTITY, mass, ColliderShape::Sphere { radius });
         rb.linear_velocity = vel;
         self.bodies.push(rb);
         idx
@@ -351,7 +341,8 @@ impl ArsaWorld {
         const MAX_BLAST_DV: f32 = 24.0;
         let mut affected = 0usize;
         // Track the strongest blast hit per ragdoll so 17 bones don't multiply health damage 17x.
-        let mut ragdoll_best_hit: Vec<Option<(BoneId, Vec3, f32)>> = vec![None; self.ragdolls.len()];
+        let mut ragdoll_best_hit: Vec<Option<(BoneId, Vec3, f32)>> =
+            vec![None; self.ragdolls.len()];
 
         for b in &mut self.bodies {
             if b.inv_mass == 0.0 {
@@ -503,8 +494,8 @@ impl ArsaWorld {
                     if body.inv_mass > 0.0 {
                         let world_pt = body.world_point(grab.local_point);
                         let vel_pt = body.velocity_at_point(world_pt);
-                        let mut force = (grab.target_world - world_pt) * grab.stiffness
-                            - vel_pt * grab.damping;
+                        let mut force =
+                            (grab.target_world - world_pt) * grab.stiffness - vel_pt * grab.damping;
                         let max_force = body.mass * 250.0;
                         let f_len = force.length();
                         if f_len > max_force && f_len > 1e-6 {
@@ -738,12 +729,7 @@ impl ArsaWorld {
 
     /// Fires a ballistic weapon (`Pistol`, `Shotgun`, or `Rifle`) from `origin` along `dir`,
     /// applying physical impulses at exact hit points and registering ragdoll wounds/damage.
-    pub fn fire_weapon(
-        &mut self,
-        origin: Vec3,
-        dir: Vec3,
-        weapon: WeaponKind,
-    ) -> WeaponShotResult {
+    pub fn fire_weapon(&mut self, origin: Vec3, dir: Vec3, weapon: WeaponKind) -> WeaponShotResult {
         let dir_n = dir.normalize_or_zero();
         if dir_n.length_squared() < 1e-12 {
             return WeaponShotResult {
@@ -826,9 +812,14 @@ impl ArsaWorld {
                 ColliderShape::Sphere { radius } => {
                     ray_sphere(origin, d, body.position, radius, best_dist)
                 }
-                ColliderShape::Box { half_extents } => {
-                    ray_obb(origin, d, body.position, body.orientation, half_extents, best_dist)
-                }
+                ColliderShape::Box { half_extents } => ray_obb(
+                    origin,
+                    d,
+                    body.position,
+                    body.orientation,
+                    half_extents,
+                    best_dist,
+                ),
                 ColliderShape::Capsule {
                     radius,
                     half_length,
@@ -974,8 +965,16 @@ impl ArsaWorld {
             out.push(r.balance.com_pos.z);
             out.push(r.balance.capture_point.x);
             out.push(r.balance.capture_point.z);
-            out.push(if r.balance.left_foot_grounded { 1.0 } else { 0.0 });
-            out.push(if r.balance.right_foot_grounded { 1.0 } else { 0.0 });
+            out.push(if r.balance.left_foot_grounded {
+                1.0
+            } else {
+                0.0
+            });
+            out.push(if r.balance.right_foot_grounded {
+                1.0
+            } else {
+                0.0
+            });
             out.push(r.balance.state as u32 as f32);
             out.push(pelvis_pos.x);
             out.push(pelvis_pos.y);

@@ -1,92 +1,26 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import {
+  LabCameraController,
+  type CameraMode,
+  type CameraPresetName,
+} from './camera.ts';
+import {
+  LabEffectsManager,
+  type DynamiteFuseTip,
+  type ImpulseEffectVariant,
+} from './effects.ts';
 import { createBoneMesh, ShapeType } from './mannequin.ts';
 
-export type CameraMode = 'orbit' | 'fly';
-export type CameraPresetName = 'front' | 'back' | 'left' | 'right' | 'top';
-export type ImpulseEffectVariant = 'shove' | 'punch';
+export type { CameraMode, CameraPresetName, ImpulseEffectVariant };
 export type PlacerMode = 'ragdoll' | 'curb' | 'cube' | 'sphere' | 'dynamite';
 
 export const DYNAMITE_BONE_ID = 250;
-
-interface CameraPreset {
-  position: [number, number, number];
-  target: [number, number, number];
-}
-
-const CAMERA_PRESETS: Record<CameraPresetName, CameraPreset> = {
-  front: { position: [0, 1.35, 3.6], target: [0, 1.0, 0] },
-  back: { position: [0, 1.35, -3.6], target: [0, 1.0, 0] },
-  left: { position: [3.6, 1.35, 0], target: [0, 1.0, 0] },
-  right: { position: [-3.6, 1.35, 0], target: [0, 1.0, 0] },
-  top: { position: [0, 5.2, 0.25], target: [0, 0.5, 0] },
-};
-
-interface PresetTransition {
-  startPos: THREE.Vector3;
-  endPos: THREE.Vector3;
-  startTarget: THREE.Vector3;
-  endTarget: THREE.Vector3;
-  elapsed: number;
-  duration: number;
-}
 
 interface CachedBody {
   object: THREE.Object3D;
   signature: string;
   isProp: boolean;
-}
-
-interface ImpulseFx {
-  group: THREE.Group;
-  ring: THREE.Mesh;
-  flashCore?: THREE.Mesh;
-  age: number;
-  duration: number;
-  maxScale: number;
-}
-
-interface TracerFx {
-  beam: THREE.Mesh;
-  line: THREE.Line;
-  age: number;
-  duration: number;
-}
-
-interface SparkParticle {
-  mesh: THREE.Mesh;
-  velocity: THREE.Vector3;
-  age: number;
-  duration: number;
-}
-
-interface ForceWaveFx {
-  mesh: THREE.Mesh;
-  origin: THREE.Vector3;
-  dir: THREE.Vector3;
-  age: number;
-  delay: number;
-  duration: number;
-  travelDist: number;
-  startScale: number;
-  endScale: number;
-  maxOpacity: number;
-}
-
-interface ExplosionFx {
-  core: THREE.Mesh;
-  fireball: THREE.Mesh;
-  groundRing: THREE.Mesh;
-  age: number;
-  duration: number;
-  maxFireballRadius: number;
-  maxRingRadius: number;
-}
-
-interface DynamiteFuseTip {
-  core: THREE.Mesh;
-  halo: THREE.Mesh;
-  phase: number;
 }
 
 interface CableVisual {
@@ -119,14 +53,18 @@ export function getTelemetryStride(telemetry: Float32Array): number {
 
 /**
  * Manages the Three.js Aperture/Euphoria test-chamber scene, lighting,
- * procedural meter-grid floor, static obstacles, dynamic bodies, camera modes/presets,
- * place-box preview, impact FX, and debug telemetry overlay.
+ * procedural meter-grid floor, static obstacles, dynamic bodies, tether cables,
+ * placement ghost previews, and debug telemetry overlay, composing
+ * `LabCameraController` and `LabEffectsManager`.
  */
 export class LabScene {
   public readonly scene: THREE.Scene;
   public readonly camera: THREE.PerspectiveCamera;
   public readonly renderer: THREE.WebGLRenderer;
   public readonly controls: OrbitControls;
+
+  private readonly cameraController: LabCameraController;
+  private readonly effects: LabEffectsManager;
 
   private readonly staticGroup = new THREE.Group();
   private readonly dynamicGroup = new THREE.Group();
@@ -142,11 +80,6 @@ export class LabScene {
   private readonly staticBoxMat: THREE.MeshStandardMaterial;
   private readonly staticEdgeMat: THREE.LineBasicMaterial;
 
-  private readonly tetherLine: THREE.Line;
-  private readonly tetherStartDot: THREE.Mesh;
-  private readonly tetherEndDot: THREE.Mesh;
-  private readonly tetherPositions = new Float32Array(6);
-
   private readonly placePreviewGroup: THREE.Group;
   private readonly placePreviewRagdoll: THREE.Group;
   private readonly placePreviewCurb: THREE.Group;
@@ -154,21 +87,7 @@ export class LabScene {
   private readonly placePreviewSphere: THREE.Group;
   private readonly placePreviewDynamite: THREE.Group;
 
-  private readonly impulseEffects: ImpulseFx[] = [];
-  private readonly impulseRingGeo: THREE.RingGeometry;
-  private readonly punchCoreGeo: THREE.SphereGeometry;
-
-  private readonly tracerEffects: TracerFx[] = [];
-  private readonly sparkParticles: SparkParticle[] = [];
-  private readonly forceWaveEffects: ForceWaveFx[] = [];
-  private readonly explosionEffects: ExplosionFx[] = [];
   private readonly dynamiteFuseTips = new Set<DynamiteFuseTip>();
-  private readonly tracerBeamGeo: THREE.CylinderGeometry;
-  private readonly sparkGeo: THREE.BoxGeometry;
-  private readonly forceWaveRingGeo: THREE.RingGeometry;
-  private readonly explosionSphereGeo: THREE.SphereGeometry;
-  private readonly explosionGroundRingGeo: THREE.RingGeometry;
-  private fxTime = 0;
 
   // Steel Cable / Tether Renderer (Wrecking Ball)
   private readonly tetherCableGroup = new THREE.Group();
@@ -193,37 +112,14 @@ export class LabScene {
   private readonly woundCoreGeo: THREE.SphereGeometry;
   private readonly woundCoreMat: THREE.MeshBasicMaterial;
 
-  // Camera Mode & Preset Transition state
-  private cameraMode: CameraMode = 'orbit';
-  private presetTransition: PresetTransition | null = null;
-  private flyYaw = 0;
-  private flyPitch = 0;
-  private flySpeed = 4.0;
-  private readonly pressedFlyKeys = new Set<string>();
   private readonly tempVecA = new THREE.Vector3();
   private readonly tempVecB = new THREE.Vector3();
   private readonly tempVecC = new THREE.Vector3();
-  private readonly tempEuler = new THREE.Euler(0, 0, 0, 'YXZ');
-
-  // Earthquake camera shake state (applied transiently around render)
-  private earthquakeMagnitude = 0;
-  private simulationPaused = false;
-  private shakeTime = 0;
-  private readonly shakeOffset = new THREE.Vector3();
-  private readonly preShakeCamPos = new THREE.Vector3();
 
   constructor(canvas: HTMLCanvasElement) {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x14181f);
     this.scene.fog = new THREE.FogExp2(0x14181f, 0.02);
-
-    this.camera = new THREE.PerspectiveCamera(
-      48,
-      window.innerWidth / window.innerHeight,
-      0.08,
-      140
-    );
-    this.camera.position.set(3.2, 2.35, 4.6);
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -238,21 +134,10 @@ export class LabScene {
     this.renderer.toneMappingExposure = 1.06;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
-    this.controls = new OrbitControls(this.camera, canvas);
-    this.controls.target.set(0, 0.95, 0);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.07;
-    this.controls.minDistance = 1.0;
-    this.controls.maxDistance = 26;
-    this.controls.maxPolarAngle = Math.PI * 0.492;
-    // Leave Left Mouse Button free for physics interaction tools
-    this.controls.mouseButtons = {
-      LEFT: null as unknown as THREE.MOUSE,
-      MIDDLE: THREE.MOUSE.PAN,
-      RIGHT: THREE.MOUSE.ROTATE,
-    };
-    this.controls.update();
-    this.syncFlyAnglesFromCamera();
+    this.cameraController = new LabCameraController(canvas);
+    this.camera = this.cameraController.camera;
+    this.controls = this.cameraController.controls;
+    this.effects = new LabEffectsManager(this.scene, this.camera);
 
     this.propBoxMat = new THREE.MeshStandardMaterial({
       color: 0x364050,
@@ -307,31 +192,6 @@ export class LabScene {
     this.scene.add(this.staticGroup);
     this.scene.add(this.dynamicGroup);
 
-    // Grab tether line & endpoint markers
-    const tetherGeo = new THREE.BufferGeometry();
-    tetherGeo.setAttribute(
-      'position',
-      new THREE.BufferAttribute(this.tetherPositions, 3)
-    );
-    const tetherMat = new THREE.LineBasicMaterial({
-      color: 0xe8942c,
-      transparent: true,
-      opacity: 0.92,
-    });
-    this.tetherLine = new THREE.Line(tetherGeo, tetherMat);
-    this.tetherLine.frustumCulled = false;
-    this.tetherLine.visible = false;
-    this.scene.add(this.tetherLine);
-
-    const dotGeo = new THREE.SphereGeometry(0.032, 12, 10);
-    const dotMat = new THREE.MeshBasicMaterial({ color: 0xf5a623 });
-    this.tetherStartDot = new THREE.Mesh(dotGeo, dotMat);
-    this.tetherEndDot = new THREE.Mesh(dotGeo, dotMat);
-    this.tetherStartDot.visible = false;
-    this.tetherEndDot.visible = false;
-    this.scene.add(this.tetherStartDot);
-    this.scene.add(this.tetherEndDot);
-
     // Multi-mode 3D Placement Ghost Preview
     this.placePreviewGroup = new THREE.Group();
     this.placePreviewRagdoll = this.buildRagdollGhostPreview();
@@ -348,17 +208,6 @@ export class LabScene {
     );
     this.placePreviewGroup.visible = false;
     this.scene.add(this.placePreviewGroup);
-
-    this.impulseRingGeo = new THREE.RingGeometry(0.08, 0.13, 28);
-    this.punchCoreGeo = new THREE.SphereGeometry(0.075, 14, 12);
-
-    // Ballistic tracer & spark shared geometries (oriented along +Z for lookAt)
-    this.tracerBeamGeo = new THREE.CylinderGeometry(0.0035, 0.006, 1, 6);
-    this.tracerBeamGeo.rotateX(Math.PI / 2);
-    this.sparkGeo = new THREE.BoxGeometry(0.007, 0.007, 0.065);
-    this.forceWaveRingGeo = new THREE.RingGeometry(0.14, 0.195, 36);
-    this.explosionSphereGeo = new THREE.SphereGeometry(1, 22, 16);
-    this.explosionGroundRingGeo = new THREE.RingGeometry(0.68, 1.0, 40);
 
     // Steel cable & gunmetal anchor shackle shared assets
     this.cableGeo = new THREE.CylinderGeometry(0.015, 0.015, 1, 10);
@@ -512,45 +361,19 @@ export class LabScene {
   }
 
   public getCameraMode(): CameraMode {
-    return this.cameraMode;
+    return this.cameraController.getCameraMode();
   }
 
   public getFlySpeed(): number {
-    return this.flySpeed;
+    return this.cameraController.getFlySpeed();
   }
 
   public setCameraMode(mode: CameraMode): void {
-    if (this.cameraMode === mode) return;
-    this.cameraMode = mode;
-    this.clearFlyKeys();
-
-    if (mode === 'fly') {
-      this.controls.enabled = false;
-      this.syncFlyAnglesFromCamera();
-    } else {
-      // Place orbit target cleanly in front of current camera view
-      const forward = this.tempVecA
-        .set(0, 0, -1)
-        .applyQuaternion(this.camera.quaternion)
-        .normalize();
-      let targetDist = 3.0;
-      if (forward.y < -0.05) {
-        const planeDist = (0.9 - this.camera.position.y) / forward.y;
-        if (planeDist > 0.8 && planeDist < 8.0) {
-          targetDist = planeDist;
-        }
-      }
-      this.controls.target
-        .copy(this.camera.position)
-        .addScaledVector(forward, targetDist);
-      this.controls.enabled = true;
-      this.controls.update();
-    }
+    this.cameraController.setCameraMode(mode);
   }
 
   public applyCameraPreset(name: CameraPresetName): void {
-    const preset = CAMERA_PRESETS[name];
-    this.frameCamera(preset.position, preset.target);
+    this.cameraController.applyCameraPreset(name);
   }
 
   /**
@@ -561,132 +384,27 @@ export class LabScene {
     target: [number, number, number],
     duration = 0.35
   ): void {
-    let startTarget: THREE.Vector3;
-
-    if (this.cameraMode === 'orbit') {
-      startTarget = this.controls.target.clone();
-    } else {
-      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(
-        this.camera.quaternion
-      );
-      startTarget = this.camera.position.clone().addScaledVector(forward, 3.0);
-    }
-
-    this.presetTransition = {
-      startPos: this.camera.position.clone(),
-      endPos: new THREE.Vector3(...position),
-      startTarget,
-      endTarget: new THREE.Vector3(...target),
-      elapsed: 0,
-      duration,
-    };
+    this.cameraController.frameCamera(position, target, duration);
   }
 
   public rotateFlyCamera(dx: number, dy: number): void {
-    if (this.cameraMode !== 'fly') return;
-    this.presetTransition = null;
-    const sensitivity = 0.0032;
-    this.flyYaw -= dx * sensitivity;
-    this.flyPitch = THREE.MathUtils.clamp(
-      this.flyPitch - dy * sensitivity,
-      -Math.PI * 0.485,
-      Math.PI * 0.485
-    );
-    this.tempEuler.set(this.flyPitch, this.flyYaw, 0, 'YXZ');
-    this.camera.quaternion.setFromEuler(this.tempEuler);
+    this.cameraController.rotateFlyLook(dx, dy);
   }
 
   public adjustFlySpeed(wheelDeltaY: number): number {
-    const factor = wheelDeltaY < 0 ? 1.12 : 0.89;
-    this.flySpeed = THREE.MathUtils.clamp(this.flySpeed * factor, 0.8, 18.0);
-    return this.flySpeed;
+    return this.cameraController.adjustFlySpeed(wheelDeltaY);
   }
 
   public setFlyKey(code: string, pressed: boolean): void {
-    if (pressed) {
-      this.pressedFlyKeys.add(code);
-      if (this.cameraMode === 'fly') {
-        this.presetTransition = null;
-      }
-    } else {
-      this.pressedFlyKeys.delete(code);
-    }
+    this.cameraController.setFlyKey(code, pressed);
   }
 
   public clearFlyKeys(): void {
-    this.pressedFlyKeys.clear();
-  }
-
-  private syncFlyAnglesFromCamera(): void {
-    this.tempEuler.setFromQuaternion(this.camera.quaternion, 'YXZ');
-    this.flyPitch = this.tempEuler.x;
-    this.flyYaw = this.tempEuler.y;
+    this.cameraController.clearFlyKeys();
   }
 
   public updateCamera(dt: number): void {
-    if (this.presetTransition) {
-      const anim = this.presetTransition;
-      anim.elapsed += dt;
-      const rawT = Math.min(1, anim.elapsed / anim.duration);
-      const ease = 1 - Math.pow(1 - rawT, 3);
-
-      this.camera.position.lerpVectors(anim.startPos, anim.endPos, ease);
-      this.tempVecA.lerpVectors(anim.startTarget, anim.endTarget, ease);
-      this.controls.target.copy(this.tempVecA);
-      this.camera.lookAt(this.tempVecA);
-      this.syncFlyAnglesFromCamera();
-
-      if (rawT >= 1) {
-        this.presetTransition = null;
-        if (this.cameraMode === 'orbit') {
-          this.controls.update();
-        }
-      }
-      return;
-    }
-
-    if (this.cameraMode === 'fly') {
-      const forward = this.tempVecA
-        .set(0, 0, -1)
-        .applyQuaternion(this.camera.quaternion)
-        .normalize();
-      const right = this.tempVecB
-        .set(1, 0, 0)
-        .applyQuaternion(this.camera.quaternion)
-        .normalize();
-      const move = this.tempVecC.set(0, 0, 0);
-
-      if (this.pressedFlyKeys.has('KeyW') || this.pressedFlyKeys.has('ArrowUp')) {
-        move.add(forward);
-      }
-      if (this.pressedFlyKeys.has('KeyS') || this.pressedFlyKeys.has('ArrowDown')) {
-        move.sub(forward);
-      }
-      if (this.pressedFlyKeys.has('KeyD') || this.pressedFlyKeys.has('ArrowRight')) {
-        move.add(right);
-      }
-      if (this.pressedFlyKeys.has('KeyA') || this.pressedFlyKeys.has('ArrowLeft')) {
-        move.sub(right);
-      }
-      if (this.pressedFlyKeys.has('KeyE') || this.pressedFlyKeys.has('Space')) {
-        move.y += 1;
-      }
-      if (
-        this.pressedFlyKeys.has('KeyQ') ||
-        this.pressedFlyKeys.has('ShiftLeft') ||
-        this.pressedFlyKeys.has('ShiftRight')
-      ) {
-        move.y -= 1;
-      }
-
-      if (move.lengthSq() > 0) {
-        move.normalize().multiplyScalar(this.flySpeed * dt);
-        this.camera.position.add(move);
-        this.camera.position.y = Math.max(0.06, this.camera.position.y);
-      }
-    } else {
-      this.controls.update();
-    }
+    this.cameraController.update(dt);
   }
 
   /**
@@ -1506,31 +1224,7 @@ export class LabScene {
     bodyPos?: THREE.Vector3,
     targetPos?: THREE.Vector3
   ): void {
-    if (!active || !bodyPos || !targetPos) {
-      this.tetherLine.visible = false;
-      this.tetherStartDot.visible = false;
-      this.tetherEndDot.visible = false;
-      return;
-    }
-
-    this.tetherPositions[0] = bodyPos.x;
-    this.tetherPositions[1] = bodyPos.y;
-    this.tetherPositions[2] = bodyPos.z;
-    this.tetherPositions[3] = targetPos.x;
-    this.tetherPositions[4] = targetPos.y;
-    this.tetherPositions[5] = targetPos.z;
-
-    const attr = this.tetherLine.geometry.getAttribute(
-      'position'
-    ) as THREE.BufferAttribute;
-    attr.needsUpdate = true;
-
-    this.tetherStartDot.position.copy(bodyPos);
-    this.tetherEndDot.position.copy(targetPos);
-
-    this.tetherLine.visible = true;
-    this.tetherStartDot.visible = true;
-    this.tetherEndDot.visible = true;
+    this.effects.setGrabTether(active, bodyPos, targetPos);
   }
 
   /**
@@ -1540,42 +1234,7 @@ export class LabScene {
     pos: THREE.Vector3,
     variant: ImpulseEffectVariant = 'shove'
   ): void {
-    const isPunch = variant === 'punch';
-    const group = new THREE.Group();
-    group.position.copy(pos);
-    group.quaternion.copy(this.camera.quaternion);
-
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: isPunch ? 0xff4518 : 0xe8942c,
-      transparent: true,
-      opacity: isPunch ? 0.95 : 0.85,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-    const ring = new THREE.Mesh(this.impulseRingGeo, ringMat);
-    group.add(ring);
-
-    let flashCore: THREE.Mesh | undefined;
-    if (isPunch) {
-      const coreMat = new THREE.MeshBasicMaterial({
-        color: 0xff8a3d,
-        transparent: true,
-        opacity: 0.95,
-        depthWrite: false,
-      });
-      flashCore = new THREE.Mesh(this.punchCoreGeo, coreMat);
-      group.add(flashCore);
-    }
-
-    this.scene.add(group);
-    this.impulseEffects.push({
-      group,
-      ring,
-      flashCore,
-      age: 0,
-      duration: isPunch ? 0.18 : 0.34,
-      maxScale: isPunch ? 2.8 : 4.2,
-    });
+    this.effects.spawnImpulseEffect(pos, variant);
   }
 
   /**
@@ -1588,136 +1247,14 @@ export class LabScene {
     colorHex: number,
     spawnSparks = true
   ): void {
-    const dist = from.distanceTo(to);
-    if (dist > 0.005) {
-      const mid = this.tempVecA.addVectors(from, to).multiplyScalar(0.5);
-      const beamMat = new THREE.MeshBasicMaterial({
-        color: colorHex,
-        transparent: true,
-        opacity: 0.92,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const beam = new THREE.Mesh(this.tracerBeamGeo, beamMat);
-      beam.position.copy(mid);
-      beam.lookAt(to);
-      beam.scale.set(1, 1, dist);
-      this.scene.add(beam);
-
-      const lineGeo = new THREE.BufferGeometry().setFromPoints([from, to]);
-      const lineMat = new THREE.LineBasicMaterial({
-        color: 0xffffff,
-        transparent: true,
-        opacity: 0.95,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const line = new THREE.Line(lineGeo, lineMat);
-      this.scene.add(line);
-
-      this.tracerEffects.push({
-        beam,
-        line,
-        age: 0,
-        duration: 0.12,
-      });
-    }
-
-    if (spawnSparks) {
-      this.spawnSparkBurst(to, from, colorHex);
-    }
-  }
-
-  private spawnSparkBurst(
-    pos: THREE.Vector3,
-    origin: THREE.Vector3,
-    colorHex: number
-  ): void {
-    // Brief bright impact flash core
-    this.spawnImpulseEffect(pos, 'punch');
-
-    const incomingDir = this.tempVecB.subVectors(origin, pos);
-    if (incomingDir.lengthSq() > 1e-6) {
-      incomingDir.normalize();
-    } else {
-      incomingDir.set(0, 1, 0);
-    }
-
-    const sparkCount = 10;
-    for (let i = 0; i < sparkCount; i++) {
-      const sparkMat = new THREE.MeshBasicMaterial({
-        color: i % 2 === 0 ? 0xfff3b0 : colorHex,
-        transparent: true,
-        opacity: 0.98,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const mesh = new THREE.Mesh(this.sparkGeo, sparkMat);
-      mesh.position.copy(pos);
-
-      const velocity = new THREE.Vector3(
-        (Math.random() - 0.5) * 2.2 + incomingDir.x * 1.1,
-        Math.random() * 1.6 + 0.35 + incomingDir.y * 0.6,
-        (Math.random() - 0.5) * 2.2 + incomingDir.z * 1.1
-      )
-        .normalize()
-        .multiplyScalar(2.6 + Math.random() * 4.4);
-
-      const lookTarget = this.tempVecC.copy(pos).add(velocity);
-      mesh.lookAt(lookTarget);
-      this.scene.add(mesh);
-
-      this.sparkParticles.push({
-        mesh,
-        velocity,
-        age: 0,
-        duration: 0.16 + Math.random() * 0.12,
-      });
-    }
+    this.effects.spawnTracer(from, to, colorHex, spawnSparks);
   }
 
   /**
    * Spawns 3 expanding cyan-white concentric shockwave rings rushing along `dir`.
    */
   public spawnForceWaveEffect(origin: THREE.Vector3, dir: THREE.Vector3): void {
-    const normDir = dir.clone();
-    if (normDir.lengthSq() > 1e-6) {
-      normDir.normalize();
-    } else {
-      normDir.set(0, 0, -1);
-    }
-
-    const baseOrigin = origin.clone().addScaledVector(normDir, 0.75);
-    const ringColors = [0xe0faff, 0x67e8f9, 0x22d3ee];
-
-    for (let i = 0; i < 3; i++) {
-      const mat = new THREE.MeshBasicMaterial({
-        color: ringColors[i],
-        transparent: true,
-        opacity: 0,
-        side: THREE.DoubleSide,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const mesh = new THREE.Mesh(this.forceWaveRingGeo, mat);
-      mesh.position.copy(baseOrigin);
-      mesh.lookAt(this.tempVecA.copy(baseOrigin).add(normDir));
-      mesh.visible = false;
-      this.scene.add(mesh);
-
-      this.forceWaveEffects.push({
-        mesh,
-        origin: baseOrigin.clone(),
-        dir: normDir.clone(),
-        age: 0,
-        delay: i * 0.045,
-        duration: 0.36,
-        travelDist: 6.2 - i * 0.55,
-        startScale: 0.9 + i * 0.28,
-        endScale: 7.4 + i * 1.4,
-        maxOpacity: 0.95 - i * 0.14,
-      });
-    }
+    this.effects.spawnForceWaveEffect(origin, dir);
   }
 
   /**
@@ -1725,125 +1262,23 @@ export class LabScene {
    * shockwave ring, and 28 glowing ember/spark particles flying outward with gravity.
    */
   public spawnExplosionEffect(pos: THREE.Vector3, radius: number): void {
-    const maxFireballRadius = Math.max(0.85, radius * 0.56);
-    const maxRingRadius = Math.max(1.8, radius * 1.1);
-
-    const coreMat = new THREE.MeshBasicMaterial({
-      color: 0xfff5d6,
-      transparent: true,
-      opacity: 0.98,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    const core = new THREE.Mesh(this.explosionSphereGeo, coreMat);
-    core.position.copy(pos);
-    core.scale.setScalar(0.12);
-    this.scene.add(core);
-
-    const fireballMat = new THREE.MeshBasicMaterial({
-      color: 0xff6b1a,
-      transparent: true,
-      opacity: 0.9,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    const fireball = new THREE.Mesh(this.explosionSphereGeo, fireballMat);
-    fireball.position.copy(pos);
-    fireball.scale.setScalar(0.2);
-    this.scene.add(fireball);
-
-    const ringMat = new THREE.MeshBasicMaterial({
-      color: 0xffaa33,
-      transparent: true,
-      opacity: 0.92,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
-    const groundRing = new THREE.Mesh(this.explosionGroundRingGeo, ringMat);
-    groundRing.position.set(pos.x, 0.025, pos.z);
-    groundRing.rotation.x = -Math.PI / 2;
-    groundRing.scale.setScalar(0.25);
-    this.scene.add(groundRing);
-
-    this.explosionEffects.push({
-      core,
-      fireball,
-      groundRing,
-      age: 0,
-      duration: 0.45,
-      maxFireballRadius,
-      maxRingRadius,
-    });
-
-    // 28 glowing ember/spark particles flying outward with gravity
-    const emberColors = [0xfff3b0, 0xffa928, 0xff5418];
-    const emberCount = 28;
-    for (let i = 0; i < emberCount; i++) {
-      const emberMat = new THREE.MeshBasicMaterial({
-        color: emberColors[i % emberColors.length],
-        transparent: true,
-        opacity: 1.0,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      const mesh = new THREE.Mesh(this.sparkGeo, emberMat);
-      mesh.position.copy(pos);
-
-      const theta = Math.random() * Math.PI * 2;
-      const upBias = Math.random() * 0.95 - 0.1;
-      const speed = 3.8 + Math.random() * 6.8;
-      const velocity = new THREE.Vector3(
-        Math.cos(theta),
-        upBias,
-        Math.sin(theta)
-      )
-        .normalize()
-        .multiplyScalar(speed);
-
-      mesh.lookAt(this.tempVecA.copy(pos).add(velocity));
-      this.scene.add(mesh);
-
-      this.sparkParticles.push({
-        mesh,
-        velocity,
-        age: 0,
-        duration: 0.35 + Math.random() * 0.4,
-      });
-    }
+    this.effects.spawnExplosionEffect(pos, radius);
   }
 
   public setEarthquakeIntensity(magnitude: number): void {
-    this.earthquakeMagnitude = Math.max(0, Math.min(9, magnitude));
+    this.cameraController.setEarthquakeIntensity(magnitude);
   }
 
   public setSimulationPaused(paused: boolean): void {
-    this.simulationPaused = paused;
+    this.cameraController.setSimulationPaused(paused);
   }
 
   public updateEffects(dt: number): void {
-    this.fxTime += dt;
-    if (this.earthquakeMagnitude > 0.1 && !this.simulationPaused) {
-      this.shakeTime += dt;
-    }
-
-    // Flicker active dynamite fuse tips
-    for (const tip of this.dynamiteFuseTips) {
-      const flicker =
-        0.75 +
-        0.35 * Math.sin(this.fxTime * 38.0 + tip.phase) +
-        0.2 * Math.sin(this.fxTime * 71.0 + tip.phase * 1.7);
-      const coreScale = Math.max(0.65, flicker);
-      const haloScale = Math.max(0.75, flicker * 1.25);
-      tip.core.scale.setScalar(coreScale);
-      tip.halo.scale.setScalar(haloScale);
-      (tip.halo.material as THREE.MeshBasicMaterial).opacity =
-        THREE.MathUtils.clamp(0.45 + 0.4 * flicker, 0.3, 0.95);
-    }
+    this.effects.update(dt, this.dynamiteFuseTips);
 
     // Pulse & billboard active wound rings
     if (this.telemetryGroup.visible) {
-      const pulse = 1 + 0.24 * Math.sin(this.fxTime * 9.5);
+      const pulse = 1 + 0.24 * Math.sin(this.effects.getElapsedTime() * 9.5);
       for (const entry of this.telemetryPool) {
         if (entry.group.visible && entry.woundGroup.visible) {
           entry.woundGroup.quaternion.copy(this.camera.quaternion);
@@ -1851,166 +1286,23 @@ export class LabScene {
         }
       }
     }
-
-    for (let i = this.impulseEffects.length - 1; i >= 0; i--) {
-      const fx = this.impulseEffects[i];
-      fx.age += dt;
-      const t = Math.min(1, fx.age / fx.duration);
-      const scale = 1 + t * fx.maxScale;
-
-      fx.ring.scale.setScalar(scale);
-      fx.group.quaternion.copy(this.camera.quaternion);
-      (fx.ring.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.88;
-
-      if (fx.flashCore) {
-        fx.flashCore.scale.setScalar(1 + t * 0.9);
-        (fx.flashCore.material as THREE.MeshBasicMaterial).opacity =
-          Math.max(0, 1 - t * 1.45);
-      }
-
-      if (t >= 1) {
-        this.scene.remove(fx.group);
-        (fx.ring.material as THREE.Material).dispose();
-        if (fx.flashCore) {
-          (fx.flashCore.material as THREE.Material).dispose();
-        }
-        this.impulseEffects.splice(i, 1);
-      }
-    }
-
-    for (let i = this.tracerEffects.length - 1; i >= 0; i--) {
-      const fx = this.tracerEffects[i];
-      fx.age += dt;
-      const t = Math.min(1, fx.age / fx.duration);
-      const fade = 1 - t;
-      (fx.beam.material as THREE.MeshBasicMaterial).opacity = fade * 0.9;
-      (fx.line.material as THREE.LineBasicMaterial).opacity = fade * 0.95;
-
-      if (t >= 1) {
-        this.scene.remove(fx.beam);
-        this.scene.remove(fx.line);
-        (fx.beam.material as THREE.Material).dispose();
-        fx.line.geometry.dispose();
-        (fx.line.material as THREE.Material).dispose();
-        this.tracerEffects.splice(i, 1);
-      }
-    }
-
-    for (let i = this.sparkParticles.length - 1; i >= 0; i--) {
-      const spark = this.sparkParticles[i];
-      spark.age += dt;
-      const t = Math.min(1, spark.age / spark.duration);
-
-      spark.velocity.y -= 9.8 * dt;
-      spark.mesh.position.addScaledVector(spark.velocity, dt);
-      if (spark.mesh.position.y < 0.02) {
-        spark.mesh.position.y = 0.02;
-        spark.velocity.y = Math.abs(spark.velocity.y) * 0.4;
-      }
-      const lookTarget = this.tempVecA
-        .copy(spark.mesh.position)
-        .add(spark.velocity);
-      spark.mesh.lookAt(lookTarget);
-      spark.mesh.scale.set(1, 1, Math.max(0.25, 1 - t * 0.7));
-      (spark.mesh.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.98;
-
-      if (t >= 1) {
-        this.scene.remove(spark.mesh);
-        (spark.mesh.material as THREE.Material).dispose();
-        this.sparkParticles.splice(i, 1);
-      }
-    }
-
-    for (let i = this.explosionEffects.length - 1; i >= 0; i--) {
-      const fx = this.explosionEffects[i];
-      fx.age += dt;
-      const t = Math.min(1, fx.age / fx.duration);
-      const easeOut = 1 - Math.pow(1 - t, 3);
-
-      const coreScale = THREE.MathUtils.lerp(0.14, fx.maxFireballRadius * 0.72, easeOut);
-      fx.core.scale.setScalar(coreScale);
-      (fx.core.material as THREE.MeshBasicMaterial).opacity = Math.max(
-        0,
-        (1 - t * 1.35) * 0.98
-      );
-
-      const fireballScale = THREE.MathUtils.lerp(0.22, fx.maxFireballRadius, easeOut);
-      fx.fireball.scale.setScalar(fireballScale);
-      (fx.fireball.material as THREE.MeshBasicMaterial).opacity =
-        (1 - t) * (1 - t) * 0.9;
-
-      const ringScale = THREE.MathUtils.lerp(0.25, fx.maxRingRadius, easeOut);
-      fx.groundRing.scale.setScalar(ringScale);
-      (fx.groundRing.material as THREE.MeshBasicMaterial).opacity =
-        (1 - t) * 0.9;
-
-      if (t >= 1) {
-        this.scene.remove(fx.core);
-        this.scene.remove(fx.fireball);
-        this.scene.remove(fx.groundRing);
-        (fx.core.material as THREE.Material).dispose();
-        (fx.fireball.material as THREE.Material).dispose();
-        (fx.groundRing.material as THREE.Material).dispose();
-        this.explosionEffects.splice(i, 1);
-      }
-    }
-
-    for (let i = this.forceWaveEffects.length - 1; i >= 0; i--) {
-      const fx = this.forceWaveEffects[i];
-      fx.age += dt;
-      if (fx.age < fx.delay) {
-        fx.mesh.visible = false;
-        continue;
-      }
-
-      const t = Math.min(1, (fx.age - fx.delay) / fx.duration);
-      const easeOut = 1 - Math.pow(1 - t, 2.2);
-
-      fx.mesh.visible = true;
-      fx.mesh.position
-        .copy(fx.origin)
-        .addScaledVector(fx.dir, easeOut * fx.travelDist);
-      fx.mesh.scale.setScalar(
-        THREE.MathUtils.lerp(fx.startScale, fx.endScale, easeOut)
-      );
-      (fx.mesh.material as THREE.MeshBasicMaterial).opacity =
-        (1 - t) * (1 - t * 0.35) * fx.maxOpacity;
-
-      if (t >= 1) {
-        this.scene.remove(fx.mesh);
-        (fx.mesh.material as THREE.Material).dispose();
-        this.forceWaveEffects.splice(i, 1);
-      }
-    }
   }
 
   public resize(): void {
     const w = window.innerWidth;
     const h = window.innerHeight;
-    this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    this.cameraController.resize(w, h);
     this.renderer.setSize(w, h, false);
   }
 
   public render(): void {
-    if (this.earthquakeMagnitude > 0.1 && !this.simulationPaused) {
-      const t = this.shakeTime;
-      const amp =
-        0.0015 + Math.pow(this.earthquakeMagnitude / 9.0, 2.5) * 0.052;
-      this.shakeOffset.set(
-        (Math.sin(t * 47.3) * 0.6 + Math.sin(t * 73.1 + 1.3) * 0.4) * amp,
-        (Math.sin(t * 53.7 + 0.7) * 0.65 + Math.cos(t * 89.2) * 0.35) *
-          amp *
-          0.85,
-        (Math.cos(t * 41.9 + 2.1) * 0.6 + Math.sin(t * 67.4) * 0.4) * amp
-      );
-      this.preShakeCamPos.copy(this.camera.position);
-      this.camera.position.add(this.shakeOffset);
+    const didShake = this.cameraController.applyShakeBeforeRender();
+    try {
       this.renderer.render(this.scene, this.camera);
-      this.camera.position.copy(this.preShakeCamPos);
-      return;
+    } finally {
+      if (didShake) {
+        this.cameraController.restoreAfterRender();
+      }
     }
-
-    this.renderer.render(this.scene, this.camera);
   }
 }
