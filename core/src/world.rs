@@ -239,6 +239,42 @@ impl ArsaWorld {
         }
     }
 
+    /// Sets an external target pose (16 parent-relative joint orientations in `JointId` order)
+    /// blended onto the ragdoll's active motor targets with weight `blend_weight` (`0.0..=1.0`).
+    /// Returns `false` if `ragdoll_id` is out of range or any input quaternion / weight is non-finite or zero.
+    pub fn set_ragdoll_target_pose(
+        &mut self,
+        ragdoll_id: usize,
+        targets: &[Quat; 16],
+        blend_weight: f32,
+    ) -> bool {
+        if !blend_weight.is_finite() {
+            return false;
+        }
+        let Some(ragdoll) = self.ragdolls.get_mut(ragdoll_id) else {
+            return false;
+        };
+        let mut normalized = [Quat::IDENTITY; 16];
+        for (dst, &q) in normalized.iter_mut().zip(targets.iter()) {
+            if !q.is_finite() || q.length_squared() < 1e-12 {
+                return false;
+            }
+            *dst = q.normalize();
+        }
+        ragdoll.external_pose = Some((normalized, blend_weight.clamp(0.0, 1.0)));
+        true
+    }
+
+    /// Clears any external animation target pose on `ragdoll_id`.
+    /// Returns `false` if `ragdoll_id` is out of range.
+    pub fn clear_ragdoll_target_pose(&mut self, ragdoll_id: usize) -> bool {
+        let Some(ragdoll) = self.ragdolls.get_mut(ragdoll_id) else {
+            return false;
+        };
+        ragdoll.external_pose = None;
+        true
+    }
+
     /// Sets the earthquake seismic magnitude (`0.0..=9.0`, `0.0` disables).
     pub fn set_earthquake(&mut self, magnitude: f32) {
         self.earthquake_magnitude = if magnitude.is_finite() {

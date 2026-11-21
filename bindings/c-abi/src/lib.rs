@@ -202,6 +202,54 @@ pub unsafe extern "C" fn arsa_world_set_auto_get_up(handle: *mut ArsaWorldHandle
     }
 }
 
+/// Sets an external animation target pose (`num_joints == 16`, i.e. 64 floats in XYZW order)
+/// blended onto the ragdoll's joint motor targets by `blend_weight` (`0.0..=1.0`).
+/// Returns `false` if `handle` or `quats_xyzw` is null, `num_joints != 16`, `ragdoll_id` is invalid,
+/// or any quaternion / weight is non-finite or zero.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+/// If `quats_xyzw` is non-null, it must be valid for reads of `num_joints * 4` `f32` elements.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_target_pose(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    quats_xyzw: *const f32,
+    num_joints: usize,
+    blend_weight: f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    if quats_xyzw.is_null() || num_joints != 16 {
+        return false;
+    }
+    let raw = unsafe { std::slice::from_raw_parts(quats_xyzw, 16 * 4) };
+    let mut targets = [Quat::IDENTITY; 16];
+    for (i, dst) in targets.iter_mut().enumerate() {
+        let base = i * 4;
+        *dst = Quat::from_xyzw(raw[base], raw[base + 1], raw[base + 2], raw[base + 3]);
+    }
+    h.world
+        .set_ragdoll_target_pose(ragdoll_id, &targets, blend_weight)
+}
+
+/// Clears any external animation target pose on `ragdoll_id`.
+/// Returns `false` if `handle` is null or `ragdoll_id` is out of range.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_clear_target_pose(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    h.world.clear_ragdoll_target_pose(ragdoll_id)
+}
+
 /// Sets the earthquake seismic magnitude (`0.0..=9.0`, `0.0` disables).
 ///
 /// # Safety
@@ -584,6 +632,27 @@ mod tests {
             assert!((xforms[0] - 0.1).abs() < 1e-6);
             assert!((xforms[1] - 1.0).abs() < 1e-6);
             assert!((xforms[2] - 0.2).abs() < 1e-6);
+
+            let mut quats = [0.0_f32; 16 * 4];
+            for i in 0..16 {
+                quats[i * 4 + 3] = 1.0;
+            }
+            assert!(arsa_world_set_target_pose(
+                world,
+                rid,
+                quats.as_ptr(),
+                16,
+                0.75
+            ));
+            assert!(!arsa_world_set_target_pose(
+                world,
+                rid,
+                quats.as_ptr(),
+                15,
+                0.75
+            ));
+            assert!(arsa_world_clear_target_pose(world, rid));
+            assert!(!arsa_world_clear_target_pose(world, 999));
 
             arsa_world_clear(world);
             assert_eq!(arsa_world_body_count(world), 0);

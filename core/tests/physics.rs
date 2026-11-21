@@ -1356,3 +1356,78 @@ fn test_heavy_140kg_ragdoll_recovers_via_quadruped() {
         world.ragdolls[id].balance.recovery_stage
     );
 }
+
+#[test]
+fn test_external_target_pose_blending() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::ZERO);
+
+    // Step briefly to establish nominal standing motor targets
+    for _ in 0..10 {
+        world.step(1.0 / 60.0);
+    }
+
+    // Invalid inputs must fail cleanly without mutating state
+    let mut invalid_pose = [Quat::IDENTITY; 16];
+    invalid_pose[0] = Quat::from_xyzw(0.0, 0.0, 0.0, 0.0);
+    assert!(!world.set_ragdoll_target_pose(id, &invalid_pose, 1.0));
+    assert!(!world.set_ragdoll_target_pose(99, &[Quat::IDENTITY; 16], 1.0));
+    assert!(!world.set_ragdoll_target_pose(id, &[Quat::IDENTITY; 16], f32::NAN));
+    assert!(!world.clear_ragdoll_target_pose(99));
+
+    // Raise LeftShoulder forward & bend LeftElbow via external target pose at full weight
+    let mut pose = [Quat::IDENTITY; 16];
+    let shoulder_target = Quat::from_euler(glam::EulerRot::XYZ, -1.15, 0.0, 0.25);
+    let elbow_target = Quat::from_rotation_x(-1.45);
+    pose[JointId::LeftShoulder as usize] = shoulder_target;
+    pose[JointId::LeftElbow as usize] = elbow_target;
+
+    assert!(world.set_ragdoll_target_pose(id, &pose, 1.0));
+    for _ in 0..24 {
+        world.step(1.0 / 60.0);
+    }
+
+    let ls_j = &world.joints[world.ragdolls[id].joint_indices[JointId::LeftShoulder as usize]];
+    let le_j = &world.joints[world.ragdolls[id].joint_indices[JointId::LeftElbow as usize]];
+    let expected_ls =
+        (ls_j.frame_parent.conjugate() * shoulder_target * ls_j.frame_child).normalize();
+    let expected_le = (le_j.frame_parent.conjugate() * elbow_target * le_j.frame_child).normalize();
+
+    assert!(
+        ls_j.motor_target.dot(expected_ls).abs() > 0.999,
+        "LeftShoulder motor_target did not track external pose"
+    );
+    assert!(
+        le_j.motor_target.dot(expected_le).abs() > 0.999,
+        "LeftElbow motor_target did not track external pose"
+    );
+
+    let elbow_angle = le_j.measure_hinge_angle(&world.bodies);
+    assert!(
+        elbow_angle < -0.9,
+        "LeftElbow hinge did not flex toward external pose target: angle={elbow_angle}"
+    );
+
+    // Verify partial blend (0.5) interpolates between active balance target and external target
+    assert!(world.set_ragdoll_target_pose(id, &pose, 0.5));
+    world.step(1.0 / 60.0);
+    let le_j_half = &world.joints[world.ragdolls[id].joint_indices[JointId::LeftElbow as usize]];
+    let half_angle = 2.0 * le_j_half.motor_target.w.clamp(-1.0, 1.0).acos();
+    assert!(
+        half_angle > 0.4 && half_angle < 1.3,
+        "partial blend_weight=0.5 did not interpolate elbow motor_target: half_angle={half_angle}"
+    );
+
+    // Clear external pose and verify LeftElbow returns toward relaxed standing (-0.25 rad)
+    assert!(world.clear_ragdoll_target_pose(id));
+    for _ in 0..45 {
+        world.step(1.0 / 60.0);
+    }
+    let released_angle = world.joints
+        [world.ragdolls[id].joint_indices[JointId::LeftElbow as usize]]
+        .measure_hinge_angle(&world.bodies);
+    assert!(
+        released_angle > -0.55,
+        "LeftElbow did not release back toward standing pose after clear: angle={released_angle}"
+    );
+}

@@ -135,6 +135,7 @@ pub struct RagdollInstance {
     pub standing_pelvis_y: f32,
     pub balance: BalanceState,
     pub reflex: ReflexState,
+    pub external_pose: Option<([Quat; 16], f32)>,
 }
 
 /// Spawns a default 1.78m, 75.0 kg anthropometric humanoid ragdoll facing `+Z`
@@ -592,6 +593,7 @@ pub fn spawn_humanoid_with_profile(
         standing_pelvis_y: spec.standing_pelvis_y,
         balance: BalanceState::default(),
         reflex: ReflexState::default(),
+        external_pose: None,
     }
 }
 

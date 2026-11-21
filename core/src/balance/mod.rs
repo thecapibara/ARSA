@@ -65,6 +65,7 @@ pub struct BalanceState {
     pub recovery_stage: RecoveryStage,
     pub recovery_stage_time: f32,
     pub recovery_lead_left: bool,
+    pub recovery_start_poses: [Quat; 16],
     pub step_active: bool,
     pub swing_left: bool,
     pub step_phase: f32,
@@ -90,6 +91,7 @@ impl Default for BalanceState {
             recovery_stage: RecoveryStage::default(),
             recovery_stage_time: 0.0,
             recovery_lead_left: true,
+            recovery_start_poses: [Quat::IDENTITY; 16],
             step_active: false,
             swing_left: false,
             step_phase: 0.0,
@@ -271,6 +273,12 @@ pub fn update_ragdoll_balance(
                     foot_ground_y,
                     s_h,
                 );
+                for (i, &j_idx) in ragdoll.joint_indices.iter().enumerate() {
+                    let j = &joints[j_idx];
+                    ragdoll.balance.recovery_start_poses[i] =
+                        (bodies[j.parent].orientation.conjugate() * bodies[j.child].orientation)
+                            .normalize();
+                }
                 ragdoll.balance.recovery_strategy = strategy;
                 ragdoll.balance.recovery_lead_left = lead_left;
                 ragdoll.balance.recovery_stage = RecoveryStage::RollOrPrep;
@@ -735,6 +743,23 @@ pub fn update_ragdoll_balance(
             );
         }
         BehaviorState::Passive | BehaviorState::Unconscious => {}
+    }
+
+    // 8. Animation-to-physics blending: slerp active motor targets toward external pose if set
+    if let Some((ext_targets, weight)) = ragdoll.external_pose {
+        let w = weight.clamp(0.0, 1.0);
+        if w > 0.0 {
+            for (i, &j_idx) in ragdoll.joint_indices.iter().enumerate() {
+                let j = &mut joints[j_idx];
+                let frame_adjusted =
+                    (j.frame_parent.conjugate() * ext_targets[i] * j.frame_child).normalize();
+                j.motor_target = j
+                    .motor_target
+                    .normalize()
+                    .slerp(frame_adjusted, w)
+                    .normalize();
+            }
+        }
     }
 }
 

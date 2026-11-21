@@ -149,6 +149,22 @@ void arsa_world_set_active(ArsaWorldHandle *handle, bool enabled);
 /** Enables or disables automatic procedural get-up from Downed for all ragdolls in the world. */
 void arsa_world_set_auto_get_up(ArsaWorldHandle *handle, bool enabled);
 
+/**
+ * Sets an external animation target pose (num_joints == 16, i.e. 64 floats in XYZW order)
+ * blended onto the ragdoll's joint motor targets by blend_weight (0.0 .. 1.0).
+ * Returns false if handle or quats_xyzw is NULL, num_joints != 16, ragdoll_id is invalid,
+ * or any quaternion/weight is non-finite or zero.
+ */
+bool arsa_world_set_target_pose(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    const float *quats_xyzw,
+    size_t num_joints,
+    float blend_weight);
+
+/** Clears any external animation target pose on ragdoll_id. Returns false on NULL or invalid ID. */
+bool arsa_world_clear_target_pose(ArsaWorldHandle *handle, size_t ragdoll_id);
+
 /** Sets the earthquake seismic magnitude (0.0 .. 9.0, 0.0 disables). */
 void arsa_world_set_earthquake(ArsaWorldHandle *handle, float magnitude);
 
