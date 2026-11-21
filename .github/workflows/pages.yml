@@ -30,7 +30,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        run: curl -sSf https://drager.github.io/wasm-pack/installer/init.sh | sh
 
       - name: Build ARSA WebAssembly package
         run: wasm-pack build bindings/wasm --target web --out-dir ../../playground/src/wasm

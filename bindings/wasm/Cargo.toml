@@ -1,8 +1,8 @@
 [package]
 name = "arsa-wasm"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
 description = "WebAssembly bindings for ARSA Active Ragdoll Engine"
 
 [lib]
