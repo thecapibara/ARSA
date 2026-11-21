@@ -328,6 +328,64 @@ impl Joint {
         bodies[self.parent].angular_velocity += dv_a;
         bodies[self.child].angular_velocity += dv_b;
     }
+
+    /// Applies a torque-limited PD muscle motor driving the child joint frame toward `motor_target`.
+    pub fn apply_muscle_motor(&self, bodies: &mut [RigidBody], dt: f32) {
+        if self.motor_stiffness <= 0.0
+            || self.max_torque <= 0.0
+            || self.damage_scale <= 0.0
+            || dt <= 0.0
+        {
+            return;
+        }
+
+        let q_p = bodies[self.parent].orientation * self.frame_parent;
+        let q_c = bodies[self.child].orientation * self.frame_child;
+        let q_des = (q_p * self.motor_target).normalize();
+
+        let mut q_err = q_des * q_c.conjugate();
+        if q_err.w < 0.0 {
+            q_err = -q_err;
+        }
+
+        let angle = 2.0 * q_err.w.clamp(-1.0, 1.0).acos();
+        let err_vec = if angle >= 1e-5 {
+            let axis = Vec3::new(q_err.x, q_err.y, q_err.z).normalize_or_zero();
+            axis * angle
+        } else {
+            Vec3::ZERO
+        };
+
+        let rel_omega = bodies[self.child].angular_velocity - bodies[self.parent].angular_velocity;
+        let raw_tau =
+            (err_vec * self.motor_stiffness - rel_omega * self.motor_damping) * self.damage_scale;
+
+        let raw_mag = raw_tau.length();
+        if raw_mag < 1e-9 {
+            return;
+        }
+        let dir = raw_tau / raw_mag;
+        let max_t = self.max_torque * self.damage_scale;
+        let mut tau_mag = raw_mag.min(max_t);
+
+        let w_ang = bodies[self.parent].generalized_angular_inv_mass(dir)
+            + bodies[self.child].generalized_angular_inv_mass(dir);
+        if w_ang < 1e-12 {
+            return;
+        }
+
+        // Stability guard: prevent light bones (Hand/Foot) from exceeding 8.0 rad/s per substep.
+        let delta_omega = tau_mag * dt * w_ang;
+        if delta_omega > 8.0 {
+            tau_mag = 8.0 / (dt * w_ang);
+        }
+
+        let impulse = dir * (tau_mag * dt);
+        let dv_p = bodies[self.parent].inv_inertia_world_mul(-impulse);
+        let dv_c = bodies[self.child].inv_inertia_world_mul(impulse);
+        bodies[self.parent].angular_velocity += dv_p;
+        bodies[self.child].angular_velocity += dv_c;
+    }
 }
 
 /// Applies an XPBD angular correction rotating `child` by `+delta_angle` relative to `parent`

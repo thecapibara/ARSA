@@ -1,5 +1,6 @@
 //! ARSA — Active Ragdoll Simulation Architecture core physics engine.
 
+pub mod balance;
 pub mod body;
 pub mod collision;
 pub mod joint;
@@ -9,11 +10,14 @@ pub mod world;
 
 pub use glam;
 
+pub use balance::{update_ragdoll_balance, BalanceState, BehaviorState};
 pub use body::{ColliderShape, RigidBody};
 pub use collision::{Contact, StaticBox};
 pub use joint::{Joint, JointKind};
 pub use math::{inertia_box, inertia_capsule, inertia_sphere, swing_twist_decomposition};
-pub use skeleton::{spawn_humanoid, BoneId, RagdollInstance};
+pub use skeleton::{
+    spawn_humanoid, spawn_humanoid_with_profile, BodyProfile, BoneId, JointId, RagdollInstance,
+};
 pub use world::{ArsaWorld, GrabConstraint, RaycastHit};
 
 #[cfg(test)]
@@ -60,6 +64,7 @@ mod tests {
     fn test_humanoid_drop_stability_and_joint_limits() {
         let mut world = ArsaWorld::new();
         let ragdoll_id = world.spawn_ragdoll(Vec3::new(0.0, 0.2, 0.0));
+        world.set_ragdoll_active(ragdoll_id, false);
         assert_eq!(world.bodies.len(), 17);
         assert_eq!(world.joints.len(), 16);
 
@@ -161,5 +166,131 @@ mod tests {
             .expect("ray should hit ragdoll chest");
         assert_eq!(torso_hit.body_idx, chest_idx);
         assert!(torso_hit.distance > 3.5 && torso_hit.distance < 4.0);
+    }
+
+    #[test]
+    fn test_active_standing_balance_standard_and_heavy() {
+        let mut world = ArsaWorld::new();
+        let profiles = [
+            BodyProfile {
+                height_m: 1.78,
+                mass_kg: 75.0,
+                muscle_ratio: 1.0,
+            },
+            BodyProfile {
+                height_m: 2.17,
+                mass_kg: 135.0,
+                muscle_ratio: 1.0,
+            },
+            BodyProfile {
+                height_m: 1.65,
+                mass_kg: 60.0,
+                muscle_ratio: 1.0,
+            },
+        ];
+
+        let ids: Vec<usize> = profiles
+            .iter()
+            .enumerate()
+            .map(|(i, &p)| {
+                let x = (i as f32 - 1.0) * 2.5;
+                world.spawn_ragdoll_with_profile(Vec3::new(x, 0.0, 0.0), p)
+            })
+            .collect();
+
+        // Step 2.0 seconds (120 frames at 1/60s)
+        for _ in 0..120 {
+            world.step(1.0 / 60.0);
+        }
+
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf"
+            );
+        }
+
+        for &id in &ids {
+            let r = &world.ragdolls[id];
+            let pelvis = &world.bodies[r.body_indices[BoneId::Pelvis as usize]];
+            assert!(
+                pelvis.position.y > 0.72 * r.standing_pelvis_y,
+                "ragdoll {id} ({:?}) slumped: pelvis.y={}, threshold={}",
+                r.profile,
+                pelvis.position.y,
+                0.72 * r.standing_pelvis_y
+            );
+            assert_eq!(
+                r.balance.state,
+                BehaviorState::Balanced,
+                "ragdoll {id} ({:?}) expected Balanced, got {:?}",
+                r.profile,
+                r.balance.state
+            );
+        }
+    }
+
+    #[test]
+    fn test_shove_triggers_stumble_or_fall() {
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::new(0.0, 0.0, 0.0));
+
+        // Let settle 0.5 seconds
+        for _ in 0..30 {
+            world.step(1.0 / 60.0);
+        }
+
+        let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+        let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+        let initial_pos = world.bodies[pelvis_idx].position;
+
+        // Strong backward shove to the chest
+        let chest_pos = world.bodies[chest_idx].position;
+        let hit = world
+            .apply_shove(
+                chest_pos + Vec3::new(0.0, 0.0, 2.0),
+                Vec3::new(0.0, 0.0, -1.0),
+                320.0,
+            )
+            .expect("shove should hit chest");
+        assert_eq!(hit.body_idx, chest_idx);
+
+        let mut saw_reaction = false;
+        for _ in 0..90 {
+            world.step(1.0 / 60.0);
+            let st = world.ragdolls[id].balance.state;
+            if matches!(
+                st,
+                BehaviorState::Stumbling | BehaviorState::Falling | BehaviorState::Downed
+            ) {
+                saw_reaction = true;
+            }
+        }
+
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf after shove"
+            );
+        }
+
+        let final_pos = world.bodies[pelvis_idx].position;
+        let horiz_disp = Vec3::new(
+            final_pos.x - initial_pos.x,
+            0.0,
+            final_pos.z - initial_pos.z,
+        )
+        .length();
+
+        assert!(
+            saw_reaction && horiz_disp > 0.25,
+            "shove did not trigger expected displacement/reaction: saw_reaction={saw_reaction}, horiz_disp={horiz_disp}"
+        );
     }
 }

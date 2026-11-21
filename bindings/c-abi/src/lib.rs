@@ -1,7 +1,7 @@
 //! Native C ABI bindings (`arsa-c-abi`) for Unreal Engine, Unity, and Godot.
 
 use arsa_core::glam::Vec3;
-use arsa_core::ArsaWorld;
+use arsa_core::{ArsaWorld, BodyProfile};
 
 /// Opaque handle owning an `ArsaWorld` simulation instance.
 pub struct ArsaWorldHandle {
@@ -55,6 +55,45 @@ pub unsafe extern "C" fn arsa_world_spawn_ragdoll(
         handle.world.spawn_ragdoll(Vec3::new(x, y, z))
     } else {
         usize::MAX
+    }
+}
+
+/// Spawns a procedurally scaled humanoid ragdoll at `(x, y, z)` and returns its ragdoll ID (`usize::MAX` on null).
+///
+/// # Safety
+/// `world` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_spawn_ragdoll_profile(
+    world: *mut ArsaWorldHandle,
+    x: f32,
+    y: f32,
+    z: f32,
+    height_m: f32,
+    mass_kg: f32,
+    muscle_ratio: f32,
+) -> usize {
+    if let Some(handle) = unsafe { world.as_mut() } {
+        handle.world.spawn_ragdoll_with_profile(
+            Vec3::new(x, y, z),
+            BodyProfile {
+                height_m,
+                mass_kg,
+                muscle_ratio,
+            },
+        )
+    } else {
+        usize::MAX
+    }
+}
+
+/// Enables or disables active balance & muscle motors for all ragdolls in the world.
+///
+/// # Safety
+/// `world` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_active(world: *mut ArsaWorldHandle, enabled: bool) {
+    if let Some(handle) = unsafe { world.as_mut() } {
+        handle.world.set_all_ragdolls_active(enabled);
     }
 }
 

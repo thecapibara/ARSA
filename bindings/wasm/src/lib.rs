@@ -1,7 +1,7 @@
 //! WebAssembly bindings (`arsa-wasm`) for the ARSA Active Ragdoll Engine.
 
 use arsa_core::glam::Vec3;
-use arsa_core::ArsaWorld;
+use arsa_core::{ArsaWorld, BodyProfile};
 use wasm_bindgen::prelude::*;
 
 /// WebAssembly simulation wrapper around `ArsaWorld`.
@@ -28,12 +28,33 @@ impl ArsaSim {
         sim
     }
 
-    /// Resets the world to a built-in test scenario:
+    /// Resets the world to a built-in test scenario with default body profile:
     /// - `0`: Flat Lab
     /// - `1`: Staircase Test
     /// - `2`: Drop Platform
+    /// - `3`: Trip Test
     pub fn reset_lab_scene(&mut self, scenario: u32) {
+        self.reset_lab_scene_with_profile(scenario, 1.78, 75.0, 1.0);
+    }
+
+    /// Resets the world to a built-in test scenario using a custom anthropometric `BodyProfile`:
+    /// - `0`: Flat Lab
+    /// - `1`: Staircase Test
+    /// - `2`: Drop Platform
+    /// - `3`: Trip Test (standing mannequin + low obstacle box behind heels)
+    pub fn reset_lab_scene_with_profile(
+        &mut self,
+        scenario: u32,
+        height_m: f32,
+        mass_kg: f32,
+        muscle_ratio: f32,
+    ) {
         self.world.clear();
+        let profile = BodyProfile {
+            height_m,
+            mass_kg,
+            muscle_ratio,
+        };
 
         match scenario {
             1 => {
@@ -53,7 +74,8 @@ impl ArsaSim {
                 }
                 let top_y = (num_steps as f32) * step_h;
                 let top_z = -0.35 - ((num_steps - 1) as f32) * step_d;
-                self.world.spawn_ragdoll(Vec3::new(0.0, top_y + 0.05, top_z));
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, top_y + 0.05, top_z), profile);
             }
             2 => {
                 // Drop Platform: elevated platform + low bumper block
@@ -69,11 +91,19 @@ impl ArsaSim {
                     0.75,
                     0.05,
                 );
-                self.world.spawn_ragdoll(Vec3::new(0.65, 2.35, 0.25));
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.65, 2.35, 0.25), profile);
+            }
+            3 => {
+                // Trip Test: standing mannequin + low obstacle box behind heels
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 0.02, 0.0), profile);
+                self.world.place_obstacle_box(0.0, -0.52, 0.45, 0.14, 0.16, 35.0);
             }
             _ => {
                 // 0: Flat Lab
-                self.world.spawn_ragdoll(Vec3::new(0.0, 0.05, 0.0));
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 0.05, 0.0), profile);
             }
         }
     }
@@ -120,6 +150,51 @@ impl ArsaSim {
     /// Spawns a humanoid ragdoll at `(x, y, z)` and returns its ragdoll ID.
     pub fn spawn_ragdoll(&mut self, x: f32, y: f32, z: f32) -> usize {
         self.world.spawn_ragdoll(Vec3::new(x, y, z))
+    }
+
+    /// Spawns a humanoid ragdoll at `(x, y, z)` with a custom anthropometric profile.
+    pub fn spawn_ragdoll_with_profile(
+        &mut self,
+        x: f32,
+        y: f32,
+        z: f32,
+        height_m: f32,
+        mass_kg: f32,
+        muscle_ratio: f32,
+    ) -> usize {
+        self.world.spawn_ragdoll_with_profile(
+            Vec3::new(x, y, z),
+            BodyProfile {
+                height_m,
+                mass_kg,
+                muscle_ratio,
+            },
+        )
+    }
+
+    /// Enables or disables active balance & muscle motors for all ragdolls.
+    pub fn set_active_mode(&mut self, enabled: bool) {
+        self.world.set_all_ragdolls_active(enabled);
+    }
+
+    /// Places a dynamic obstacle box resting on `y = 0` at `(x, hy, z)`.
+    pub fn place_obstacle_box(
+        &mut self,
+        x: f32,
+        z: f32,
+        hx: f32,
+        hy: f32,
+        hz: f32,
+        mass: f32,
+    ) -> usize {
+        self.world.place_obstacle_box(x, z, hx, hy, hz, mass)
+    }
+
+    /// Returns per-ragdoll balance telemetry (11 floats per ragdoll).
+    pub fn get_ragdoll_telemetry(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        self.world.write_ragdoll_telemetry(&mut out);
+        out
     }
 
     /// Spawns a dynamic box and returns its body index.
@@ -216,5 +291,49 @@ impl ArsaSim {
         self.world
             .apply_impulse_at_point(hit.body_idx, dir_n * strength, hit.point);
         hit.body_idx as i32
+    }
+
+    /// Raycasts from `(ox, oy, oz)` along `(dx, dy, dz)` and applies a broad two-handed shove.
+    /// Returns the hit body index, or `-1` if nothing was hit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_shove(
+        &mut self,
+        ox: f32,
+        oy: f32,
+        oz: f32,
+        dx: f32,
+        dy: f32,
+        dz: f32,
+        strength: f32,
+    ) -> i32 {
+        match self
+            .world
+            .apply_shove(Vec3::new(ox, oy, oz), Vec3::new(dx, dy, dz), strength)
+        {
+            Some(hit) => hit.body_idx as i32,
+            None => -1,
+        }
+    }
+
+    /// Raycasts from `(ox, oy, oz)` along `(dx, dy, dz)` and applies a sharp localized punch.
+    /// Returns the hit body index, or `-1` if nothing was hit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_punch(
+        &mut self,
+        ox: f32,
+        oy: f32,
+        oz: f32,
+        dx: f32,
+        dy: f32,
+        dz: f32,
+        strength: f32,
+    ) -> i32 {
+        match self
+            .world
+            .apply_punch(Vec3::new(ox, oy, oz), Vec3::new(dx, dy, dz), strength)
+        {
+            Some(hit) => hit.body_idx as i32,
+            None => -1,
+        }
     }
 }

@@ -4,12 +4,13 @@ use std::collections::HashSet;
 
 use glam::{Quat, Vec3};
 
+use crate::balance::update_ragdoll_balance;
 use crate::body::{ColliderShape, RigidBody};
 use crate::collision::{
     detect_contacts, solve_contacts_position, solve_contacts_velocity, StaticBox,
 };
 use crate::joint::Joint;
-use crate::skeleton::{spawn_humanoid, RagdollInstance};
+use crate::skeleton::{spawn_humanoid_with_profile, BodyProfile, BoneId, RagdollInstance};
 
 /// Interactive mouse/pointer spring-damper grab constraint attached to a body point.
 #[derive(Debug, Clone)]
@@ -96,17 +97,55 @@ impl ArsaWorld {
         idx
     }
 
-    /// Spawns a 17-bone humanoid ragdoll at `origin` and returns its ragdoll ID.
+    /// Spawns a 17-bone humanoid ragdoll at `origin` with the default profile and returns its ragdoll ID.
     pub fn spawn_ragdoll(&mut self, origin: Vec3) -> usize {
+        self.spawn_ragdoll_with_profile(origin, BodyProfile::default())
+    }
+
+    /// Spawns a 17-bone humanoid ragdoll at `origin` scaled to `profile` and returns its ragdoll ID.
+    pub fn spawn_ragdoll_with_profile(&mut self, origin: Vec3, profile: BodyProfile) -> usize {
         let id = self.ragdolls.len();
         let start_joint = self.joints.len();
-        let instance = spawn_humanoid(&mut self.bodies, &mut self.joints, id, origin);
+        let instance =
+            spawn_humanoid_with_profile(&mut self.bodies, &mut self.joints, id, origin, profile);
         for j in &self.joints[start_joint..] {
             let pair = canonical_pair(j.parent, j.child);
             self.connected_pairs.insert(pair);
         }
         self.ragdolls.push(instance);
         id
+    }
+
+    /// Enables or disables active balance & muscle motors for a specific ragdoll.
+    pub fn set_ragdoll_active(&mut self, ragdoll_id: usize, active: bool) {
+        if let Some(r) = self.ragdolls.get_mut(ragdoll_id) {
+            r.active_enabled = active;
+        }
+    }
+
+    /// Enables or disables active balance & muscle motors for all ragdolls in the world.
+    pub fn set_all_ragdolls_active(&mut self, active: bool) {
+        for r in &mut self.ragdolls {
+            r.active_enabled = active;
+        }
+    }
+
+    /// Spawns a dynamic obstacle box resting cleanly on `y = 0` at `(x, hy, z)` with zero initial velocity.
+    pub fn place_obstacle_box(
+        &mut self,
+        x: f32,
+        z: f32,
+        hx: f32,
+        hy: f32,
+        hz: f32,
+        mass: f32,
+    ) -> usize {
+        self.spawn_box(
+            Vec3::new(x, hy, z),
+            Vec3::new(hx, hy, hz),
+            mass,
+            Vec3::ZERO,
+        )
     }
 
     /// Spawns a dynamic box rigid body and returns its body index.
@@ -147,6 +186,11 @@ impl ArsaWorld {
         let sub_dt = clamped_dt / (substeps as f32);
         let inv_dt = 1.0 / sub_dt;
         let gravity_mag = self.gravity.length();
+        let mut foot_contacts: Vec<(bool, bool)> = self
+            .ragdolls
+            .iter()
+            .map(|r| (r.balance.left_foot_grounded, r.balance.right_foot_grounded))
+            .collect();
 
         for _ in 0..substeps {
             // 1. Save previous state & integrate external forces
@@ -180,6 +224,21 @@ impl ArsaWorld {
                 }
             }
 
+            // 1b. Update active balance controllers & apply PD muscle motors before integration
+            for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
+                update_ragdoll_balance(
+                    ragdoll,
+                    &mut self.bodies,
+                    &mut self.joints,
+                    foot_contacts[r_idx],
+                    gravity_mag,
+                    sub_dt,
+                );
+            }
+            for j in &self.joints {
+                j.apply_muscle_motor(&mut self.bodies, sub_dt);
+            }
+
             // Predict positions and orientations
             for b in &mut self.bodies {
                 if b.inv_mass == 0.0 {
@@ -194,6 +253,29 @@ impl ArsaWorld {
             // 2. Collision detection
             let mut contacts =
                 detect_contacts(&self.bodies, &self.static_boxes, &self.connected_pairs);
+
+            // Track per-ragdoll foot grounding from detected contacts
+            for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
+                let lf_idx = ragdoll.body_indices[BoneId::LeftFoot as usize];
+                let rf_idx = ragdoll.body_indices[BoneId::RightFoot as usize];
+                let mut lf_grounded = false;
+                let mut rf_grounded = false;
+                for c in &contacts {
+                    if (c.body_a == lf_idx && c.normal.y > 0.45)
+                        || (c.body_b == Some(lf_idx) && -c.normal.y > 0.45)
+                    {
+                        lf_grounded = true;
+                    }
+                    if (c.body_a == rf_idx && c.normal.y > 0.45)
+                        || (c.body_b == Some(rf_idx) && -c.normal.y > 0.45)
+                    {
+                        rf_grounded = true;
+                    }
+                }
+                foot_contacts[r_idx] = (lf_grounded, rf_grounded);
+                ragdoll.balance.left_foot_grounded = lf_grounded;
+                ragdoll.balance.right_foot_grounded = rf_grounded;
+            }
 
             // 3. XPBD positional & angular constraint iterations
             for _ in 0..self.solver_iterations.max(1) {
@@ -242,6 +324,37 @@ impl ArsaWorld {
         body.linear_velocity += impulse * body.inv_mass;
         let dw = body.inv_inertia_world_mul(r.cross(impulse));
         body.angular_velocity += dw;
+    }
+
+    /// Raycasts from `origin` along `dir` and applies a broad two-handed shove impulse
+    /// distributed across the hit bone, Chest, and Pelvis when hitting a ragdoll.
+    pub fn apply_shove(&mut self, origin: Vec3, dir: Vec3, strength: f32) -> Option<RaycastHit> {
+        let hit = self.raycast(origin, dir, 100.0)?;
+        let dir_n = dir.normalize_or_zero();
+        let total_impulse = dir_n * strength;
+
+        if let Some(ragdoll_id) = self.bodies[hit.body_idx].ragdoll_id {
+            let chest_idx = self.ragdolls[ragdoll_id].body_indices[BoneId::Chest as usize];
+            let pelvis_idx = self.ragdolls[ragdoll_id].body_indices[BoneId::Pelvis as usize];
+            let chest_pos = self.bodies[chest_idx].position;
+            let pelvis_pos = self.bodies[pelvis_idx].position;
+
+            self.apply_impulse_at_point(hit.body_idx, total_impulse * 0.40, hit.point);
+            self.apply_impulse_at_point(chest_idx, total_impulse * 0.35, chest_pos);
+            self.apply_impulse_at_point(pelvis_idx, total_impulse * 0.25, pelvis_pos);
+        } else {
+            self.apply_impulse_at_point(hit.body_idx, total_impulse, hit.point);
+        }
+        Some(hit)
+    }
+
+    /// Raycasts from `origin` along `dir` and applies a sharp, localized punch impulse
+    /// at the exact hit point.
+    pub fn apply_punch(&mut self, origin: Vec3, dir: Vec3, strength: f32) -> Option<RaycastHit> {
+        let hit = self.raycast(origin, dir, 100.0)?;
+        let dir_n = dir.normalize_or_zero();
+        self.apply_impulse_at_point(hit.body_idx, dir_n * strength, hit.point);
+        Some(hit)
     }
 
     /// Raycasts against all dynamic bodies up to `max_dist` and returns the closest hit.
@@ -369,6 +482,27 @@ impl ArsaWorld {
             }
             out.push(b.ragdoll_id.map(|id| id as f32).unwrap_or(-1.0));
             out.push(b.bone_id.map(|id| id as f32).unwrap_or(-1.0));
+        }
+    }
+
+    /// Writes per-ragdoll balance telemetry into `out` (11 floats per ragdoll:
+    /// `com.x, com.y, com.z, cp.x, cp.z, left_grounded, right_grounded, state, pelvis.x, pelvis.y, pelvis.z`).
+    pub fn write_ragdoll_telemetry(&self, out: &mut Vec<f32>) {
+        out.clear();
+        out.reserve(self.ragdolls.len() * 11);
+        for r in &self.ragdolls {
+            let pelvis_pos = self.bodies[r.body_indices[BoneId::Pelvis as usize]].position;
+            out.push(r.balance.com_pos.x);
+            out.push(r.balance.com_pos.y);
+            out.push(r.balance.com_pos.z);
+            out.push(r.balance.capture_point.x);
+            out.push(r.balance.capture_point.z);
+            out.push(if r.balance.left_foot_grounded { 1.0 } else { 0.0 });
+            out.push(if r.balance.right_foot_grounded { 1.0 } else { 0.0 });
+            out.push(r.balance.state as u32 as f32);
+            out.push(pelvis_pos.x);
+            out.push(pelvis_pos.y);
+            out.push(pelvis_pos.z);
         }
     }
 }

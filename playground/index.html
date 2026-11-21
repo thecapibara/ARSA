@@ -17,11 +17,11 @@
 
       <!-- Tactical HUD Overlay -->
       <div class="hud-layer">
-        <!-- Top-left: Telemetry & Build Info -->
+        <!-- Top-left: Telemetry, Brain State & Build Info -->
         <aside class="hud-panel hud-telemetry" aria-label="Simulation Telemetry">
           <div class="brand-header">
             <span class="brand-badge">ARSA</span>
-            <span class="brand-version">v0.1 — Phase 1: XPBD Rig</span>
+            <span class="brand-version">v0.2 — Phase 2: Active Balance</span>
             <span class="status-dot" id="status-dot" title="Simulation Running"></span>
           </div>
           <div class="telemetry-grid">
@@ -42,28 +42,118 @@
               <span class="metric-value" id="stat-substeps">240 Hz</span>
             </div>
           </div>
+
+          <!-- Active Balance State & Foot Contacts -->
+          <div class="brain-telemetry-bar">
+            <div class="brain-state-wrap">
+              <span class="metric-label">STATE</span>
+              <span class="state-badge state-balanced" id="stat-ragdoll-state">BALANCED</span>
+            </div>
+            <div class="foot-contacts" title="Foot Ground Contacts (Left / Right)">
+              <span class="metric-label">FEET</span>
+              <span class="foot-pill" id="contact-left">L</span>
+              <span class="foot-pill" id="contact-right">R</span>
+            </div>
+          </div>
+
           <div class="active-state-bar">
             <span id="stat-tool-readout">TOOL: GRAB &amp; DRAG</span>
             <span id="stat-scale-readout">1.00×</span>
           </div>
         </aside>
 
-        <!-- Top-right: Controls & Shortcut Legend -->
-        <aside class="hud-panel hud-legend" aria-label="Controls Reference">
-          <div class="legend-title">VIEWPORT &amp; KEYBINDS</div>
-          <ul class="legend-list">
-            <li><kbd>LMB</kbd><span>Use Active Tool</span></li>
-            <li><kbd>RMB</kbd><span>Orbit Camera</span></li>
-            <li><kbd>MMB</kbd><span>Pan Camera</span></li>
-            <li><kbd>Scroll</kbd><span>Zoom</span></li>
-            <li><kbd>1–4</kbd><span>Select Tool</span></li>
-            <li><kbd>Space</kbd><span>Pause / Resume</span></li>
-            <li><kbd>R</kbd><span>Reset Scenario</span></li>
-            <li><kbd>+</kbd><span>Spawn Ragdoll</span></li>
-          </ul>
-        </aside>
+        <!-- Top-center: Camera Presets, Camera Mode & Debug Telemetry Toggle -->
+        <div class="hud-panel hud-camera-bar" aria-label="Camera & Debug Controls">
+          <div class="btn-row" role="group" aria-label="Camera Presets">
+            <button class="hud-btn hud-btn-sm" data-cam-preset="front" title="Front camera preset">Front</button>
+            <button class="hud-btn hud-btn-sm" data-cam-preset="back" title="Back camera preset">Back</button>
+            <button class="hud-btn hud-btn-sm" data-cam-preset="left" title="Left camera preset">Left</button>
+            <button class="hud-btn hud-btn-sm" data-cam-preset="right" title="Right camera preset">Right</button>
+            <button class="hud-btn hud-btn-sm" data-cam-preset="top" title="Top camera preset">Top</button>
+          </div>
 
-        <!-- Center Precision Reticle (shown for projectile / impulse tools) -->
+          <div class="bar-divider"></div>
+
+          <button class="hud-btn hud-btn-sm" id="btn-cam-mode" title="Toggle Orbit / Free Fly camera [F]">
+            <span id="cam-mode-label">Orbit</span>
+            <span class="key-cap">F</span>
+          </button>
+
+          <button class="hud-btn hud-btn-sm active" id="btn-debug-telemetry" title="Toggle CoM &amp; Capture Point 3D overlay [D]">
+            Telemetry <span class="key-cap">D</span>
+          </button>
+        </div>
+
+        <!-- Right Column: Body Profile & Keybinds -->
+        <div class="hud-right-col">
+          <!-- Procedural Body Profile Panel -->
+          <aside class="hud-panel hud-profile" aria-label="Procedural Body Profile">
+            <div class="panel-header">
+              <span class="panel-title">BODY PROFILE</span>
+              <button class="collapse-btn" id="btn-profile-collapse" title="Collapse / Expand Body Profile" aria-expanded="true">▾</button>
+            </div>
+            <div class="profile-body" id="profile-body">
+              <div class="preset-grid" role="group" aria-label="Body Profile Presets">
+                <button class="hud-btn hud-btn-sm" data-profile-preset="light" title="165 cm / 60 kg / 0.9x">Light</button>
+                <button class="hud-btn hud-btn-sm active" data-profile-preset="standard" title="178 cm / 75 kg / 1.0x">Standard</button>
+                <button class="hud-btn hud-btn-sm" data-profile-preset="tall" title="190 cm / 70 kg / 1.0x">Tall Lean</button>
+                <button class="hud-btn hud-btn-sm" data-profile-preset="heavy" title="217 cm / 135 kg / 1.35x">Heavy Brute</button>
+              </div>
+
+              <div class="slider-group">
+                <label class="slider-row" for="slider-height">
+                  <span class="slider-meta">
+                    <span>Height</span>
+                    <span class="slider-val" id="val-height">178 cm</span>
+                  </span>
+                  <input id="slider-height" type="range" min="145" max="230" step="1" value="178" />
+                </label>
+
+                <label class="slider-row" for="slider-mass">
+                  <span class="slider-meta">
+                    <span>Mass</span>
+                    <span class="slider-val" id="val-mass">75 kg</span>
+                  </span>
+                  <input id="slider-mass" type="range" min="45" max="160" step="1" value="75" />
+                </label>
+
+                <label class="slider-row" for="slider-strength">
+                  <span class="slider-meta">
+                    <span>Strength</span>
+                    <span class="slider-val" id="val-strength">1.00×</span>
+                  </span>
+                  <input id="slider-strength" type="range" min="0.3" max="1.8" step="0.05" value="1.0" />
+                </label>
+              </div>
+
+              <button class="hud-btn muscle-toggle active" id="btn-active-mode" title="Toggle Active Muscle / Passive Ragdoll [M]">
+                <span class="muscle-dot" id="muscle-dot"></span>
+                <span id="muscle-mode-label">Active Muscle</span>
+                <span class="key-cap">M</span>
+              </button>
+            </div>
+          </aside>
+
+          <!-- Controls & Shortcut Legend -->
+          <aside class="hud-panel hud-legend" aria-label="Controls Reference">
+            <div class="panel-header">
+              <span class="panel-title">VIEWPORT &amp; KEYBINDS</span>
+              <button class="collapse-btn" id="btn-legend-collapse" title="Collapse / Expand Keybinds" aria-expanded="true">▾</button>
+            </div>
+            <ul class="legend-list" id="legend-body">
+              <li><kbd>LMB</kbd><span>Use Active Tool</span></li>
+              <li><kbd>RMB</kbd><span>Orbit / Fly Look</span></li>
+              <li><kbd>WASD / EQ</kbd><span>Free Fly Move</span></li>
+              <li><kbd>Scroll</kbd><span>Zoom / Fly Speed</span></li>
+              <li><kbd>1–6</kbd><span>Select Tool</span></li>
+              <li><kbd>F / M / D</kbd><span>Fly / Muscle / Debug</span></li>
+              <li><kbd>Space / P</kbd><span>Pause (Orbit) / Pause</span></li>
+              <li><kbd>R / +</kbd><span>Reset / Spawn</span></li>
+            </ul>
+          </aside>
+        </div>
+
+        <!-- Center Precision Reticle -->
         <div class="reticle" id="reticle" aria-hidden="true">
           <span class="reticle-ring"></span>
           <span class="reticle-dot"></span>
@@ -74,17 +164,23 @@
           <div class="dock-group">
             <span class="dock-label">TOOL</span>
             <div class="btn-row" role="group" aria-label="Interaction Tools">
-              <button class="hud-btn active" data-tool="grab" title="Grab and drag rigid bodies [1]">
-                <span class="key-cap">1</span> Grab &amp; Drag
+              <button class="hud-btn active" data-tool="grab" title="Grab and drag any limb [1]">
+                <span class="key-cap">1</span> Grab
               </button>
-              <button class="hud-btn" data-tool="box" title="Throw dynamic test crate [2]">
-                <span class="key-cap">2</span> Throw Box
+              <button class="hud-btn" data-tool="shove" title="Broad realistic push [2]">
+                <span class="key-cap">2</span> Shove
               </button>
-              <button class="hud-btn" data-tool="sphere" title="Throw heavy steel sphere [3]">
-                <span class="key-cap">3</span> Throw Heavy Sphere
+              <button class="hud-btn" data-tool="punch" title="Fast localized strike [3]">
+                <span class="key-cap">3</span> Punch
               </button>
-              <button class="hud-btn" data-tool="impulse" title="Apply directional ray impulse [4]">
-                <span class="key-cap">4</span> Impulse Push
+              <button class="hud-btn" data-tool="place_box" title="Place tripping obstacle box on floor [4]">
+                <span class="key-cap">4</span> Place Box
+              </button>
+              <button class="hud-btn" data-tool="box" title="Throw dynamic crate [5]">
+                <span class="key-cap">5</span> Throw Box
+              </button>
+              <button class="hud-btn" data-tool="sphere" title="Throw heavy steel sphere [6]">
+                <span class="key-cap">6</span> Throw Sphere
               </button>
             </div>
           </div>
@@ -95,6 +191,7 @@
             <span class="dock-label">SCENARIO</span>
             <div class="btn-row" role="group" aria-label="Test Scenarios">
               <button class="hud-btn active" data-scenario="0">Flat Lab</button>
+              <button class="hud-btn" data-scenario="3" title="Tripping obstacle behind heels">Trip Test</button>
               <button class="hud-btn" data-scenario="1">Staircase</button>
               <button class="hud-btn" data-scenario="2">Drop Platform</button>
             </div>
@@ -109,8 +206,8 @@
               <button class="hud-btn" data-timescale="0.25">0.25x</button>
               <button class="hud-btn" data-timescale="0.5">0.5x</button>
               <button class="hud-btn active" data-timescale="1">1.0x</button>
-              <button class="hud-btn" id="btn-pause" title="Toggle pause [Space]">
-                Pause <span class="key-cap">Space</span>
+              <button class="hud-btn" id="btn-pause" title="Toggle pause [Space / P]">
+                Pause <span class="key-cap">P</span>
               </button>
             </div>
           </div>
@@ -120,10 +217,10 @@
           <div class="dock-group">
             <span class="dock-label">LAB</span>
             <div class="btn-row" role="group" aria-label="Lab Actions">
-              <button class="hud-btn btn-accent" id="btn-spawn" title="Spawn another active ragdoll [+]">
-                Spawn Ragdoll <span class="key-cap">+</span>
+              <button class="hud-btn btn-accent" id="btn-spawn" title="Spawn ragdoll with active Body Profile [+]">
+                Spawn <span class="key-cap">+</span>
               </button>
-              <button class="hud-btn" id="btn-reset" title="Reset active scenario [R]">
+              <button class="hud-btn" id="btn-reset" title="Reset scenario with active Body Profile [R]">
                 Reset <span class="key-cap">R</span>
               </button>
             </div>
