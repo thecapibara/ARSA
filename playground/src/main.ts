@@ -1164,6 +1164,23 @@ class PlaygroundApp {
         case 'NumpadAdd':
           this.spawnRagdoll();
           break;
+        case 'Tab': {
+          e.preventDefault();
+          const hudLayer = document.querySelector<HTMLElement>('.hud-layer');
+          const toast = document.getElementById('hud-hidden-toast');
+          if (hudLayer) {
+            const hidden = hudLayer.classList.toggle('hud-hidden');
+            if (toast) {
+              toast.classList.toggle('visible', hidden);
+              if (hidden) {
+                window.setTimeout(() => {
+                  toast.classList.remove('visible');
+                }, 1800);
+              }
+            }
+          }
+          break;
+        }
       }
     });
 

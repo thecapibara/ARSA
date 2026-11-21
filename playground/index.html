@@ -169,7 +169,9 @@
               <li><kbd>1–9, 0</kbd><span>Select Tool</span></li>
               <li><kbd>F / M / D</kbd><span>Fly / Muscle / Debug</span></li>
               <li><kbd>Space / P</kbd><span>Pause (Orbit) / Pause</span></li>
+              <li><kbd>T / [ ]</kbd><span>Bullet-Time / Sim Speed</span></li>
               <li><kbd>R / +</kbd><span>Reset / Spawn</span></li>
+              <li><kbd>Tab</kbd><span>Hide / Show HUD</span></li>
             </ul>
           </aside>
         </div>
@@ -281,6 +283,11 @@
         <div class="hud-banner" id="loading-banner">
           Initializing ARSA WASM Physics Kernel...
         </div>
+      </div>
+
+      <!-- Subtle auto-fading hint when HUD is hidden via Tab -->
+      <div class="hud-hidden-toast" id="hud-hidden-toast" aria-live="polite">
+        HUD hidden — press <kbd>Tab</kbd> to restore
       </div>
     </div>
 
