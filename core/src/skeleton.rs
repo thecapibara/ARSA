@@ -5,6 +5,7 @@ use glam::{Quat, Vec3};
 use crate::balance::BalanceState;
 use crate::body::{ColliderShape, RigidBody};
 use crate::joint::{Joint, JointKind};
+use crate::reflex::ReflexState;
 
 /// Anthropometric body dimensions and muscular strength scaling profile.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -95,6 +96,32 @@ pub enum BoneId {
     RightFoot = 16,
 }
 
+impl BoneId {
+    /// Converts a raw `u8` bone index (`0..17`) into a [`BoneId`].
+    pub fn from_u8(val: u8) -> Option<Self> {
+        match val {
+            0 => Some(Self::Pelvis),
+            1 => Some(Self::LowerSpine),
+            2 => Some(Self::Chest),
+            3 => Some(Self::Neck),
+            4 => Some(Self::Head),
+            5 => Some(Self::LeftUpperArm),
+            6 => Some(Self::LeftForearm),
+            7 => Some(Self::LeftHand),
+            8 => Some(Self::RightUpperArm),
+            9 => Some(Self::RightForearm),
+            10 => Some(Self::RightHand),
+            11 => Some(Self::LeftThigh),
+            12 => Some(Self::LeftShin),
+            13 => Some(Self::LeftFoot),
+            14 => Some(Self::RightThigh),
+            15 => Some(Self::RightShin),
+            16 => Some(Self::RightFoot),
+            _ => None,
+        }
+    }
+}
+
 /// Spawned humanoid ragdoll handle indexing into `ArsaWorld::bodies` and `ArsaWorld::joints`.
 #[derive(Debug, Clone)]
 pub struct RagdollInstance {
@@ -105,6 +132,7 @@ pub struct RagdollInstance {
     pub active_enabled: bool,
     pub standing_pelvis_y: f32,
     pub balance: BalanceState,
+    pub reflex: ReflexState,
 }
 
 /// Spawns a default 1.78m, 75.0 kg anthropometric humanoid ragdoll facing `+Z`
@@ -489,5 +517,6 @@ pub fn spawn_humanoid_with_profile(
         active_enabled: true,
         standing_pelvis_y,
         balance: BalanceState::default(),
+        reflex: ReflexState::default(),
     }
 }

@@ -1,7 +1,7 @@
 //! Native C ABI bindings (`arsa-c-abi`) for Unreal Engine, Unity, and Godot.
 
 use arsa_core::glam::Vec3;
-use arsa_core::{ArsaWorld, BodyProfile};
+use arsa_core::{ArsaWorld, BodyProfile, WeaponKind};
 
 /// Opaque handle owning an `ArsaWorld` simulation instance.
 pub struct ArsaWorldHandle {
@@ -136,4 +136,34 @@ pub unsafe extern "C" fn arsa_world_get_transforms(
         std::ptr::copy_nonoverlapping(buf.as_ptr(), out_ptr, count);
     }
     count
+}
+
+/// Fires a ballistic weapon (`0 = Pistol`, `1 = Shotgun`, `2 = Rifle`) from `(ox, oy, oz)`
+/// along `(dx, dy, dz)` and returns the number of ray hits (`0` if null or missed).
+///
+/// # Safety
+/// `world` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_fire_weapon(
+    world: *mut ArsaWorldHandle,
+    ox: f32,
+    oy: f32,
+    oz: f32,
+    dx: f32,
+    dy: f32,
+    dz: f32,
+    weapon_kind: u32,
+) -> i32 {
+    let Some(handle) = (unsafe { world.as_mut() }) else {
+        return 0;
+    };
+    let weapon = match weapon_kind {
+        1 => WeaponKind::Shotgun,
+        2 => WeaponKind::Rifle,
+        _ => WeaponKind::Pistol,
+    };
+    let res = handle
+        .world
+        .fire_weapon(Vec3::new(ox, oy, oz), Vec3::new(dx, dy, dz), weapon);
+    res.hits.len() as i32
 }

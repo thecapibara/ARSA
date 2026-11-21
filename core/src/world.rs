@@ -10,7 +10,25 @@ use crate::collision::{
     detect_contacts, solve_contacts_position, solve_contacts_velocity, StaticBox,
 };
 use crate::joint::Joint;
+use crate::reflex::{apply_procedural_reflexes, WoundRegion};
 use crate::skeleton::{spawn_humanoid_with_profile, BodyProfile, BoneId, RagdollInstance};
+
+/// Ballistic weapon presets supported by [`ArsaWorld::fire_weapon`].
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaponKind {
+    Pistol = 0,
+    Shotgun = 1,
+    Rifle = 2,
+}
+
+/// Summary of all ray hits and ragdoll wound metadata produced by [`ArsaWorld::fire_weapon`].
+#[derive(Debug, Clone)]
+pub struct WeaponShotResult {
+    pub hits: Vec<RaycastHit>,
+    pub hit_ragdoll_id: Option<usize>,
+    pub hit_region: WoundRegion,
+}
 
 /// Interactive mouse/pointer spring-damper grab constraint attached to a body point.
 #[derive(Debug, Clone)]
@@ -224,7 +242,7 @@ impl ArsaWorld {
                 }
             }
 
-            // 1b. Update active balance controllers & apply PD muscle motors before integration
+            // 1b. Update active balance controllers, procedural reflexes & apply PD muscle motors
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
                 update_ragdoll_balance(
                     ragdoll,
@@ -234,6 +252,7 @@ impl ArsaWorld {
                     gravity_mag,
                     sub_dt,
                 );
+                apply_procedural_reflexes(ragdoll, &mut self.bodies, &mut self.joints, sub_dt);
             }
             for j in &self.joints {
                 j.apply_muscle_motor(&mut self.bodies, sub_dt);
@@ -355,6 +374,80 @@ impl ArsaWorld {
         let dir_n = dir.normalize_or_zero();
         self.apply_impulse_at_point(hit.body_idx, dir_n * strength, hit.point);
         Some(hit)
+    }
+
+    /// Fires a ballistic weapon (`Pistol`, `Shotgun`, or `Rifle`) from `origin` along `dir`,
+    /// applying physical impulses at exact hit points and registering ragdoll wounds/damage.
+    pub fn fire_weapon(
+        &mut self,
+        origin: Vec3,
+        dir: Vec3,
+        weapon: WeaponKind,
+    ) -> WeaponShotResult {
+        let dir_n = dir.normalize_or_zero();
+        if dir_n.length_squared() < 1e-12 {
+            return WeaponShotResult {
+                hits: Vec::new(),
+                hit_ragdoll_id: None,
+                hit_region: WoundRegion::None,
+            };
+        }
+
+        let (impulse_ns, severity, damage, is_shotgun) = match weapon {
+            WeaponKind::Pistol => (38.0, 0.58, 22.0, false),
+            WeaponKind::Shotgun => (28.0, 0.95, 14.0, true),
+            WeaponKind::Rifle => (90.0, 0.82, 42.0, false),
+        };
+
+        let mut rays = Vec::with_capacity(if is_shotgun { 7 } else { 1 });
+        rays.push(dir_n);
+        if is_shotgun {
+            let ref_up = if dir_n.y.abs() < 0.9 {
+                Vec3::Y
+            } else {
+                Vec3::X
+            };
+            let u = ref_up.cross(dir_n).normalize();
+            let v = dir_n.cross(u).normalize();
+            let cone = 0.065_f32;
+            let cos_c = cone.cos();
+            let sin_c = cone.sin();
+            for i in 0..6 {
+                let angle = (i as f32) * (std::f32::consts::TAU / 6.0);
+                let pellet_dir =
+                    (dir_n * cos_c + (u * angle.cos() + v * angle.sin()) * sin_c).normalize();
+                rays.push(pellet_dir);
+            }
+        }
+
+        let mut hits = Vec::with_capacity(rays.len());
+        let mut hit_ragdoll_id = None;
+        let mut hit_region = WoundRegion::None;
+
+        for ray_dir in rays {
+            if let Some(hit) = self.raycast(origin, ray_dir, 100.0) {
+                self.apply_impulse_at_point(hit.body_idx, ray_dir * impulse_ns, hit.point);
+
+                let ragdoll_info = {
+                    let b = &self.bodies[hit.body_idx];
+                    b.ragdoll_id.zip(b.bone_id.and_then(BoneId::from_u8))
+                };
+                if let Some((r_id, bone)) = ragdoll_info {
+                    self.ragdolls[r_id].register_hit(bone, hit.local_point, severity, damage);
+                    if hit_ragdoll_id.is_none() {
+                        hit_ragdoll_id = Some(r_id);
+                        hit_region = WoundRegion::from_bone(bone);
+                    }
+                }
+                hits.push(hit);
+            }
+        }
+
+        WeaponShotResult {
+            hits,
+            hit_ragdoll_id,
+            hit_region,
+        }
     }
 
     /// Raycasts against all dynamic bodies up to `max_dist` and returns the closest hit.
@@ -485,13 +578,19 @@ impl ArsaWorld {
         }
     }
 
-    /// Writes per-ragdoll balance telemetry into `out` (11 floats per ragdoll:
-    /// `com.x, com.y, com.z, cp.x, cp.z, left_grounded, right_grounded, state, pelvis.x, pelvis.y, pelvis.z`).
+    /// Writes per-ragdoll balance & reflex telemetry into `out` (16 floats per ragdoll:
+    /// `com(3), cp(2), left_grounded, right_grounded, state_u32, pelvis(3), health, wound_region, wound_world(3)`).
     pub fn write_ragdoll_telemetry(&self, out: &mut Vec<f32>) {
         out.clear();
-        out.reserve(self.ragdolls.len() * 11);
+        out.reserve(self.ragdolls.len() * 16);
         for r in &self.ragdolls {
             let pelvis_pos = self.bodies[r.body_indices[BoneId::Pelvis as usize]].position;
+            let (wound_region, wound_world) = if let Some(w) = &r.reflex.active_wound {
+                let w_pos = self.bodies[r.body_indices[w.bone as usize]].world_point(w.local_point);
+                (w.region, w_pos)
+            } else {
+                (WoundRegion::None, Vec3::ZERO)
+            };
             out.push(r.balance.com_pos.x);
             out.push(r.balance.com_pos.y);
             out.push(r.balance.com_pos.z);
@@ -503,6 +602,11 @@ impl ArsaWorld {
             out.push(pelvis_pos.x);
             out.push(pelvis_pos.y);
             out.push(pelvis_pos.z);
+            out.push(r.reflex.health);
+            out.push(wound_region as u32 as f32);
+            out.push(wound_world.x);
+            out.push(wound_world.y);
+            out.push(wound_world.z);
         }
     }
 }

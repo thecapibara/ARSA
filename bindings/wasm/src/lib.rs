@@ -1,7 +1,7 @@
 //! WebAssembly bindings (`arsa-wasm`) for the ARSA Active Ragdoll Engine.
 
 use arsa_core::glam::Vec3;
-use arsa_core::{ArsaWorld, BodyProfile};
+use arsa_core::{ArsaWorld, BodyProfile, WeaponKind};
 use wasm_bindgen::prelude::*;
 
 /// WebAssembly simulation wrapper around `ArsaWorld`.
@@ -190,7 +190,7 @@ impl ArsaSim {
         self.world.place_obstacle_box(x, z, hx, hy, hz, mass)
     }
 
-    /// Returns per-ragdoll balance telemetry (11 floats per ragdoll).
+    /// Returns per-ragdoll balance & reflex telemetry (16 floats per ragdoll).
     pub fn get_ragdoll_telemetry(&self) -> Vec<f32> {
         let mut out = Vec::new();
         self.world.write_ragdoll_telemetry(&mut out);
@@ -335,5 +335,38 @@ impl ArsaSim {
             Some(hit) => hit.body_idx as i32,
             None => -1,
         }
+    }
+
+    /// Fires a ballistic weapon (`0 = Pistol`, `1 = Shotgun`, `2 = Rifle`) from `(ox, oy, oz)`
+    /// along `(dx, dy, dz)` and returns packed hit points:
+    /// `[hit_count, x0, y0, z0, body0, x1, y1, z1, body1, ...]`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fire_weapon(
+        &mut self,
+        ox: f32,
+        oy: f32,
+        oz: f32,
+        dx: f32,
+        dy: f32,
+        dz: f32,
+        weapon_kind: u32,
+    ) -> Vec<f32> {
+        let weapon = match weapon_kind {
+            1 => WeaponKind::Shotgun,
+            2 => WeaponKind::Rifle,
+            _ => WeaponKind::Pistol,
+        };
+        let res = self
+            .world
+            .fire_weapon(Vec3::new(ox, oy, oz), Vec3::new(dx, dy, dz), weapon);
+        let mut out = Vec::with_capacity(1 + res.hits.len() * 4);
+        out.push(res.hits.len() as f32);
+        for hit in &res.hits {
+            out.push(hit.point.x);
+            out.push(hit.point.y);
+            out.push(hit.point.z);
+            out.push(hit.body_idx as f32);
+        }
+        out
     }
 }

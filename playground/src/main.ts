@@ -1,10 +1,34 @@
 import * as THREE from 'three';
 import init, { ArsaSim } from './wasm/arsa_wasm.js';
-import { CameraMode, CameraPresetName, LabScene } from './scene.ts';
+import { TacticalAudio } from './audio.ts';
+import {
+  CameraMode,
+  CameraPresetName,
+  getTelemetryStride,
+  LabScene,
+} from './scene.ts';
 
-type ArsaSimPhase2 = ArsaSim;
+type ArsaSimPhase3 = ArsaSim & {
+  fire_weapon?: (
+    ox: number,
+    oy: number,
+    oz: number,
+    dx: number,
+    dy: number,
+    dz: number,
+    weapon_kind: number
+  ) => Float32Array;
+};
 
-type ToolMode = 'grab' | 'shove' | 'punch' | 'place_box' | 'box' | 'sphere';
+type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
+type ToolMode =
+  | 'grab'
+  | 'shove'
+  | 'punch'
+  | WeaponToolMode
+  | 'place_box'
+  | 'box'
+  | 'sphere';
 type ProfilePresetKey = 'light' | 'standard' | 'tall' | 'heavy';
 
 interface BodyProfile {
@@ -12,6 +36,19 @@ interface BodyProfile {
   massKg: number;
   strength: number;
 }
+
+interface WeaponSpec {
+  kind: number;
+  tracerColor: number;
+  maxRange: number;
+  fallbackImpulse: number;
+}
+
+const WEAPON_SPECS: Record<WeaponToolMode, WeaponSpec> = {
+  pistol: { kind: 0, tracerColor: 0xfbbf24, maxRange: 32, fallbackImpulse: 18 },
+  shotgun: { kind: 1, tracerColor: 0xff6b2b, maxRange: 24, fallbackImpulse: 45 },
+  rifle: { kind: 2, tracerColor: 0x38bdf8, maxRange: 45, fallbackImpulse: 34 },
+};
 
 const PROFILE_PRESETS: Record<ProfilePresetKey, BodyProfile> = {
   light: { heightCm: 165, massKg: 60, strength: 0.9 },
@@ -22,12 +59,14 @@ const PROFILE_PRESETS: Record<ProfilePresetKey, BodyProfile> = {
 
 const FIXED_DT = 1 / 60;
 const MAX_STEPS_PER_FRAME = 4;
-const TELEMETRY_STRIDE = 11;
 
 const TOOL_LABELS: Record<ToolMode, string> = {
   grab: 'TOOL: GRAB',
   shove: 'TOOL: SHOVE',
   punch: 'TOOL: PUNCH',
+  pistol: 'TOOL: PISTOL (9MM)',
+  shotgun: 'TOOL: SHOTGUN (12GA)',
+  rifle: 'TOOL: RIFLE (5.56)',
   place_box: 'TOOL: PLACE BOX',
   box: 'TOOL: THROW BOX',
   sphere: 'TOOL: THROW SPHERE',
@@ -39,12 +78,24 @@ const STATE_BADGES: Array<{ label: string; cls: string }> = [
   { label: 'FALLING', cls: 'state-falling' },
   { label: 'DOWNED', cls: 'state-downed' },
   { label: 'PASSIVE', cls: 'state-passive' },
+  { label: 'UNCONSCIOUS', cls: 'state-unconscious' },
+];
+
+const WOUND_LABELS = [
+  'INTACT',
+  'LEFT ARM',
+  'RIGHT ARM',
+  'TORSO',
+  'HEAD',
+  'LEFT LEG',
+  'RIGHT LEG',
 ];
 
 class PlaygroundApp {
   private readonly canvas: HTMLCanvasElement;
   private readonly lab: LabScene;
-  private sim: ArsaSimPhase2 | null = null;
+  private readonly audio = new TacticalAudio();
+  private sim: ArsaSimPhase3 | null = null;
 
   private activeTool: ToolMode = 'grab';
   private activeScenario = 0;
@@ -85,6 +136,10 @@ class PlaygroundApp {
   private readonly statRagdollState = document.getElementById('stat-ragdoll-state')!;
   private readonly contactLeft = document.getElementById('contact-left')!;
   private readonly contactRight = document.getElementById('contact-right')!;
+  private readonly healthBarFill = document.getElementById('health-bar-fill')!;
+  private readonly statHealth = document.getElementById('stat-health')!;
+  private readonly statWound = document.getElementById('stat-wound')!;
+  private readonly audioToggleBtn = document.getElementById('btn-audio-toggle')!;
   private readonly statusDot = document.getElementById('status-dot')!;
   private readonly reticle = document.getElementById('reticle')!;
   private readonly banner = document.getElementById('loading-banner')!;
@@ -119,7 +174,7 @@ class PlaygroundApp {
   public async start(): Promise<void> {
     try {
       await init();
-      this.sim = new ArsaSim() as ArsaSimPhase2;
+      this.sim = new ArsaSim() as ArsaSimPhase3;
       this.loadScenario(0);
       this.banner.classList.add('hidden');
       this.lastFrameTime = performance.now();
@@ -364,11 +419,13 @@ class PlaygroundApp {
   }
 
   private updateBrainTelemetryHud(telemetry: Float32Array): void {
-    if (telemetry.length < TELEMETRY_STRIDE) {
+    const stride = getTelemetryStride(telemetry);
+    if (telemetry.length < stride) {
       this.statRagdollState.textContent = 'NONE';
       this.statRagdollState.className = 'state-badge state-passive';
       this.contactLeft.classList.remove('grounded');
       this.contactRight.classList.remove('grounded');
+      this.updateVitalHud(100, 0, true);
       return;
     }
 
@@ -381,6 +438,144 @@ class PlaygroundApp {
     this.statRagdollState.className = `state-badge ${badge.cls}`;
     this.contactLeft.classList.toggle('grounded', leftGrounded);
     this.contactRight.classList.toggle('grounded', rightGrounded);
+
+    if (stride >= 16) {
+      this.updateVitalHud(telemetry[11], Math.round(telemetry[12]), false);
+    } else {
+      this.updateVitalHud(100, 0, false);
+    }
+  }
+
+  private updateVitalHud(
+    health: number,
+    woundRegion: number,
+    empty: boolean
+  ): void {
+    const clampedHp = Math.max(0, Math.min(100, Math.round(health)));
+    this.healthBarFill.style.width = `${empty ? 0 : clampedHp}%`;
+    this.healthBarFill.classList.toggle('warn', !empty && clampedHp <= 60 && clampedHp > 25);
+    this.healthBarFill.classList.toggle('critical', !empty && clampedHp <= 25);
+    this.statHealth.textContent = empty ? '--' : `${clampedHp}%`;
+
+    if (empty) {
+      this.statWound.textContent = 'NONE';
+      this.statWound.className = 'wound-badge intact';
+      return;
+    }
+
+    if (woundRegion > 0) {
+      const regionName = WOUND_LABELS[woundRegion] ?? `REGION ${woundRegion}`;
+      this.statWound.textContent = `WOUND: ${regionName}`;
+      this.statWound.className = 'wound-badge injured';
+    } else {
+      this.statWound.textContent = 'INTACT';
+      this.statWound.className = 'wound-badge intact';
+    }
+  }
+
+  private computeMuzzleOrigin(): THREE.Vector3 {
+    const cam = this.lab.camera;
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion);
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(cam.quaternion);
+
+    return cam.position
+      .clone()
+      .addScaledVector(forward, 0.42)
+      .addScaledVector(right, 0.22)
+      .addScaledVector(up, -0.15);
+  }
+
+  private fireWeapon(ray: THREE.Ray, weapon: WeaponToolMode): void {
+    if (!this.sim) return;
+
+    const spec = WEAPON_SPECS[weapon];
+    const muzzle = this.computeMuzzleOrigin();
+
+    if (weapon === 'pistol') {
+      this.audio.playPistol();
+    } else if (weapon === 'shotgun') {
+      this.audio.playShotgun();
+    } else {
+      this.audio.playRifle();
+    }
+
+    if (typeof this.sim.fire_weapon === 'function') {
+      const result = this.sim.fire_weapon(
+        ray.origin.x,
+        ray.origin.y,
+        ray.origin.z,
+        ray.direction.x,
+        ray.direction.y,
+        ray.direction.z,
+        spec.kind
+      );
+      const hitCount = Math.max(0, Math.round(result[0] ?? 0));
+
+      if (hitCount > 0) {
+        for (let i = 0; i < hitCount; i++) {
+          const base = 1 + i * 4;
+          if (base + 3 >= result.length) break;
+          const hitPt = new THREE.Vector3(
+            result[base],
+            result[base + 1],
+            result[base + 2]
+          );
+          this.lab.spawnTracer(muzzle, hitPt, spec.tracerColor, true);
+        }
+      } else {
+        this.spawnMissedTracers(muzzle, ray, weapon, spec);
+      }
+      this.syncSimulationView();
+      return;
+    }
+
+    // Graceful fallback if WASM binary has not yet been rebuilt for Phase 3
+    const hitIdx = this.sim.apply_ray_impulse(
+      ray.origin.x,
+      ray.origin.y,
+      ray.origin.z,
+      ray.direction.x,
+      ray.direction.y,
+      ray.direction.z,
+      spec.fallbackImpulse
+    );
+    if (hitIdx >= 0) {
+      const hitPt = this.resolveHitPoint(this.sim.get_transforms(), hitIdx);
+      this.lab.spawnTracer(muzzle, hitPt, spec.tracerColor, true);
+    } else {
+      this.spawnMissedTracers(muzzle, ray, weapon, spec);
+    }
+    this.syncSimulationView();
+  }
+
+  private spawnMissedTracers(
+    muzzle: THREE.Vector3,
+    ray: THREE.Ray,
+    weapon: WeaponToolMode,
+    spec: WeaponSpec
+  ): void {
+    if (weapon === 'shotgun') {
+      for (let i = 0; i < 5; i++) {
+        const spreadDir = ray.direction
+          .clone()
+          .add(
+            new THREE.Vector3(
+              (Math.random() - 0.5) * 0.08,
+              (Math.random() - 0.5) * 0.08,
+              (Math.random() - 0.5) * 0.08
+            )
+          )
+          .normalize();
+        const endPt = ray.origin.clone().addScaledVector(spreadDir, spec.maxRange);
+        this.lab.spawnTracer(muzzle, endPt, spec.tracerColor, false);
+      }
+    } else {
+      const endPt = ray.origin
+        .clone()
+        .addScaledVector(ray.direction, spec.maxRange);
+      this.lab.spawnTracer(muzzle, endPt, spec.tracerColor, false);
+    }
   }
 
   private resolveHitPoint(transforms: Float32Array, hitIdx: number): THREE.Vector3 {
@@ -492,6 +687,17 @@ class PlaygroundApp {
       this.activeModeBtn.blur();
     });
 
+    this.audioToggleBtn.addEventListener('click', () => {
+      this.audio.unlock();
+      const muted = this.audio.toggleMute();
+      this.audioToggleBtn.textContent = muted ? '🔇' : '🔊';
+      this.audioToggleBtn.classList.toggle('muted', muted);
+      this.audioToggleBtn.title = muted
+        ? 'Unmute Procedural Audio'
+        : 'Mute Procedural Audio';
+      this.audioToggleBtn.blur();
+    });
+
     document
       .querySelectorAll<HTMLButtonElement>('[data-profile-preset]')
       .forEach((btn) => {
@@ -557,6 +763,7 @@ class PlaygroundApp {
     );
 
     this.canvas.addEventListener('pointerdown', (e: PointerEvent) => {
+      this.audio.unlock();
       this.lastPointerX = e.clientX;
       this.lastPointerY = e.clientY;
       this.hasLastPointer = true;
@@ -622,6 +829,7 @@ class PlaygroundApp {
         if (hitIdx >= 0) {
           const hitPt = this.resolveHitPoint(this.sim.get_transforms(), hitIdx);
           this.lab.spawnImpulseEffect(hitPt, 'shove');
+          this.audio.playImpact(false);
         }
       } else if (this.activeTool === 'punch') {
         const hitIdx =
@@ -647,7 +855,14 @@ class PlaygroundApp {
         if (hitIdx >= 0) {
           const hitPt = this.resolveHitPoint(this.sim.get_transforms(), hitIdx);
           this.lab.spawnImpulseEffect(hitPt, 'punch');
+          this.audio.playImpact(true);
         }
+      } else if (
+        this.activeTool === 'pistol' ||
+        this.activeTool === 'shotgun' ||
+        this.activeTool === 'rifle'
+      ) {
+        this.fireWeapon(ray, this.activeTool);
       } else if (this.activeTool === 'place_box') {
         if (this.updatePlacePreview(e.clientX, e.clientY)) {
           if (typeof this.sim.place_obstacle_box === 'function') {
@@ -673,6 +888,7 @@ class PlaygroundApp {
               0
             );
           }
+          this.audio.playBoxDrop();
           this.syncSimulationView();
         }
       } else if (this.activeTool === 'box') {
@@ -786,12 +1002,21 @@ class PlaygroundApp {
           this.setTool('punch');
           break;
         case '4':
-          this.setTool('place_box');
+          this.setTool('pistol');
           break;
         case '5':
-          this.setTool('box');
+          this.setTool('shotgun');
           break;
         case '6':
+          this.setTool('rifle');
+          break;
+        case '7':
+          this.setTool('place_box');
+          break;
+        case '8':
+          this.setTool('box');
+          break;
+        case '9':
           this.setTool('sphere');
           break;
         case 'f':

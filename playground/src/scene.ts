@@ -43,6 +43,20 @@ interface ImpulseFx {
   maxScale: number;
 }
 
+interface TracerFx {
+  beam: THREE.Mesh;
+  line: THREE.Line;
+  age: number;
+  duration: number;
+}
+
+interface SparkParticle {
+  mesh: THREE.Mesh;
+  velocity: THREE.Vector3;
+  age: number;
+  duration: number;
+}
+
 interface TelemetryVisual {
   group: THREE.Group;
   comMarker: THREE.Mesh;
@@ -51,9 +65,17 @@ interface TelemetryVisual {
   cpRing: THREE.Mesh;
   cpTether: THREE.Line;
   cpTetherPositions: Float32Array;
+  woundGroup: THREE.Group;
+  woundRing: THREE.Mesh;
 }
 
-const TELEMETRY_STRIDE = 11;
+/**
+ * Computes the per-ragdoll float stride for `get_ragdoll_telemetry()`,
+ * supporting both Phase 2 (11 floats) and Phase 3 (16 floats).
+ */
+export function getTelemetryStride(telemetry: Float32Array): number {
+  return telemetry.length >= 16 && telemetry.length % 16 === 0 ? 16 : 11;
+}
 
 /**
  * Manages the Three.js Aperture/Euphoria test-chamber scene, lighting,
@@ -88,7 +110,13 @@ export class LabScene {
   private readonly impulseRingGeo: THREE.RingGeometry;
   private readonly punchCoreGeo: THREE.SphereGeometry;
 
-  // Debug Telemetry Overlay (CoM + plumb line + Capture Point ring)
+  private readonly tracerEffects: TracerFx[] = [];
+  private readonly sparkParticles: SparkParticle[] = [];
+  private readonly tracerBeamGeo: THREE.CylinderGeometry;
+  private readonly sparkGeo: THREE.BoxGeometry;
+  private fxTime = 0;
+
+  // Debug Telemetry Overlay (CoM + plumb line + Capture Point + Wound markers)
   private readonly telemetryGroup = new THREE.Group();
   private readonly telemetryPool: TelemetryVisual[] = [];
   private readonly comGeo: THREE.SphereGeometry;
@@ -97,6 +125,10 @@ export class LabScene {
   private readonly cpRingGeo: THREE.RingGeometry;
   private readonly cpRingMat: THREE.MeshBasicMaterial;
   private readonly cpTetherMat: THREE.LineBasicMaterial;
+  private readonly woundRingGeo: THREE.RingGeometry;
+  private readonly woundRingMat: THREE.MeshBasicMaterial;
+  private readonly woundCoreGeo: THREE.SphereGeometry;
+  private readonly woundCoreMat: THREE.MeshBasicMaterial;
 
   // Camera Mode & Preset Transition state
   private cameraMode: CameraMode = 'orbit';
@@ -242,6 +274,11 @@ export class LabScene {
     this.impulseRingGeo = new THREE.RingGeometry(0.08, 0.13, 28);
     this.punchCoreGeo = new THREE.SphereGeometry(0.075, 14, 12);
 
+    // Ballistic tracer & spark shared geometries (oriented along +Z for lookAt)
+    this.tracerBeamGeo = new THREE.CylinderGeometry(0.0035, 0.006, 1, 6);
+    this.tracerBeamGeo.rotateX(Math.PI / 2);
+    this.sparkGeo = new THREE.BoxGeometry(0.007, 0.007, 0.065);
+
     // Debug Telemetry shared resources
     this.comGeo = new THREE.SphereGeometry(0.044, 14, 12);
     this.comMat = new THREE.MeshBasicMaterial({
@@ -270,6 +307,23 @@ export class LabScene {
       color: 0xf59e0b,
       transparent: true,
       opacity: 0.45,
+      depthWrite: false,
+    });
+    this.woundRingGeo = new THREE.RingGeometry(0.052, 0.082, 24);
+    this.woundRingMat = new THREE.MeshBasicMaterial({
+      color: 0xef4444,
+      transparent: true,
+      opacity: 0.92,
+      side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.woundCoreGeo = new THREE.SphereGeometry(0.02, 10, 8);
+    this.woundCoreMat = new THREE.MeshBasicMaterial({
+      color: 0xff2e4c,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
       depthWrite: false,
     });
     this.scene.add(this.telemetryGroup);
@@ -692,11 +746,12 @@ export class LabScene {
   }
 
   /**
-   * Updates 3D debug markers (cyan CoM + dashed plumb line + amber Capture Point ring)
-   * from `get_ragdoll_telemetry()`.
+   * Updates 3D debug markers (cyan CoM + dashed plumb line + amber Capture Point ring
+   * + pulsing crimson Wound marker) from `get_ragdoll_telemetry()`.
    */
   public syncRagdollTelemetry(telemetry: Float32Array): void {
-    const count = Math.floor(telemetry.length / TELEMETRY_STRIDE);
+    const stride = getTelemetryStride(telemetry);
+    const count = Math.floor(telemetry.length / stride);
 
     while (this.telemetryPool.length < count) {
       this.telemetryPool.push(this.createTelemetryVisual());
@@ -709,7 +764,7 @@ export class LabScene {
         continue;
       }
 
-      const o = i * TELEMETRY_STRIDE;
+      const o = i * stride;
       const comX = telemetry[o];
       const comY = telemetry[o + 1];
       const comZ = telemetry[o + 2];
@@ -744,6 +799,23 @@ export class LabScene {
         'position'
       ) as THREE.BufferAttribute;
       tetherAttr.needsUpdate = true;
+
+      if (stride >= 16) {
+        const woundRegion = Math.round(telemetry[o + 12]);
+        if (woundRegion > 0) {
+          entry.woundGroup.visible = true;
+          entry.woundGroup.position.set(
+            telemetry[o + 13],
+            telemetry[o + 14],
+            telemetry[o + 15]
+          );
+          entry.woundGroup.quaternion.copy(this.camera.quaternion);
+        } else {
+          entry.woundGroup.visible = false;
+        }
+      } else {
+        entry.woundGroup.visible = false;
+      }
     }
   }
 
@@ -778,6 +850,15 @@ export class LabScene {
     cpTether.renderOrder = 4;
     group.add(cpTether);
 
+    const woundGroup = new THREE.Group();
+    const woundRing = new THREE.Mesh(this.woundRingGeo, this.woundRingMat);
+    woundRing.renderOrder = 12;
+    const woundCore = new THREE.Mesh(this.woundCoreGeo, this.woundCoreMat);
+    woundCore.renderOrder = 13;
+    woundGroup.add(woundRing, woundCore);
+    woundGroup.visible = false;
+    group.add(woundGroup);
+
     this.telemetryGroup.add(group);
     return {
       group,
@@ -787,6 +868,8 @@ export class LabScene {
       cpRing,
       cpTether,
       cpTetherPositions,
+      woundGroup,
+      woundRing,
     };
   }
 
@@ -888,7 +971,118 @@ export class LabScene {
     });
   }
 
+  /**
+   * Spawns a crisp fast-fading glowing bullet tracer (0.12s lifetime) from `from` to `to`
+   * and an impact spark burst at `to`.
+   */
+  public spawnTracer(
+    from: THREE.Vector3,
+    to: THREE.Vector3,
+    colorHex: number,
+    spawnSparks = true
+  ): void {
+    const dist = from.distanceTo(to);
+    if (dist > 0.005) {
+      const mid = this.tempVecA.addVectors(from, to).multiplyScalar(0.5);
+      const beamMat = new THREE.MeshBasicMaterial({
+        color: colorHex,
+        transparent: true,
+        opacity: 0.92,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const beam = new THREE.Mesh(this.tracerBeamGeo, beamMat);
+      beam.position.copy(mid);
+      beam.lookAt(to);
+      beam.scale.set(1, 1, dist);
+      this.scene.add(beam);
+
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([from, to]);
+      const lineMat = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const line = new THREE.Line(lineGeo, lineMat);
+      this.scene.add(line);
+
+      this.tracerEffects.push({
+        beam,
+        line,
+        age: 0,
+        duration: 0.12,
+      });
+    }
+
+    if (spawnSparks) {
+      this.spawnSparkBurst(to, from, colorHex);
+    }
+  }
+
+  private spawnSparkBurst(
+    pos: THREE.Vector3,
+    origin: THREE.Vector3,
+    colorHex: number
+  ): void {
+    // Brief bright impact flash core
+    this.spawnImpulseEffect(pos, 'punch');
+
+    const incomingDir = this.tempVecB.subVectors(origin, pos);
+    if (incomingDir.lengthSq() > 1e-6) {
+      incomingDir.normalize();
+    } else {
+      incomingDir.set(0, 1, 0);
+    }
+
+    const sparkCount = 10;
+    for (let i = 0; i < sparkCount; i++) {
+      const sparkMat = new THREE.MeshBasicMaterial({
+        color: i % 2 === 0 ? 0xfff3b0 : colorHex,
+        transparent: true,
+        opacity: 0.98,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.sparkGeo, sparkMat);
+      mesh.position.copy(pos);
+
+      const velocity = new THREE.Vector3(
+        (Math.random() - 0.5) * 2.2 + incomingDir.x * 1.1,
+        Math.random() * 1.6 + 0.35 + incomingDir.y * 0.6,
+        (Math.random() - 0.5) * 2.2 + incomingDir.z * 1.1
+      )
+        .normalize()
+        .multiplyScalar(2.6 + Math.random() * 4.4);
+
+      const lookTarget = this.tempVecC.copy(pos).add(velocity);
+      mesh.lookAt(lookTarget);
+      this.scene.add(mesh);
+
+      this.sparkParticles.push({
+        mesh,
+        velocity,
+        age: 0,
+        duration: 0.16 + Math.random() * 0.12,
+      });
+    }
+  }
+
   public updateEffects(dt: number): void {
+    this.fxTime += dt;
+
+    // Pulse & billboard active wound rings
+    if (this.telemetryGroup.visible) {
+      const pulse = 1 + 0.24 * Math.sin(this.fxTime * 9.5);
+      for (const entry of this.telemetryPool) {
+        if (entry.group.visible && entry.woundGroup.visible) {
+          entry.woundGroup.quaternion.copy(this.camera.quaternion);
+          entry.woundRing.scale.setScalar(pulse);
+        }
+      }
+    }
+
     for (let i = this.impulseEffects.length - 1; i >= 0; i--) {
       const fx = this.impulseEffects[i];
       fx.age += dt;
@@ -912,6 +1106,45 @@ export class LabScene {
           (fx.flashCore.material as THREE.Material).dispose();
         }
         this.impulseEffects.splice(i, 1);
+      }
+    }
+
+    for (let i = this.tracerEffects.length - 1; i >= 0; i--) {
+      const fx = this.tracerEffects[i];
+      fx.age += dt;
+      const t = Math.min(1, fx.age / fx.duration);
+      const fade = 1 - t;
+      (fx.beam.material as THREE.MeshBasicMaterial).opacity = fade * 0.9;
+      (fx.line.material as THREE.LineBasicMaterial).opacity = fade * 0.95;
+
+      if (t >= 1) {
+        this.scene.remove(fx.beam);
+        this.scene.remove(fx.line);
+        (fx.beam.material as THREE.Material).dispose();
+        fx.line.geometry.dispose();
+        (fx.line.material as THREE.Material).dispose();
+        this.tracerEffects.splice(i, 1);
+      }
+    }
+
+    for (let i = this.sparkParticles.length - 1; i >= 0; i--) {
+      const spark = this.sparkParticles[i];
+      spark.age += dt;
+      const t = Math.min(1, spark.age / spark.duration);
+
+      spark.velocity.y -= 9.8 * dt;
+      spark.mesh.position.addScaledVector(spark.velocity, dt);
+      const lookTarget = this.tempVecA
+        .copy(spark.mesh.position)
+        .add(spark.velocity);
+      spark.mesh.lookAt(lookTarget);
+      spark.mesh.scale.set(1, 1, Math.max(0.25, 1 - t * 0.7));
+      (spark.mesh.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.98;
+
+      if (t >= 1) {
+        this.scene.remove(spark.mesh);
+        (spark.mesh.material as THREE.Material).dispose();
+        this.sparkParticles.splice(i, 1);
       }
     }
   }

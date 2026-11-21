@@ -5,6 +5,7 @@ pub mod body;
 pub mod collision;
 pub mod joint;
 pub mod math;
+pub mod reflex;
 pub mod skeleton;
 pub mod world;
 
@@ -15,10 +16,11 @@ pub use body::{ColliderShape, RigidBody};
 pub use collision::{Contact, StaticBox};
 pub use joint::{Joint, JointKind};
 pub use math::{inertia_box, inertia_capsule, inertia_sphere, swing_twist_decomposition};
+pub use reflex::{apply_procedural_reflexes, ReflexState, WoundEvent, WoundRegion};
 pub use skeleton::{
     spawn_humanoid, spawn_humanoid_with_profile, BodyProfile, BoneId, JointId, RagdollInstance,
 };
-pub use world::{ArsaWorld, GrabConstraint, RaycastHit};
+pub use world::{ArsaWorld, GrabConstraint, RaycastHit, WeaponKind, WeaponShotResult};
 
 #[cfg(test)]
 mod tests {
@@ -292,5 +294,128 @@ mod tests {
             saw_reaction && horiz_disp > 0.25,
             "shove did not trigger expected displacement/reaction: saw_reaction={saw_reaction}, horiz_disp={horiz_disp}"
         );
+    }
+
+    #[test]
+    fn test_pistol_arm_shot_triggers_reach_for_wound() {
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::ZERO);
+
+        for _ in 0..15 {
+            world.step(1.0 / 60.0);
+        }
+
+        let left_forearm_idx = world.ragdolls[id].body_indices[BoneId::LeftForearm as usize];
+        let right_hand_idx = world.ragdolls[id].body_indices[BoneId::RightHand as usize];
+        let forearm_pos = world.bodies[left_forearm_idx].position;
+        let resting_dist = (world.bodies[right_hand_idx].position - forearm_pos).length();
+
+        let res = world.fire_weapon(
+            forearm_pos + Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            WeaponKind::Pistol,
+        );
+        assert_eq!(res.hit_ragdoll_id, Some(id));
+        assert_eq!(res.hit_region, WoundRegion::LeftArm);
+
+        for _ in 0..48 {
+            world.step(1.0 / 60.0);
+        }
+
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf after pistol arm shot"
+            );
+        }
+
+        let wound = world.ragdolls[id]
+            .reflex
+            .active_wound
+            .expect("active wound should be set");
+        assert_eq!(wound.region, WoundRegion::LeftArm);
+        let wound_world = world.bodies[world.ragdolls[id].body_indices[wound.bone as usize]]
+            .world_point(wound.local_point);
+        let reached_dist = (world.bodies[right_hand_idx].position - wound_world).length();
+        assert!(
+            reached_dist < resting_dist * 0.72,
+            "RightHand did not reach toward LeftArm wound: resting_dist={resting_dist}, reached_dist={reached_dist}"
+        );
+    }
+
+    #[test]
+    fn test_shotgun_knockback_and_brace() {
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::ZERO);
+
+        for _ in 0..15 {
+            world.step(1.0 / 60.0);
+        }
+
+        let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+        let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+        let initial_pos = world.bodies[pelvis_idx].position;
+        let chest_pos = world.bodies[chest_idx].position;
+
+        let res = world.fire_weapon(
+            chest_pos + Vec3::new(0.0, 0.0, 2.2),
+            Vec3::new(0.0, 0.0, -1.0),
+            WeaponKind::Shotgun,
+        );
+        assert!(!res.hits.is_empty());
+        assert_eq!(res.hit_ragdoll_id, Some(id));
+
+        for _ in 0..72 {
+            world.step(1.0 / 60.0);
+        }
+
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf after shotgun blast"
+            );
+        }
+
+        let final_pos = world.bodies[pelvis_idx].position;
+        let backward_disp = initial_pos.z - final_pos.z;
+        assert!(
+            backward_disp > 0.35,
+            "shotgun blast did not produce strong backward displacement: backward_disp={backward_disp}"
+        );
+        assert!(
+            world.ragdolls[id].reflex.health < 100.0,
+            "health should drop after shotgun blast"
+        );
+    }
+
+    #[test]
+    fn test_headshot_rifle_unconscious() {
+        let mut world = ArsaWorld::new();
+        let id = world.spawn_ragdoll(Vec3::ZERO);
+
+        let head_idx = world.ragdolls[id].body_indices[BoneId::Head as usize];
+        let head_pos = world.bodies[head_idx].position;
+
+        let res = world.fire_weapon(
+            head_pos + Vec3::new(0.0, 0.0, 2.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            WeaponKind::Rifle,
+        );
+        assert_eq!(res.hit_ragdoll_id, Some(id));
+        assert_eq!(res.hit_region, WoundRegion::Head);
+
+        for _ in 0..12 {
+            world.step(1.0 / 60.0);
+        }
+
+        let r = &world.ragdolls[id];
+        assert!(r.reflex.unconscious, "headshot rifle should cause unconsciousness");
+        assert_eq!(r.balance.state, BehaviorState::Unconscious);
     }
 }

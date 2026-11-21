@@ -15,6 +15,7 @@ pub enum BehaviorState {
     Falling = 2,
     Downed = 3,
     Passive = 4,
+    Unconscious = 5,
 }
 
 /// Per-ragdoll balance telemetry and capture-point stepping state.
@@ -120,9 +121,13 @@ pub fn update_ragdoll_balance(
     );
     ragdoll.balance.capture_point = cp_xz;
 
-    // 4. Passive mode early out
-    if !ragdoll.active_enabled {
-        ragdoll.balance.state = BehaviorState::Passive;
+    // 4. Passive or unconscious early out
+    if !ragdoll.active_enabled || ragdoll.reflex.unconscious {
+        ragdoll.balance.state = if !ragdoll.active_enabled {
+            BehaviorState::Passive
+        } else {
+            BehaviorState::Unconscious
+        };
         ragdoll.balance.step_active = false;
         for &j_idx in &ragdoll.joint_indices {
             joints[j_idx].motor_stiffness = 0.0;
@@ -495,7 +500,7 @@ pub fn update_ragdoll_balance(
                 joints[j_idx].max_torque *= 0.15;
             }
         }
-        BehaviorState::Passive => {}
+        BehaviorState::Passive | BehaviorState::Unconscious => {}
     }
 }
 
