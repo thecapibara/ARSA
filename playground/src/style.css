@@ -751,3 +751,14 @@ kbd,
   margin: 0 4px;
   align-self: center;
 }
+
+.bar-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  padding: 0 4px 0 6px;
+  white-space: nowrap;
+  user-select: none;
+}
