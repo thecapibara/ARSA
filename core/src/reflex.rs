@@ -241,14 +241,15 @@ impl RagdollInstance {
 }
 
 /// Applies procedural trauma, vestibular head stabilization, environmental hand grabbing,
-/// brace-for-impact, and reach-for-wound reflexes after [`crate::balance::update_ragdoll_balance`]
-/// and before [`Joint::apply_muscle_motor`].
+/// brace-for-impact, treading-water, and reach-for-wound reflexes after
+/// [`crate::balance::update_ragdoll_balance`] and before [`Joint::apply_muscle_motor`].
 pub fn apply_procedural_reflexes(
     ragdoll: &mut RagdollInstance,
     bodies: &mut [RigidBody],
     joints: &mut [Joint],
     static_boxes: &[StaticBox],
     ground_below_pelvis: f32,
+    water_level: Option<f32>,
     dt: f32,
 ) {
     if dt <= 0.0 {
@@ -430,14 +431,140 @@ pub fn apply_procedural_reflexes(
     let left_arm_busy_pre = left_grab_active || left_holding_initial;
     let right_arm_busy_pre = right_grab_active || right_holding_initial;
 
-    // 5. High Fall (Mid-Air Bicycle & Windmill), Tumble / Fetal Protect, & Brace-for-Impact
+    // 5. Treading Water, High Fall (Mid-Air Bicycle & Windmill), Tumble / Fetal Protect, & Brace-for-Impact
     let pelvis_pos = bodies[pelvis_idx].position;
     let height_above_ground = (pelvis_pos.y - ground_below_pelvis).max(0.0);
     let no_hand_grab = !left_grab_active && !right_grab_active;
     let fast_spin = bodies[chest_idx].angular_velocity.length() > 3.2
         || bodies[pelvis_idx].angular_velocity.length() > 3.2;
+    let is_electrocuted = ragdoll.reflex.status_effect == StatusEffect::Electrocuted
+        && ragdoll.reflex.status_intensity > 0.2;
+    let treading_water = water_level.is_some_and(|wl| pelvis_pos.y < wl)
+        && !ragdoll.reflex.unconscious
+        && ragdoll.reflex.health > 18.0
+        && !is_electrocuted;
 
-    if state == BehaviorState::Falling
+    if treading_water {
+        ragdoll.reflex.high_falling = false;
+        ragdoll.reflex.tumbling = false;
+        ragdoll.reflex.bracing = false;
+
+        let tread_s = (ragdoll.balance.idle_time * 4.2).sin();
+        let tread_c = (ragdoll.balance.idle_time * 4.2).cos();
+
+        // Keep torso gently upright instead of curling up
+        for jid in [JointId::LowerSpine, JointId::ChestSpine] {
+            set_motor_target(ragdoll, joints, jid, Quat::IDENTITY);
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(140.0 * grav_scale);
+            j.motor_damping = j.motor_damping.max(8.0 * damp_scale);
+            j.max_torque = j.max_torque.max(130.0 * grav_scale);
+        }
+
+        // Gentle alternating flutter-kick legs
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftHip,
+            Quat::from_rotation_x(-0.18 + 0.32 * tread_s),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightHip,
+            Quat::from_rotation_x(-0.18 - 0.32 * tread_s),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftKnee,
+            Quat::from_rotation_x(0.32 + 0.24 * (-tread_s).max(0.0)),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightKnee,
+            Quat::from_rotation_x(0.32 + 0.24 * tread_s.max(0.0)),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::LeftAnkle,
+            Quat::from_rotation_x(0.25 + 0.18 * tread_s),
+        );
+        set_motor_target(
+            ragdoll,
+            joints,
+            JointId::RightAnkle,
+            Quat::from_rotation_x(0.25 - 0.18 * tread_s),
+        );
+        for jid in [JointId::LeftHip, JointId::RightHip] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(110.0 * grav_scale);
+            j.motor_damping = j.motor_damping.max(4.5 * damp_scale);
+            j.max_torque = j.max_torque.max(115.0 * grav_scale);
+        }
+        for jid in [JointId::LeftKnee, JointId::RightKnee] {
+            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+            j.motor_stiffness = j.motor_stiffness.max(85.0 * grav_scale);
+            j.motor_damping = j.motor_damping.max(4.0 * damp_scale);
+            j.max_torque = j.max_torque.max(90.0 * grav_scale);
+        }
+
+        // Gentle sculling arm strokes
+        if !left_arm_busy_pre {
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::LeftShoulder,
+                Quat::from_euler(
+                    EulerRot::XYZ,
+                    -0.35 + 0.35 * tread_s,
+                    0.25 * tread_c,
+                    0.58 + 0.22 * tread_c,
+                ),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::LeftElbow,
+                Quat::from_rotation_x(-0.55 - 0.20 * tread_s),
+            );
+            let sh = &mut joints[ragdoll.joint_indices[JointId::LeftShoulder as usize]];
+            sh.motor_stiffness = sh.motor_stiffness.max(55.0 * grav_scale);
+            sh.motor_damping = sh.motor_damping.max(1.5 * damp_scale);
+            sh.max_torque = sh.max_torque.max(60.0 * grav_scale);
+            let el = &mut joints[ragdoll.joint_indices[JointId::LeftElbow as usize]];
+            el.motor_stiffness = el.motor_stiffness.max(40.0 * grav_scale);
+            el.max_torque = el.max_torque.max(45.0 * grav_scale);
+        }
+        if !right_arm_busy_pre {
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightShoulder,
+                Quat::from_euler(
+                    EulerRot::XYZ,
+                    -0.35 - 0.35 * tread_s,
+                    -0.25 * tread_c,
+                    -0.58 - 0.22 * tread_c,
+                ),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightElbow,
+                Quat::from_rotation_x(-0.55 + 0.20 * tread_s),
+            );
+            let sh = &mut joints[ragdoll.joint_indices[JointId::RightShoulder as usize]];
+            sh.motor_stiffness = sh.motor_stiffness.max(55.0 * grav_scale);
+            sh.motor_damping = sh.motor_damping.max(1.5 * damp_scale);
+            sh.max_torque = sh.max_torque.max(60.0 * grav_scale);
+            let el = &mut joints[ragdoll.joint_indices[JointId::RightElbow as usize]];
+            el.motor_stiffness = el.motor_stiffness.max(40.0 * grav_scale);
+            el.max_torque = el.max_torque.max(45.0 * grav_scale);
+        }
+    } else if state == BehaviorState::Falling
         && ragdoll.reflex.health > 20.0
         && no_hand_grab
         && height_above_ground > 1.55 * s_h

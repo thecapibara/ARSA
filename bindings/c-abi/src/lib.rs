@@ -289,6 +289,36 @@ pub unsafe extern "C" fn arsa_world_set_earthquake(handle: *mut ArsaWorldHandle,
     }
 }
 
+/// Sets or clears the global horizontal water surface level (`y` in meters).
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_water_level(
+    handle: *mut ArsaWorldHandle,
+    has_water: bool,
+    level: f32,
+) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world
+            .set_water_level(if has_water { Some(level) } else { None });
+    }
+}
+
+/// Sets the baseline `y = 0` floor friction coefficient (`0.02..=1.5`, default `0.75`).
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_floor_friction(
+    handle: *mut ArsaWorldHandle,
+    friction: f32,
+) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.set_floor_friction(friction);
+    }
+}
+
 /// Sets the procedural stagger/intoxication level (`0.0..=1.0`) for all ragdolls in the world.
 ///
 /// # Safety
@@ -1766,6 +1796,28 @@ mod tests {
                 assert!(v.is_finite());
             }
 
+            arsa_world_destroy(world);
+        }
+    }
+
+    #[test]
+    fn test_c_abi_water_level_and_floor_friction() {
+        unsafe {
+            arsa_world_set_water_level(std::ptr::null_mut(), true, 1.5);
+            arsa_world_set_floor_friction(std::ptr::null_mut(), 0.04);
+
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+            arsa_world_set_water_level(world, true, 1.5);
+            arsa_world_set_floor_friction(world, 0.04);
+            let _box_idx =
+                arsa_world_spawn_box(world, 0.0, 1.4, 0.0, 0.2, 0.2, 0.2, 6.0, 1.5, 0.0, 0.0);
+            for _ in 0..30 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+            arsa_world_set_water_level(world, false, 0.0);
+            arsa_world_set_floor_friction(world, 0.75);
+            arsa_world_step(world, 1.0 / 60.0);
             arsa_world_destroy(world);
         }
     }

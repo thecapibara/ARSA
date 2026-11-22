@@ -9,8 +9,13 @@ use super::{Contact, ContactMaterial, Heightfield, StaticBox};
 
 #[inline]
 fn combine_material(f1: f32, r1: f32, f2: f32, r2: f32) -> ContactMaterial {
+    let min_f = f1.min(f2);
     ContactMaterial {
-        friction: (f1 * f2).sqrt(),
+        friction: if min_f < 0.25 {
+            min_f
+        } else {
+            (f1 * f2).sqrt()
+        },
         restitution: r1.max(r2),
     }
 }
@@ -20,10 +25,11 @@ fn evaluate_ground_surface(
     pt: Vec3,
     heightfield: Option<&Heightfield>,
     query_hooks: Option<&WorldQueryHooks>,
+    floor_friction: f32,
 ) -> (f32, Vec3, f32, f32) {
     let mut best_y = 0.0_f32;
     let mut best_normal = Vec3::Y;
-    let mut best_friction = 0.75_f32;
+    let mut best_friction = floor_friction;
     let mut best_restitution = 0.05_f32;
 
     if let Some(hf) = heightfield {
@@ -78,12 +84,13 @@ pub(super) fn detect_ground_contacts(
     idx: usize,
     heightfield: Option<&Heightfield>,
     query_hooks: Option<&WorldQueryHooks>,
+    floor_friction: f32,
     out: &mut Vec<Contact>,
 ) {
     let b = &bodies[idx];
     let mut emit_point = |pt: Vec3, radius: f32| {
         let (ground_y, ground_normal, gf, gr) =
-            evaluate_ground_surface(pt, heightfield, query_hooks);
+            evaluate_ground_surface(pt, heightfield, query_hooks, floor_friction);
         let lowest_y = pt.y - radius;
         if lowest_y < ground_y {
             let pen = (ground_y - lowest_y) * ground_normal.y.max(0.25);

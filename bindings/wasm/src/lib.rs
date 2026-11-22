@@ -436,6 +436,27 @@ impl ArsaSim {
         self.world.earthquake_magnitude
     }
 
+    /// Sets or clears the global horizontal water surface level (`y` in meters).
+    pub fn set_water_level(&mut self, has_water: bool, level: f32) {
+        self.world
+            .set_water_level(if has_water { Some(level) } else { None });
+    }
+
+    /// Returns the active water surface level in meters, or `-1000.0` if disabled.
+    pub fn get_water_level(&self) -> f32 {
+        self.world.water_level.unwrap_or(-1000.0)
+    }
+
+    /// Sets the baseline `y = 0` floor friction coefficient (`0.02..=1.5`, default `0.75`).
+    pub fn set_floor_friction(&mut self, friction: f32) {
+        self.world.set_floor_friction(friction);
+    }
+
+    /// Returns the baseline `y = 0` floor friction coefficient.
+    pub fn get_floor_friction(&self) -> f32 {
+        self.world.floor_friction
+    }
+
     /// Updates the anthropometric body profile of all spawned ragdolls in-place
     /// without resetting the scene.
     pub fn update_all_ragdolls_profile(&mut self, height_m: f32, mass_kg: f32, muscle_ratio: f32) {

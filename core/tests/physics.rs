@@ -2913,3 +2913,195 @@ fn test_locomotion_with_leg_wound_limps_slower() {
         "expected wounded ragdoll to limp noticeably slower than healthy (healthy={healthy_dist:.3}m, wounded={wounded_dist:.3}m)"
     );
 }
+
+#[test]
+fn test_water_buoyancy_floats_ragdoll_and_extinguishes_fire() {
+    use arsa_core::StatusEffect;
+
+    let mut world = ArsaWorld::new();
+    world.set_water_level(Some(1.6));
+
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 1.8, 0.0));
+    assert!(world.set_ragdoll_status(id, StatusEffect::OnFire, 1.0, 5.0));
+    assert_eq!(world.ragdoll_status(id), Some((StatusEffect::OnFire, 1.0)));
+
+    let box_idx = world.spawn_box(Vec3::new(2.0, 1.8, 0.0), Vec3::splat(0.22), 6.0, Vec3::ZERO);
+
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+    for _ in 0..120 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf in water buoyancy test"
+            );
+        }
+    }
+
+    assert_eq!(
+        world.ragdoll_status(id),
+        Some((StatusEffect::None, 0.0)),
+        "expected water immersion to extinguish OnFire status"
+    );
+
+    let pelvis_y = world.bodies[pelvis_idx].position.y;
+    assert!(
+        pelvis_y > 0.65,
+        "expected ragdoll pelvis to float near water surface (> 0.65m), got {pelvis_y:.3}m"
+    );
+
+    let box_y = world.bodies[box_idx].position.y;
+    assert!(
+        (box_y - 1.6).abs() < 0.35,
+        "expected 6kg wooden box to float near water level y=1.6, got {box_y:.3}m"
+    );
+}
+
+#[test]
+fn test_taser_while_walking_topples_forward_along_momentum() {
+    use arsa_core::StatusEffect;
+
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+
+    assert!(world.set_ragdoll_desired_velocity(id, 0.0, 1.8));
+    for _ in 0..48 {
+        world.step(1.0 / 60.0);
+    }
+
+    let pre_taser_z = world.bodies[pelvis_idx].position.z;
+    assert!(
+        pre_taser_z > 0.3,
+        "expected ragdoll to build forward walking momentum before taser, got z={pre_taser_z:.3}"
+    );
+
+    assert!(world.set_ragdoll_status(id, StatusEffect::Electrocuted, 1.0, 2.5));
+    for _ in 0..72 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during walking taser fall"
+            );
+        }
+    }
+
+    let post_taser_z = world.bodies[pelvis_idx].position.z;
+    assert!(
+        post_taser_z > pre_taser_z + 0.25,
+        "expected walking ragdoll to fall forward along +Z momentum (pre={pre_taser_z:.3}, post={post_taser_z:.3})"
+    );
+    assert!(
+        matches!(
+            world.ragdolls[id].balance.state,
+            BehaviorState::Falling | BehaviorState::Downed
+        ),
+        "expected tased walking ragdoll to enter Falling or Downed, got {:?}",
+        world.ragdolls[id].balance.state
+    );
+}
+
+#[test]
+fn test_fast_projectile_box_anti_tunneling_hits_ragdoll() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    for _ in 0..15 {
+        world.step(1.0 / 60.0);
+    }
+
+    let chest_idx = world.ragdolls[id].body_indices[BoneId::Chest as usize];
+    let chest_start = world.bodies[chest_idx].position;
+
+    let proj_idx = world.spawn_box(
+        Vec3::new(chest_start.x, chest_start.y, chest_start.z + 2.0),
+        Vec3::splat(0.14),
+        6.0,
+        Vec3::new(0.0, 0.0, -45.0),
+    );
+
+    let mut min_chest_vz = 0.0_f32;
+    for _ in 0..18 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during fast projectile test"
+            );
+        }
+        min_chest_vz = min_chest_vz.min(world.bodies[chest_idx].linear_velocity.z);
+    }
+
+    let proj_vel_z = world.bodies[proj_idx].linear_velocity.z;
+    let chest_disp_z = world.bodies[chest_idx].position.z - chest_start.z;
+    assert!(
+        min_chest_vz < -1.5 && chest_disp_z < -0.10,
+        "expected 45 m/s box to collide with ragdoll chest without tunneling: min_chest_vz={min_chest_vz:.3}, chest_disp_z={chest_disp_z:.3}, proj_vel_z={proj_vel_z:.3}"
+    );
+    assert!(
+        proj_vel_z > -42.0,
+        "expected projectile box to lose forward speed upon impacting chest, got proj_vel_z={proj_vel_z:.3}"
+    );
+}
+
+#[test]
+fn test_low_friction_ice_allows_sliding() {
+    let mut normal_world = ArsaWorld::new();
+    normal_world.set_floor_friction(0.75);
+    let normal_box = normal_world.spawn_box(
+        Vec3::new(0.0, 0.2, 0.0),
+        Vec3::splat(0.2),
+        8.0,
+        Vec3::new(4.0, 0.0, 0.0),
+    );
+
+    let mut ice_world = ArsaWorld::new();
+    ice_world.set_floor_friction(0.04);
+    let ice_box = ice_world.spawn_box(
+        Vec3::new(0.0, 0.2, 0.0),
+        Vec3::splat(0.2),
+        8.0,
+        Vec3::new(4.0, 0.0, 0.0),
+    );
+    let ice_ragdoll = ice_world.spawn_ragdoll(Vec3::new(0.0, 0.02, 2.0));
+    let ice_pelvis = ice_world.ragdolls[ice_ragdoll].body_indices[BoneId::Pelvis as usize];
+    for _ in 0..10 {
+        ice_world.step(1.0 / 60.0);
+    }
+    let _hit = ice_world.apply_shove(Vec3::new(-2.0, 1.15, 2.0), Vec3::new(1.0, 0.0, 0.0), 55.0);
+
+    for _ in 0..90 {
+        normal_world.step(1.0 / 60.0);
+        ice_world.step(1.0 / 60.0);
+        for (i, b) in ice_world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "ice world body {i} produced NaN/Inf"
+            );
+        }
+    }
+
+    let normal_x = normal_world.bodies[normal_box].position.x;
+    let ice_x = ice_world.bodies[ice_box].position.x;
+    let ice_ragdoll_x = ice_world.bodies[ice_pelvis].position.x;
+    assert!(
+        ice_x > normal_x * 2.5 && ice_x > 3.0,
+        "expected box on 0.04 ice friction to slide much farther than 0.75 friction: normal_x={normal_x:.3}, ice_x={ice_x:.3}"
+    );
+    assert!(
+        ice_ragdoll_x > 0.2,
+        "expected shoved ragdoll on ice to slide in +X, got ice_ragdoll_x={ice_ragdoll_x:.3}"
+    );
+}

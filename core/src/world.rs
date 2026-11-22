@@ -143,6 +143,8 @@ pub struct ArsaWorld {
     pub lod_focus: Option<Vec3>,
     pub lod_reduced_dist: f32,
     pub lod_sleep_dist: f32,
+    pub water_level: Option<f32>,
+    pub floor_friction: f32,
     connected_pairs: HashSet<(usize, usize)>,
     held_skip_pairs_buf: Vec<(usize, usize)>,
     contacts_buf: Vec<Contact>,
@@ -181,6 +183,8 @@ impl ArsaWorld {
             lod_focus: None,
             lod_reduced_dist: 15.0,
             lod_sleep_dist: 35.0,
+            water_level: None,
+            floor_friction: 0.75,
             connected_pairs: HashSet::new(),
             held_skip_pairs_buf: Vec::new(),
             contacts_buf: Vec::new(),
@@ -571,6 +575,31 @@ impl ArsaWorld {
         }
     }
 
+    /// Sets or clears the global horizontal water surface level (`y` in meters).
+    /// Ignores non-finite values and wakes all sleeping bodies when the water level changes.
+    pub fn set_water_level(&mut self, level: Option<f32>) {
+        if let Some(wl) = level {
+            if !wl.is_finite() {
+                return;
+            }
+        }
+        if self.water_level != level {
+            self.water_level = level;
+            for b in &mut self.bodies {
+                if b.is_sleeping {
+                    b.wake_up();
+                }
+            }
+        }
+    }
+
+    /// Sets the baseline `y = 0` floor friction coefficient (clamped to `0.02..=1.5`, default `0.75`).
+    pub fn set_floor_friction(&mut self, friction: f32) {
+        if friction.is_finite() {
+            self.floor_friction = friction.clamp(0.02, 1.5);
+        }
+    }
+
     /// Updates the anthropometric body profile of all ragdolls in-place without resetting the scene.
     pub fn update_all_ragdolls_profile(&mut self, profile: BodyProfile) {
         for ragdoll in &mut self.ragdolls {
@@ -907,7 +936,19 @@ impl ArsaWorld {
             }
         }
 
-        let substeps = self.substeps.max(1);
+        let base_substeps = self.substeps.max(1);
+        let mut max_speed_sq = 0.0_f32;
+        for b in &self.bodies {
+            if b.inv_mass > 0.0 && !b.is_sleeping {
+                max_speed_sq = max_speed_sq.max(b.linear_velocity.length_squared());
+            }
+        }
+        let max_speed = max_speed_sq.sqrt();
+        let substeps = if max_speed * (clamped_dt / base_substeps as f32) > 0.045 {
+            ((max_speed * clamped_dt / 0.04).ceil() as usize).clamp(base_substeps, 24)
+        } else {
+            base_substeps
+        };
         let sub_dt = clamped_dt / (substeps as f32);
         let inv_dt = 1.0 / sub_dt;
         let gravity_mag = self.gravity.length();
@@ -1016,6 +1057,57 @@ impl ArsaWorld {
                 }
             }
 
+            // Water buoyancy, hydrodynamic drag, and automatic fire extinguishing
+            if let Some(wl) = self.water_level {
+                for b in &mut self.bodies {
+                    if b.inv_mass > 0.0 && !b.is_sleeping {
+                        let hy = match b.collider {
+                            ColliderShape::Sphere { radius } => radius,
+                            ColliderShape::Capsule {
+                                radius,
+                                half_length,
+                            } => radius + half_length,
+                            ColliderShape::Box { half_extents } => half_extents.y,
+                        };
+                        let sub =
+                            ((wl - (b.position.y - hy)) / (2.0 * hy).max(0.05)).clamp(0.0, 1.0);
+                        if sub > 0.0 {
+                            let buoyancy_ratio = if b.ragdoll_id.is_some() {
+                                if b.bone_id == Some(BoneId::Chest as u8)
+                                    || b.bone_id == Some(BoneId::Head as u8)
+                                {
+                                    1.16
+                                } else {
+                                    1.04
+                                }
+                            } else {
+                                match b.collider {
+                                    ColliderShape::Box { .. } => 1.32,
+                                    ColliderShape::Sphere { .. } => 0.88,
+                                    ColliderShape::Capsule { .. } => 1.0,
+                                }
+                            };
+                            b.linear_velocity.y += gravity_mag * buoyancy_ratio * sub * sub_dt;
+                            b.linear_velocity *= (-3.4 * sub * sub_dt).exp();
+                            b.angular_velocity *= (-4.2 * sub * sub_dt).exp();
+                        }
+                    }
+                }
+                for ragdoll in &mut self.ragdolls {
+                    if ragdoll.reflex.status_effect == StatusEffect::OnFire {
+                        let pelvis_y = self.bodies[ragdoll.body_indices[BoneId::Pelvis as usize]]
+                            .position
+                            .y;
+                        let chest_y = self.bodies[ragdoll.body_indices[BoneId::Chest as usize]]
+                            .position
+                            .y;
+                        if pelvis_y < wl + 0.15 || chest_y < wl + 0.15 {
+                            ragdoll.reflex.clear_status();
+                        }
+                    }
+                }
+            }
+
             // 1b. Update active balance controllers, procedural reflexes & apply PD muscle motors
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
                 if ragdoll.lod == RagdollLod::Sleep {
@@ -1039,6 +1131,8 @@ impl ArsaWorld {
                     self.foot_contacts_buf[r_idx],
                     gravity_mag,
                     self.earthquake_magnitude,
+                    self.floor_friction,
+                    self.water_level,
                     ctrl_dt,
                 );
             }
@@ -1097,6 +1191,7 @@ impl ArsaWorld {
                 &self.static_boxes,
                 self.heightfield.as_ref(),
                 self.world_query_hooks.as_ref(),
+                self.floor_friction,
                 &self.connected_pairs,
                 &self.held_skip_pairs_buf,
                 &mut self.body_aabbs_buf,
@@ -1826,6 +1921,8 @@ impl ArsaWorld {
                 self.foot_contacts_buf[r_idx],
                 gravity_mag,
                 self.earthquake_magnitude,
+                self.floor_friction,
+                self.water_level,
                 clamped_dt,
             );
         }
@@ -2552,6 +2649,8 @@ fn step_ragdoll_controllers(
     foot_contacts: (bool, bool),
     gravity_mag: f32,
     earthquake_magnitude: f32,
+    floor_friction: f32,
+    water_level: Option<f32>,
     ctrl_dt: f32,
 ) {
     let pelvis_idx = ragdoll.body_indices[BoneId::Pelvis as usize];
@@ -2624,6 +2723,8 @@ fn step_ragdoll_controllers(
         step_target_ground_y,
         gravity_mag,
         earthquake_magnitude,
+        floor_friction,
+        water_level,
         ctrl_dt,
     );
     ragdoll.reflex.incoming_threat = detect_incoming_threat(bodies, ragdoll);
@@ -2642,6 +2743,7 @@ fn step_ragdoll_controllers(
         joints,
         static_boxes,
         ground_below_pelvis,
+        water_level,
         ctrl_dt,
     );
 }

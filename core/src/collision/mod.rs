@@ -226,6 +226,7 @@ pub fn detect_contacts(
     static_boxes: &[StaticBox],
     heightfield: Option<&Heightfield>,
     query_hooks: Option<&WorldQueryHooks>,
+    floor_friction: f32,
     connected_pairs: &HashSet<(usize, usize)>,
     held_skip_pairs: &[(usize, usize)],
     body_aabbs: &mut Vec<(Vec3, Vec3)>,
@@ -244,7 +245,14 @@ pub fn detect_contacts(
         }
         let (b_min, b_max) = body_aabbs[idx];
         if has_terrain_queries || b_min.y < 0.0 {
-            narrowphase::detect_ground_contacts(bodies, idx, heightfield, query_hooks, out);
+            narrowphase::detect_ground_contacts(
+                bodies,
+                idx,
+                heightfield,
+                query_hooks,
+                floor_friction,
+                out,
+            );
         }
 
         for sb in static_boxes {
