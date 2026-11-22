@@ -13,7 +13,9 @@ use crate::collision::{
     solve_contacts_velocity_ordered, Contact, Heightfield, StaticBox,
 };
 use crate::joint::Joint;
-use crate::reflex::{apply_procedural_reflexes, HeldObject, IncomingThreat, WoundRegion};
+use crate::reflex::{
+    apply_procedural_reflexes, HeldObject, IncomingThreat, StatusEffect, WoundRegion,
+};
 use crate::retarget::{convert_angular_vec_to_target, CoordinateSpace};
 use crate::skeleton::{
     spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId, JointId,
@@ -319,6 +321,9 @@ impl ArsaWorld {
     pub fn set_ragdoll_active(&mut self, ragdoll_id: usize, active: bool) {
         if let Some(r) = self.ragdolls.get_mut(ragdoll_id) {
             r.active_enabled = active;
+            if !active {
+                r.reflex.clear_status();
+            }
         }
     }
 
@@ -326,7 +331,83 @@ impl ArsaWorld {
     pub fn set_all_ragdolls_active(&mut self, active: bool) {
         for r in &mut self.ragdolls {
             r.active_enabled = active;
+            if !active {
+                r.reflex.clear_status();
+            }
         }
+    }
+
+    /// Applies a procedural [`StatusEffect`] (`OnFire`, `Electrocuted`, or `None`) to `ragdoll_id`
+    /// with clamped `intensity` (`0.0..=1.0`) and `duration_sec` (`>= 0.0`).
+    /// Returns `false` if `ragdoll_id` is out of range.
+    pub fn set_ragdoll_status(
+        &mut self,
+        ragdoll_id: usize,
+        effect: StatusEffect,
+        intensity: f32,
+        duration_sec: f32,
+    ) -> bool {
+        let Some(ragdoll) = self.ragdolls.get_mut(ragdoll_id) else {
+            return false;
+        };
+        let clamped_intensity = if intensity.is_finite() {
+            intensity.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let clamped_duration = if duration_sec.is_finite() {
+            duration_sec.max(0.0)
+        } else {
+            0.0
+        };
+
+        if effect == StatusEffect::None
+            || clamped_intensity <= 0.0
+            || clamped_duration <= 0.0
+            || !ragdoll.active_enabled
+            || ragdoll.reflex.unconscious
+        {
+            ragdoll.reflex.clear_status();
+            return true;
+        }
+
+        if ragdoll.reflex.status_effect != effect {
+            ragdoll.reflex.status_phase = 0.0;
+        }
+        ragdoll.reflex.status_effect = effect;
+        ragdoll.reflex.status_intensity = clamped_intensity;
+        ragdoll.reflex.status_timer = clamped_duration;
+
+        if (effect == StatusEffect::Electrocuted && clamped_intensity > 0.25)
+            || (effect == StatusEffect::OnFire && clamped_intensity > 0.7)
+        {
+            ragdoll.reflex.left_held = None;
+            ragdoll.reflex.right_held = None;
+            ragdoll.reflex.left_grab = None;
+            ragdoll.reflex.right_grab = None;
+        }
+
+        self.wake_ragdoll(ragdoll_id, clamped_duration.max(2.5));
+        true
+    }
+
+    /// Applies a procedural [`StatusEffect`] to all ragdolls in the world.
+    pub fn set_all_ragdolls_status(
+        &mut self,
+        effect: StatusEffect,
+        intensity: f32,
+        duration_sec: f32,
+    ) {
+        for ragdoll_id in 0..self.ragdolls.len() {
+            self.set_ragdoll_status(ragdoll_id, effect, intensity, duration_sec);
+        }
+    }
+
+    /// Returns the active `(StatusEffect, intensity)` for `ragdoll_id`, or `None` if out of range.
+    pub fn ragdoll_status(&self, ragdoll_id: usize) -> Option<(StatusEffect, f32)> {
+        self.ragdolls
+            .get(ragdoll_id)
+            .map(|r| (r.reflex.status_effect, r.reflex.status_intensity))
     }
 
     /// Enables or disables automatic procedural get-up from `Downed` for all ragdolls in the world.

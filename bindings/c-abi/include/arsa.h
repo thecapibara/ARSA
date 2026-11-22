@@ -119,6 +119,13 @@ typedef enum ArsaWeaponKind {
     ARSA_WEAPON_RIFLE = 2
 } ArsaWeaponKind;
 
+/** Procedural status effects for arsa_world_set_ragdoll_status(). */
+typedef enum ArsaStatusEffect {
+    ARSA_STATUS_NONE = 0,
+    ARSA_STATUS_ON_FIRE = 1,
+    ARSA_STATUS_ELECTROCUTED = 2
+} ArsaStatusEffect;
+
 /** Universal skeleton retargeting presets for cross-engine bone conversion. */
 typedef enum ArsaRetargetPreset {
     ARSA_RETARGET_NATIVE = 0,
@@ -519,6 +526,25 @@ bool arsa_world_is_hand_holding(
     const ArsaWorldHandle *handle,
     size_t ragdoll_id,
     bool is_left);
+
+/**
+ * Applies a procedural status effect (ArsaStatusEffect) with intensity (0.0 .. 1.0)
+ * and duration_sec (>= 0.0) to ragdoll_id. Returns false if handle is NULL, ragdoll_id
+ * is invalid, or effect is unknown.
+ */
+bool arsa_world_set_ragdoll_status(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    uint32_t effect,
+    float intensity,
+    float duration_sec);
+
+/**
+ * Returns the active ArsaStatusEffect for ragdoll_id, or UINT32_MAX on invalid handle/id.
+ */
+uint32_t arsa_world_get_ragdoll_status(
+    const ArsaWorldHandle *handle,
+    size_t ragdoll_id);
 
 #ifdef __cplusplus
 }

@@ -1,7 +1,7 @@
 //! WebAssembly bindings (`arsa-wasm`) for the ARSA Active Ragdoll Engine.
 
 use arsa_core::glam::{Quat, Vec3};
-use arsa_core::{ArsaWorld, BodyProfile, Heightfield, WeaponKind};
+use arsa_core::{ArsaWorld, BodyProfile, Heightfield, StatusEffect, WeaponKind};
 use wasm_bindgen::prelude::*;
 
 /// WebAssembly simulation wrapper around `ArsaWorld`.
@@ -825,5 +825,39 @@ impl ArsaSim {
     /// Returns `true` if the specified hand (`is_left`) of `ragdoll_id` is currently holding an object.
     pub fn is_hand_holding(&self, ragdoll_id: usize, is_left: bool) -> bool {
         self.world.is_hand_holding(ragdoll_id, is_left)
+    }
+
+    /// Applies a procedural status effect (`0 = None`, `1 = OnFire`, `2 = Electrocuted`)
+    /// with `intensity` (`0.0..=1.0`) and `duration_sec` (`>= 0.0`) to `ragdoll_id`.
+    pub fn set_ragdoll_status(
+        &mut self,
+        ragdoll_id: usize,
+        effect: u32,
+        intensity: f32,
+        duration_sec: f32,
+    ) -> bool {
+        let Some(status) = StatusEffect::from_u32(effect) else {
+            return false;
+        };
+        self.world
+            .set_ragdoll_status(ragdoll_id, status, intensity, duration_sec)
+    }
+
+    /// Applies a procedural status effect (`0 = None`, `1 = OnFire`, `2 = Electrocuted`)
+    /// to all ragdolls in the world.
+    pub fn set_all_ragdolls_status(&mut self, effect: u32, intensity: f32, duration_sec: f32) {
+        if let Some(status) = StatusEffect::from_u32(effect) {
+            self.world
+                .set_all_ragdolls_status(status, intensity, duration_sec);
+        }
+    }
+
+    /// Returns the active status effect (`0 = None`, `1 = OnFire`, `2 = Electrocuted`)
+    /// for `ragdoll_id`, or `u32::MAX` if `ragdoll_id` is out of range.
+    pub fn get_ragdoll_status(&self, ragdoll_id: usize) -> u32 {
+        self.world
+            .ragdoll_status(ragdoll_id)
+            .map(|(s, _)| s as u32)
+            .unwrap_or(u32::MAX)
     }
 }

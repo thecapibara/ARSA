@@ -3,7 +3,7 @@
 use arsa_core::glam::{Quat, Vec3};
 use arsa_core::{
     ArsaWorld, BodyProfile, CoordinateSpace, GroundHeightFn, Heightfield, RaycastWorldFn,
-    RetargetPreset, SkeletonRetargeter, WeaponKind, WorldQueryHooks,
+    RetargetPreset, SkeletonRetargeter, StatusEffect, WeaponKind, WorldQueryHooks,
 };
 
 /// Opaque handle owning an `ArsaWorld` simulation instance and a reusable scratch buffer.
@@ -1010,6 +1010,49 @@ pub unsafe extern "C" fn arsa_world_is_hand_holding(
     h.world.is_hand_holding(ragdoll_id, is_left)
 }
 
+/// Applies a procedural status effect (`ArsaStatusEffect`: `0 = None`, `1 = OnFire`, `2 = Electrocuted`)
+/// with `intensity` (`0.0..=1.0`) and `duration_sec` (`>= 0.0`) to `ragdoll_id`.
+/// Returns `false` if `handle` is null, `ragdoll_id` is invalid, or `effect` is unknown.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_ragdoll_status(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    effect: u32,
+    intensity: f32,
+    duration_sec: f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    let Some(status) = StatusEffect::from_u32(effect) else {
+        return false;
+    };
+    h.world
+        .set_ragdoll_status(ragdoll_id, status, intensity, duration_sec)
+}
+
+/// Returns the active `ArsaStatusEffect` (`0 = None`, `1 = OnFire`, `2 = Electrocuted`)
+/// for `ragdoll_id`, or `u32::MAX` (`UINT32_MAX`) on null handle or invalid `ragdoll_id`.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_get_ragdoll_status(
+    handle: *const ArsaWorldHandle,
+    ragdoll_id: usize,
+) -> u32 {
+    let Some(h) = (unsafe { handle.as_ref() }) else {
+        return u32::MAX;
+    };
+    h.world
+        .ragdoll_status(ragdoll_id)
+        .map(|(s, _)| s as u32)
+        .unwrap_or(u32::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1572,6 +1615,63 @@ mod tests {
                 world, rid, true, extra_box, 0.0, 0.0, 0.0, 200.0
             ));
             assert!(arsa_world_is_hand_holding(world, rid, true));
+
+            arsa_world_destroy(world);
+        }
+    }
+
+    #[test]
+    fn test_c_abi_status_effects() {
+        unsafe {
+            assert!(!arsa_world_set_ragdoll_status(
+                std::ptr::null_mut(),
+                0,
+                1,
+                1.0,
+                1.0
+            ));
+            assert_eq!(arsa_world_get_ragdoll_status(std::ptr::null(), 0), u32::MAX);
+
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+            assert_eq!(arsa_world_get_ragdoll_status(world, 0), u32::MAX);
+            assert!(!arsa_world_set_ragdoll_status(world, 0, 1, 1.0, 1.0));
+
+            let rid = arsa_world_spawn_ragdoll(world, 0.0, 0.02, 0.0);
+            assert_eq!(rid, 0);
+            assert_eq!(arsa_world_get_ragdoll_status(world, rid), 0);
+            assert!(!arsa_world_set_ragdoll_status(world, rid, 99, 1.0, 1.0));
+
+            let box_idx =
+                arsa_world_give_ragdoll_held_box(world, rid, 0.18, 0.18, 0.18, 4.0, 260.0);
+            assert_ne!(box_idx, usize::MAX);
+            assert!(arsa_world_is_hand_holding(world, rid, true));
+            assert!(arsa_world_is_hand_holding(world, rid, false));
+
+            assert!(arsa_world_set_ragdoll_status(world, rid, 2, 1.0, 1.5));
+            assert_eq!(arsa_world_get_ragdoll_status(world, rid), 2);
+            assert!(!arsa_world_is_hand_holding(world, rid, true));
+            assert!(!arsa_world_is_hand_holding(world, rid, false));
+
+            for _ in 0..45 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+            assert_eq!(arsa_world_get_ragdoll_status(world, rid), 2);
+
+            assert!(arsa_world_set_ragdoll_status(world, rid, 1, 1.0, 0.5));
+            assert_eq!(arsa_world_get_ragdoll_status(world, rid), 1);
+
+            for _ in 0..40 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+            assert_eq!(arsa_world_get_ragdoll_status(world, rid), 0);
+
+            let mut xforms = [0.0_f32; 18 * 7];
+            let written = arsa_world_get_transforms(world, xforms.as_mut_ptr(), xforms.len());
+            assert_eq!(written, 18 * 7);
+            for &v in &xforms[..written] {
+                assert!(v.is_finite());
+            }
 
             arsa_world_destroy(world);
         }

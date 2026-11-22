@@ -20,8 +20,8 @@ pub use collision::{Contact, Heightfield, StaticBox};
 pub use joint::{Joint, JointKind};
 pub use math::{inertia_box, inertia_capsule, inertia_sphere, swing_twist_decomposition};
 pub use reflex::{
-    apply_procedural_reflexes, HandGrab, HeldObject, IncomingThreat, ReflexState, WoundEvent,
-    WoundRegion,
+    apply_procedural_reflexes, HandGrab, HeldObject, IncomingThreat, ReflexState, StatusEffect,
+    WoundEvent, WoundRegion,
 };
 pub use retarget::{
     convert_angular_vec_from_target, convert_angular_vec_to_target, BoneRetargetConfig,

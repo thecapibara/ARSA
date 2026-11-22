@@ -68,6 +68,27 @@ pub struct HeldObject {
     pub hold_time: f32,
 }
 
+/// Procedural status effects applied to an active ragdoll.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusEffect {
+    None = 0,
+    OnFire = 1,
+    Electrocuted = 2,
+}
+
+impl StatusEffect {
+    /// Converts a raw `u32` status identifier into a [`StatusEffect`].
+    pub fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(Self::None),
+            1 => Some(Self::OnFire),
+            2 => Some(Self::Electrocuted),
+            _ => None,
+        }
+    }
+}
+
 /// Approaching dynamic threat detected by the spatial incoming-threat sensor.
 #[derive(Debug, Clone, Copy)]
 pub struct IncomingThreat {
@@ -93,6 +114,10 @@ pub struct ReflexState {
     pub left_held: Option<HeldObject>,
     pub right_held: Option<HeldObject>,
     pub incoming_threat: Option<IncomingThreat>,
+    pub status_effect: StatusEffect,
+    pub status_intensity: f32,
+    pub status_timer: f32,
+    pub status_phase: f32,
 }
 
 impl Default for ReflexState {
@@ -111,7 +136,27 @@ impl Default for ReflexState {
             left_held: None,
             right_held: None,
             incoming_threat: None,
+            status_effect: StatusEffect::None,
+            status_intensity: 0.0,
+            status_timer: 0.0,
+            status_phase: 0.0,
         }
+    }
+}
+
+impl ReflexState {
+    /// Clears any active procedural status effect and resets its timers/intensity.
+    #[inline]
+    pub fn clear_status(&mut self) {
+        self.status_effect = StatusEffect::None;
+        self.status_intensity = 0.0;
+        self.status_timer = 0.0;
+        self.status_phase = 0.0;
+    }
+
+    /// Resets all reflex and status state to healthy defaults.
+    pub fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -219,6 +264,7 @@ pub fn apply_procedural_reflexes(
         ragdoll.reflex.right_grab = None;
         ragdoll.reflex.left_held = None;
         ragdoll.reflex.right_held = None;
+        ragdoll.reflex.clear_status();
         return;
     }
 
@@ -231,6 +277,7 @@ pub fn apply_procedural_reflexes(
         ragdoll.reflex.right_grab = None;
         ragdoll.reflex.left_held = None;
         ragdoll.reflex.right_held = None;
+        ragdoll.reflex.clear_status();
         for &j_idx in &ragdoll.joint_indices {
             joints[j_idx].motor_stiffness = 0.0;
             joints[j_idx].motor_damping = 0.0;
@@ -240,6 +287,25 @@ pub fn apply_procedural_reflexes(
     }
 
     ragdoll.reflex.writhe_time += dt;
+
+    // 1b. Status effect timer & phase update + immediate drop on severe Taser/Fire
+    if ragdoll.reflex.status_effect != StatusEffect::None {
+        ragdoll.reflex.status_phase += dt;
+        ragdoll.reflex.status_timer = (ragdoll.reflex.status_timer - dt).max(0.0);
+        if ragdoll.reflex.status_timer <= 0.0 || ragdoll.reflex.status_intensity <= 0.0 {
+            ragdoll.reflex.clear_status();
+        }
+    }
+    let status_drop = (ragdoll.reflex.status_effect == StatusEffect::Electrocuted
+        && ragdoll.reflex.status_intensity > 0.25)
+        || (ragdoll.reflex.status_effect == StatusEffect::OnFire
+            && ragdoll.reflex.status_intensity > 0.7);
+    if status_drop {
+        ragdoll.reflex.left_grab = None;
+        ragdoll.reflex.right_grab = None;
+        ragdoll.reflex.left_held = None;
+        ragdoll.reflex.right_held = None;
+    }
 
     // 2. Per-limb damage scaling from child bone damage
     for &j_idx in &ragdoll.joint_indices {
@@ -305,7 +371,8 @@ pub fn apply_procedural_reflexes(
         .iter()
         .map(|&idx| bodies[idx].mass)
         .sum();
-    let (left_grab_active, right_grab_active) = if ragdoll.reflex.health <= 18.0
+    let (left_grab_active, right_grab_active) = if status_drop
+        || ragdoll.reflex.health <= 18.0
         || matches!(
             state,
             BehaviorState::Balanced
@@ -716,6 +783,23 @@ pub fn apply_procedural_reflexes(
     update_held_objects(ragdoll, bodies, joints, s_h, grav_scale, damp_scale, dt);
     let left_arm_busy = left_grab_active || ragdoll.reflex.left_held.is_some();
     let right_arm_busy = right_grab_active || ragdoll.reflex.right_held.is_some();
+
+    // 5d. Procedural Status Effects (OnFire Panic & Electrocuted / Taser Tetanic Lock)
+    if apply_status_effect_reflex(
+        ragdoll,
+        joints,
+        left_arm_busy,
+        right_arm_busy,
+        grav_scale,
+        damp_scale,
+        dt,
+    ) {
+        if let Some(mut wound) = ragdoll.reflex.active_wound {
+            wound.time_since_hit += dt;
+            ragdoll.reflex.active_wound = Some(wound);
+        }
+        return;
+    }
 
     // 6. Reach-for-Wound (Guard / Clutch Injury) & Downed Writhe
     let Some(mut wound) = ragdoll.reflex.active_wound else {
@@ -1332,6 +1416,224 @@ fn set_motor_target(
     j.motor_target = (j.frame_parent.conjugate() * target * j.frame_child).normalize();
 }
 
+/// Applies procedural status-effect biomechanics (`OnFire` panic flail/writhe &
+/// `Electrocuted` Taser tetanic lock/tremor). Returns `true` when an active status
+/// effect overrides lower-priority wound-clutching reflexes.
+fn apply_status_effect_reflex(
+    ragdoll: &mut RagdollInstance,
+    joints: &mut [Joint],
+    left_arm_busy: bool,
+    right_arm_busy: bool,
+    grav_scale: f32,
+    damp_scale: f32,
+    dt: f32,
+) -> bool {
+    let intensity = ragdoll.reflex.status_intensity.clamp(0.0, 1.0);
+    let phase = ragdoll.reflex.status_phase;
+    match ragdoll.reflex.status_effect {
+        StatusEffect::None => false,
+        StatusEffect::Electrocuted => {
+            if intensity <= 0.05 {
+                return false;
+            }
+            let tremor = (phase * 125.0).sin() * 0.14 * intensity;
+            let tremor_alt = (phase * 125.0 + 1.1).cos() * 0.10 * intensity;
+
+            let spine_target = Quat::from_euler(
+                EulerRot::XYZ,
+                -0.28 * intensity + tremor * 0.6,
+                tremor * 0.35,
+                tremor_alt * 0.45,
+            );
+            for jid in [JointId::LowerSpine, JointId::ChestSpine] {
+                set_motor_target(ragdoll, joints, jid, spine_target);
+                let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+                j.motor_stiffness = j.motor_stiffness.max(280.0 * grav_scale);
+                j.motor_damping = j.motor_damping.max(12.0 * damp_scale);
+                j.max_torque = j.max_torque.max(240.0 * grav_scale);
+            }
+
+            let head_target = Quat::from_euler(
+                EulerRot::XYZ,
+                -0.22 * intensity + tremor * 0.8,
+                tremor_alt * 0.5,
+                0.0,
+            );
+            for jid in [JointId::Neck, JointId::Head] {
+                set_motor_target(ragdoll, joints, jid, head_target);
+                let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+                j.motor_stiffness = j.motor_stiffness.max(130.0 * grav_scale);
+                j.motor_damping = j.motor_damping.max(2.0 * damp_scale);
+                j.max_torque = j.max_torque.max(110.0 * grav_scale);
+            }
+
+            for (side_sign, sh_jid, el_jid, wr_jid) in [
+                (
+                    1.0_f32,
+                    JointId::LeftShoulder,
+                    JointId::LeftElbow,
+                    JointId::LeftWrist,
+                ),
+                (
+                    -1.0_f32,
+                    JointId::RightShoulder,
+                    JointId::RightElbow,
+                    JointId::RightWrist,
+                ),
+            ] {
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    sh_jid,
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        -0.55 * intensity + tremor * 0.65,
+                        -side_sign * 0.35 * intensity,
+                        -side_sign * 0.28 * intensity + side_sign * tremor_alt * 0.45,
+                    ),
+                );
+                let elbow_angle = (-1.15 * intensity + tremor * 0.45).clamp(-2.4, 0.0);
+                set_motor_target(ragdoll, joints, el_jid, Quat::from_rotation_x(elbow_angle));
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    wr_jid,
+                    Quat::from_rotation_x(0.30 * intensity + tremor * 0.4),
+                );
+
+                let sh = &mut joints[ragdoll.joint_indices[sh_jid as usize]];
+                sh.motor_stiffness = sh.motor_stiffness.max(150.0 * grav_scale);
+                sh.motor_damping = sh.motor_damping.max(2.5 * damp_scale);
+                sh.max_torque = sh.max_torque.max(150.0 * grav_scale);
+
+                let el = &mut joints[ragdoll.joint_indices[el_jid as usize]];
+                el.motor_stiffness = el.motor_stiffness.max(135.0 * grav_scale);
+                el.motor_damping = el.motor_damping.max(2.0 * damp_scale);
+                el.max_torque = el.max_torque.max(130.0 * grav_scale);
+            }
+
+            for (hip_jid, knee_jid) in [
+                (JointId::LeftHip, JointId::LeftKnee),
+                (JointId::RightHip, JointId::RightKnee),
+            ] {
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    hip_jid,
+                    Quat::from_euler(EulerRot::XYZ, -0.05 + tremor * 0.2, 0.0, 0.0),
+                );
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    knee_jid,
+                    Quat::from_rotation_x((0.08 + tremor * 0.2).max(0.0)),
+                );
+                for jid in [hip_jid, knee_jid] {
+                    let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+                    j.motor_stiffness = j.motor_stiffness.max(180.0 * grav_scale);
+                    j.motor_damping = j.motor_damping.max(4.0 * damp_scale);
+                    j.max_torque = j.max_torque.max(160.0 * grav_scale);
+                }
+            }
+            true
+        }
+        StatusEffect::OnFire => {
+            if intensity <= 0.05 {
+                return false;
+            }
+            if ragdoll.reflex.health > 25.0 {
+                ragdoll.reflex.health = (ragdoll.reflex.health - 3.0 * intensity * dt).max(25.0);
+            }
+
+            if ragdoll.balance.state != BehaviorState::Recovering {
+                let spine_pitch = (0.14 + 0.22 * (phase * 14.0).sin()) * intensity;
+                let spine_yaw = 0.26 * (phase * 11.5 + 0.6).cos() * intensity;
+                let spine_roll = 0.18 * (phase * 16.0 + 1.3).sin() * intensity;
+                let spine_q = Quat::from_euler(EulerRot::XYZ, spine_pitch, spine_yaw, spine_roll);
+                for jid in [JointId::LowerSpine, JointId::ChestSpine] {
+                    set_motor_target(ragdoll, joints, jid, spine_q);
+                    let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+                    j.motor_stiffness = j.motor_stiffness.max(220.0 * grav_scale);
+                    j.motor_damping = j.motor_damping.max(10.0 * damp_scale);
+                    j.max_torque = j.max_torque.max(200.0 * grav_scale);
+                }
+
+                let head_yaw = 0.30 * (phase * 17.5).sin() * intensity;
+                let head_pitch = (-0.12 + 0.16 * (phase * 21.0 + 0.5).cos()) * intensity;
+                for jid in [JointId::Neck, JointId::Head] {
+                    set_motor_target(
+                        ragdoll,
+                        joints,
+                        jid,
+                        Quat::from_euler(EulerRot::XYZ, head_pitch, head_yaw, 0.0),
+                    );
+                }
+            }
+
+            let arm_flail_params = [
+                (
+                    left_arm_busy,
+                    JointId::LeftShoulder,
+                    JointId::LeftElbow,
+                    (
+                        -0.75 + 0.72 * (phase * 31.0).sin() + 0.32 * (phase * 41.0 + 0.7).cos(),
+                        -0.35 + 0.45 * (phase * 28.5 + 1.2).sin(),
+                        0.35 + 0.55 * (phase * 36.0 + 0.4).cos(),
+                        -1.15 + 0.85 * (phase * 38.0).sin(),
+                    ),
+                ),
+                (
+                    right_arm_busy,
+                    JointId::RightShoulder,
+                    JointId::RightElbow,
+                    (
+                        -0.75
+                            + 0.72 * (phase * 34.5 + 2.1).sin()
+                            + 0.32 * (phase * 29.0 + 1.5).cos(),
+                        0.35 + 0.45 * (phase * 39.0 + 0.3).cos(),
+                        -0.35 - 0.55 * (phase * 33.0 + 1.9).sin(),
+                        -1.15 + 0.85 * (phase * 35.5 + 1.7).cos(),
+                    ),
+                ),
+            ];
+            for (busy, sh_jid, el_jid, (pitch, yaw, roll, elbow)) in arm_flail_params {
+                if busy {
+                    continue;
+                }
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    sh_jid,
+                    Quat::from_euler(
+                        EulerRot::XYZ,
+                        pitch * intensity,
+                        yaw * intensity,
+                        roll * intensity,
+                    ),
+                );
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    el_jid,
+                    Quat::from_rotation_x((elbow * intensity).clamp(-2.35, -0.15)),
+                );
+
+                let sh = &mut joints[ragdoll.joint_indices[sh_jid as usize]];
+                sh.motor_stiffness = sh.motor_stiffness.max(130.0 * grav_scale);
+                sh.motor_damping = sh.motor_damping.max(1.8 * damp_scale);
+                sh.max_torque = sh.max_torque.max(140.0 * grav_scale);
+
+                let el = &mut joints[ragdoll.joint_indices[el_jid as usize]];
+                el.motor_stiffness = el.motor_stiffness.max(95.0 * grav_scale);
+                el.motor_damping = el.motor_damping.max(1.4 * damp_scale);
+                el.max_torque = el.max_torque.max(105.0 * grav_scale);
+            }
+
+            true
+        }
+    }
+}
+
 #[inline]
 fn blend_motor_target(
     ragdoll: &RagdollInstance,
@@ -1560,6 +1862,10 @@ pub fn update_held_objects(
             || !ragdoll.active_enabled
             || ragdoll.reflex.unconscious
             || ragdoll.reflex.health <= 18.0
+            || (ragdoll.reflex.status_effect == StatusEffect::Electrocuted
+                && ragdoll.reflex.status_intensity > 0.25)
+            || (ragdoll.reflex.status_effect == StatusEffect::OnFire
+                && ragdoll.reflex.status_intensity > 0.7)
             || ragdoll.reflex.bone_damage[hand_bid as usize] >= 0.20
             || ragdoll.reflex.bone_damage[forearm_bid as usize] >= 0.25
             || ragdoll.reflex.bone_damage[upper_arm_bid as usize] >= 0.35

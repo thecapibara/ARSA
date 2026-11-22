@@ -6,6 +6,7 @@ use glam::{Quat, Vec3};
 
 use crate::body::RigidBody;
 use crate::joint::Joint;
+use crate::reflex::StatusEffect;
 use crate::skeleton::{BoneId, JointId, RagdollInstance};
 
 /// Behavioral balance state of an active ragdoll.
@@ -138,10 +139,20 @@ pub fn update_ragdoll_balance(
     } else {
         0.0
     };
+    let panic_stagger = if ragdoll.reflex.status_effect == StatusEffect::OnFire
+        && ragdoll.reflex.status_intensity > 0.1
+    {
+        0.75 * ragdoll.reflex.status_intensity
+    } else {
+        0.0
+    };
+    let taser_lock = ragdoll.reflex.status_effect == StatusEffect::Electrocuted
+        && ragdoll.reflex.status_intensity > 0.2;
     let drunk = ragdoll
         .balance
         .intoxication
-        .max((ragdoll.balance.concussion_timer / 4.0).clamp(0.0, 1.0));
+        .max((ragdoll.balance.concussion_timer / 4.0).clamp(0.0, 1.0))
+        .max(panic_stagger);
 
     // 1. Exact mass-weighted Center of Mass position & velocity across all 17 bones
     let mut total_mass = 0.0_f32;
@@ -230,6 +241,7 @@ pub fn update_ragdoll_balance(
         ragdoll.balance.recovery_phase = 0.0;
         ragdoll.balance.recovery_stage = RecoveryStage::RollOrPrep;
         ragdoll.balance.recovery_stage_time = 0.0;
+        ragdoll.reflex.clear_status();
         for &j_idx in &ragdoll.joint_indices {
             joints[j_idx].motor_stiffness = 0.0;
             joints[j_idx].motor_damping = 0.0;
@@ -276,7 +288,8 @@ pub fn update_ragdoll_balance(
     let can_recover = ragdoll.auto_get_up
         && ragdoll.active_enabled
         && !ragdoll.reflex.unconscious
-        && ragdoll.reflex.health > 18.0;
+        && ragdoll.reflex.health > 18.0
+        && !taser_lock;
 
     let next_state = if ragdoll.balance.state == BehaviorState::Recovering {
         if !can_recover || com_vel.length() > 2.6 {
@@ -531,7 +544,7 @@ pub fn update_ragdoll_balance(
             set_target(ragdoll, joints, JointId::RightWrist, Quat::IDENTITY);
 
             // Legs: capture-point stepping vs stance
-            if is_stumbling && grounded_count > 0 {
+            if is_stumbling && grounded_count > 0 && !taser_lock {
                 if !ragdoll.balance.step_active {
                     let swing_left = match foot_contacts {
                         (false, true) => true,
@@ -674,7 +687,12 @@ pub fn update_ragdoll_balance(
             // Virtual upright & CoM support ONLY when grounded
             if grounded_count > 0 {
                 let foot_scale = if grounded_count >= 2 { 1.0 } else { 0.55 };
-                let strength_scale = foot_scale * mu * drunk_gain_scale;
+                let taser_scale = if taser_lock {
+                    (1.0 - 0.88 * ragdoll.reflex.status_intensity).clamp(0.05, 1.0)
+                } else {
+                    1.0
+                };
+                let strength_scale = foot_scale * mu * drunk_gain_scale * taser_scale;
 
                 // Upright PD on Pelvis and Chest preserving yaw (tilted by drunk/concussion sway when active)
                 let (pelvis_target_up, chest_target_up) = if drunk > 0.02 {
@@ -800,8 +818,19 @@ pub fn update_ragdoll_balance(
                 let pelvis = &mut bodies[pelvis_idx];
                 pelvis.linear_velocity += f_horiz * (dt * pelvis.inv_mass);
 
-                // Damp idle yaw spin & plant feet firmly on the floor when Balanced (disabled during earthquakes >= 3.0 or stagger/drunk or 1-foot cliff teeter)
+                if taser_lock {
+                    let phase = ragdoll.reflex.status_phase;
+                    let spasm_dir = (left_xz * (0.75 + 0.25 * (phase * 19.0).sin())
+                        - fwd_xz * (0.45 + 0.20 * (phase * 13.0).cos()))
+                    .normalize_or_zero();
+                    let spasm_force = total_mass * 2.2 * ragdoll.reflex.status_intensity;
+                    let chest = &mut bodies[chest_idx];
+                    chest.linear_velocity += spasm_dir * (spasm_force * dt * chest.inv_mass);
+                }
+
+                // Damp idle yaw spin & plant feet firmly on the floor when Balanced (disabled during earthquakes >= 3.0 or stagger/drunk or taser lock or 1-foot cliff teeter)
                 if !is_stumbling
+                    && !taser_lock
                     && quake_mag < 3.0
                     && drunk < 0.05
                     && (!teeter_active || grounded_count >= 2)

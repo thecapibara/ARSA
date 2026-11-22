@@ -2713,3 +2713,117 @@ fn test_held_box_breaks_free_on_heavy_impact() {
         box_after - box_before
     );
 }
+
+#[test]
+fn test_taser_electrocution_drops_item_locks_muscles_and_topples() {
+    use arsa_core::StatusEffect;
+
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    let _box_idx = world
+        .give_ragdoll_held_box(id, Vec3::splat(0.18), 4.0, 260.0)
+        .expect("give_ragdoll_held_box should succeed");
+
+    for _ in 0..20 {
+        world.step(1.0 / 60.0);
+    }
+    assert!(world.is_hand_holding(id, true) && world.is_hand_holding(id, false));
+
+    assert!(world.set_ragdoll_status(id, StatusEffect::Electrocuted, 1.0, 2.5));
+    assert!(
+        !world.is_hand_holding(id, true) && !world.is_hand_holding(id, false),
+        "expected tased ragdoll to immediately drop held box"
+    );
+
+    let mut min_left_elbow_cos = 1.0_f32;
+    let mut min_right_elbow_cos = 1.0_f32;
+    for _ in 0..120 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during electrocution"
+            );
+        }
+
+        let r = &world.ragdolls[id];
+        let l_ua_y =
+            world.bodies[r.body_indices[BoneId::LeftUpperArm as usize]].orientation * Vec3::Y;
+        let l_fa_y =
+            world.bodies[r.body_indices[BoneId::LeftForearm as usize]].orientation * Vec3::Y;
+        min_left_elbow_cos = min_left_elbow_cos.min(l_ua_y.dot(l_fa_y));
+
+        let r_ua_y =
+            world.bodies[r.body_indices[BoneId::RightUpperArm as usize]].orientation * Vec3::Y;
+        let r_fa_y =
+            world.bodies[r.body_indices[BoneId::RightForearm as usize]].orientation * Vec3::Y;
+        min_right_elbow_cos = min_right_elbow_cos.min(r_ua_y.dot(r_fa_y));
+    }
+
+    assert!(
+        min_left_elbow_cos < 0.72 && min_right_elbow_cos < 0.72,
+        "expected elbows to clench tightly (cos < 0.72), got left={min_left_elbow_cos:.3}, right={min_right_elbow_cos:.3}"
+    );
+    assert!(
+        matches!(
+            world.ragdolls[id].balance.state,
+            BehaviorState::Falling | BehaviorState::Downed
+        ),
+        "expected tased ragdoll to topple into Falling or Downed, got {:?}",
+        world.ragdolls[id].balance.state
+    );
+}
+
+#[test]
+fn test_on_fire_panic_flail_and_stagger() {
+    use arsa_core::StatusEffect;
+
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    for _ in 0..30 {
+        world.step(1.0 / 60.0);
+    }
+
+    assert!(world.set_ragdoll_status(id, StatusEffect::OnFire, 1.0, 1.2));
+    assert_eq!(world.ragdoll_status(id), Some((StatusEffect::OnFire, 1.0)));
+
+    let l_hand_idx = world.ragdolls[id].body_indices[BoneId::LeftHand as usize];
+    let r_hand_idx = world.ragdolls[id].body_indices[BoneId::RightHand as usize];
+    let mut max_hand_speed = 0.0_f32;
+
+    for step in 0..90 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during OnFire panic"
+            );
+        }
+        if step < 68 {
+            let l_spd = world.bodies[l_hand_idx].linear_velocity.length();
+            let r_spd = world.bodies[r_hand_idx].linear_velocity.length();
+            max_hand_speed = max_hand_speed.max(l_spd.max(r_spd));
+        }
+    }
+
+    assert!(
+        max_hand_speed > 1.2,
+        "expected vigorous panic arm flail (max_hand_speed > 1.2), got {max_hand_speed:.3}"
+    );
+    assert_eq!(
+        world.ragdoll_status(id),
+        Some((StatusEffect::None, 0.0)),
+        "expected OnFire status to expire cleanly after 1.2s"
+    );
+    let health = world.ragdolls[id].reflex.health;
+    assert!(
+        (25.0..100.0).contains(&health),
+        "expected gentle health drain with floor 25.0, got {health}"
+    );
+}
