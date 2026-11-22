@@ -382,8 +382,9 @@ namespace Arsa
                 Vector3 v = ArsaNative.ToArsaVector(rb.velocity);
                 Vector3 w = ArsaNative.ToArsaAngularVector(rb.angularVelocity);
 
-                ArsaNative.arsa_world_sync_bone_pose(
+                ArsaNative.arsa_world_sync_ragdoll_bone_pose(
                     _world,
+                    _ragdollId,
                     (UIntPtr)i,
                     p.x, p.y, p.z,
                     q.x, q.y, q.z, q.w,
@@ -460,32 +461,42 @@ namespace Arsa
                 }
 
                 ArsaBoneTransform b = _retargetedBoneBuffer[i];
+                Vector3 unityPos;
+                Quaternion unityRot;
                 switch (retargetPreset)
                 {
                     case ArsaRetargetPreset.UnityHumanoid:
-                        bone.localPosition = new Vector3(b.px, b.py, b.pz);
-                        bone.localRotation = new Quaternion(b.qx, b.qy, b.qz, b.qw);
+                        unityPos = new Vector3(b.px, b.py, b.pz);
+                        unityRot = new Quaternion(b.qx, b.qy, b.qz, b.qw);
                         break;
                     case ArsaRetargetPreset.UnrealManny:
-                        bone.localPosition = ArsaNative.ToUnityPosition(-b.py * 0.01f, b.pz * 0.01f, b.px * 0.01f);
-                        bone.localRotation = ArsaNative.ToUnityRotation(b.qy, -b.qz, -b.qx, b.qw);
+                        unityPos = ArsaNative.ToUnityPosition(-b.py * 0.01f, b.pz * 0.01f, b.px * 0.01f);
+                        unityRot = ArsaNative.ToUnityRotation(b.qy, -b.qz, -b.qx, b.qw);
                         break;
                     default:
-                        bone.localPosition = ArsaNative.ToUnityPosition(b.px, b.py, b.pz);
-                        bone.localRotation = ArsaNative.ToUnityRotation(b.qx, b.qy, b.qz, b.qw);
+                        unityPos = ArsaNative.ToUnityPosition(b.px, b.py, b.pz);
+                        unityRot = ArsaNative.ToUnityRotation(b.qx, b.qy, b.qz, b.qw);
                         break;
+                }
+
+                if (i == (int)ArsaBoneId.Pelvis)
+                {
+                    bone.position = transform.TransformPoint(unityPos);
+                    bone.rotation = transform.rotation * unityRot;
+                }
+                else
+                {
+                    bone.rotation = transform.rotation * unityRot;
                 }
             }
         }
 
         private void SyncTelemetry()
         {
-            int read = (int)ArsaNative.arsa_world_get_ragdoll_telemetry(
-                _world,
-                _telemetryBuffer,
-                (UIntPtr)_telemetryBuffer.Length);
-
-            if (read >= ArsaNative.TelemetryFloatsPerRagdoll)
+            if (ArsaNative.arsa_world_get_single_ragdoll_telemetry(
+                    _world,
+                    _ragdollId,
+                    _telemetryBuffer))
             {
                 CurrentState = (ArsaBehaviorState)Mathf.RoundToInt(_telemetryBuffer[7]);
                 Health = _telemetryBuffer[11];

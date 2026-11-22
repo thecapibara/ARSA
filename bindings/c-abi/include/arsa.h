@@ -422,6 +422,29 @@ bool arsa_world_sync_bone_pose(
     float wz);
 
 /**
+ * Synchronizes a single bone's simulated pose and velocities from an external host physics engine
+ * for ragdoll_id and bone_id (0..16, ArsaBoneId), resolving the underlying body index safely.
+ * Returns false if handle is NULL, ragdoll_id or bone_id is invalid, or any input is non-finite / degenerate.
+ */
+bool arsa_world_sync_ragdoll_bone_pose(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    size_t bone_id,
+    float px,
+    float py,
+    float pz,
+    float qx,
+    float qy,
+    float qz,
+    float qw,
+    float vx,
+    float vy,
+    float vz,
+    float wx,
+    float wy,
+    float wz);
+
+/**
  * Copies packed body transforms (7 floats per body: px, py, pz, qx, qy, qz, qw)
  * into out_buf (up to max_floats) and returns the number of floats written.
  */
@@ -447,6 +470,15 @@ size_t arsa_world_get_ragdoll_telemetry(
     ArsaWorldHandle *handle,
     float *out_buf,
     size_t max_floats);
+
+/**
+ * Copies the 16 balance & reflex telemetry floats of a single ragdoll (ragdoll_id) into out_buf_16.
+ * Returns false if handle or out_buf_16 is NULL, or ragdoll_id is out of range.
+ */
+bool arsa_world_get_single_ragdoll_telemetry(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    float *out_buf_16);
 
 /**
  * Copies per-joint PD muscle motor targets (8 floats per joint:

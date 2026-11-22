@@ -77,6 +77,13 @@ namespace Arsa
         Sleep = 2
     }
 
+    public enum ArsaStatusEffect : uint
+    {
+        None = 0,
+        OnFire = 1,
+        Electrocuted = 2
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public struct ArsaBodyProfile
     {
@@ -264,6 +271,17 @@ namespace Arsa
             float magnitude);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_set_water_level(
+            IntPtr handle,
+            [MarshalAs(UnmanagedType.I1)] bool hasWater,
+            float level);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_set_floor_friction(
+            IntPtr handle,
+            float friction);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern void arsa_world_set_intoxication(
             IntPtr handle,
             float level);
@@ -290,6 +308,26 @@ namespace Arsa
         public static extern bool arsa_world_sync_bone_pose(
             IntPtr handle,
             UIntPtr bodyIdx,
+            float px,
+            float py,
+            float pz,
+            float qx,
+            float qy,
+            float qz,
+            float qw,
+            float vx,
+            float vy,
+            float vz,
+            float wx,
+            float wy,
+            float wz);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_sync_ragdoll_bone_pose(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            UIntPtr boneId,
             float px,
             float py,
             float pz,
@@ -433,6 +471,13 @@ namespace Arsa
             UIntPtr maxFloats);
 
         [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_get_single_ragdoll_telemetry(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            [Out] float[] outBuf16);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
         public static extern UIntPtr arsa_world_get_joint_motor_targets(
             IntPtr handle,
             [Out] float[] outBuf,
@@ -462,5 +507,68 @@ namespace Arsa
             uint preset,
             [In] float[] targetWorldQuats17x4,
             float blendWeight);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_grab_body_with_hand(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            [MarshalAs(UnmanagedType.I1)] bool isLeft,
+            UIntPtr bodyIdx,
+            float lx,
+            float ly,
+            float lz,
+            float breakForce);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_release_hand_hold(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            [MarshalAs(UnmanagedType.I1)] bool isLeft);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern UIntPtr arsa_world_give_ragdoll_held_box(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            float hx,
+            float hy,
+            float hz,
+            float mass,
+            float breakForce);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_is_hand_holding(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            [MarshalAs(UnmanagedType.I1)] bool isLeft);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_set_ragdoll_status(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            uint effect,
+            float intensity,
+            float durationSec);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern uint arsa_world_get_ragdoll_status(
+            IntPtr handle,
+            UIntPtr ragdollId);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool arsa_world_set_ragdoll_desired_velocity(
+            IntPtr handle,
+            UIntPtr ragdollId,
+            float vx,
+            float vz);
+
+        [DllImport(LibName, CallingConvention = CallingConvention.Cdecl)]
+        public static extern void arsa_world_set_all_desired_velocity(
+            IntPtr handle,
+            float vx,
+            float vz);
     }
 }

@@ -307,7 +307,8 @@ impl SkeletonRetargeter {
         let mut out_pos = [Vec3::ZERO; 17];
         let mut out_rot = [Quat::IDENTITY; 17];
         for i in 0..17 {
-            let world_arsa = (arsa_orientations[i] * self.bones[i].bind_offset).normalize();
+            let world_arsa =
+                (arsa_orientations[i] * self.bones[i].bind_offset.conjugate()).normalize();
             out_pos[i] =
                 Self::convert_pos_to_target(self.space, self.unit_scale, arsa_positions[i]);
             out_rot[i] = Self::convert_quat_to_target(self.space, world_arsa);
@@ -324,7 +325,7 @@ impl SkeletonRetargeter {
         let mut arsa_world = [Quat::IDENTITY; 17];
         for i in 0..17 {
             let q_in_arsa = Self::convert_quat_from_target(self.space, target_world_quats[i]);
-            arsa_world[i] = (q_in_arsa * self.bones[i].bind_offset.conjugate()).normalize();
+            arsa_world[i] = (q_in_arsa * self.bones[i].bind_offset).normalize();
         }
         let mut joint_targets = [Quat::IDENTITY; 16];
         for (j, &(parent, child)) in JOINT_BONE_PAIRS.iter().enumerate() {
@@ -338,12 +339,12 @@ impl SkeletonRetargeter {
 /// Computes bind offsets for T-pose (`FRAC_PI_2`) or A-pose (`FRAC_PI_4`) arms relative to ARSA's
 /// arms-down bind pose (`-Y` along limb, `+X` character left, `+Z` forward).
 ///
-/// Rotating a T/A-pose left arm down to `-Y` requires `-arm_angle_rad` around `+Z`;
-/// rotating a T/A-pose right arm down to `-Y` requires `+arm_angle_rad` around `+Z`.
+/// In ARSA (+X left, -X right, -Y down), extending left arm outward to +X requires `+arm_angle_rad` around +Z,
+/// and extending right arm outward to -X requires `-arm_angle_rad` around +Z.
 fn arm_angle_bind_offsets(arm_angle_rad: f32) -> [BoneRetargetConfig; 17] {
     let mut bones = [BoneRetargetConfig::default(); 17];
-    let left_offset = Quat::from_rotation_z(-arm_angle_rad);
-    let right_offset = Quat::from_rotation_z(arm_angle_rad);
+    let left_offset = Quat::from_rotation_z(arm_angle_rad);
+    let right_offset = Quat::from_rotation_z(-arm_angle_rad);
     for idx in [
         BoneId::LeftUpperArm as usize,
         BoneId::LeftForearm as usize,
@@ -381,5 +382,32 @@ pub fn convert_angular_vec_from_target(space: CoordinateSpace, v: Vec3) -> Vec3 
         CoordinateSpace::ArsaRightHandedYUp => v,
         CoordinateSpace::UnityLeftHandedYUp => Vec3::new(v.x, -v.y, -v.z),
         CoordinateSpace::UnrealLeftHandedZUp => Vec3::new(v.y, -v.z, -v.x),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_arm_angle_bind_offsets() {
+        let retargeter = SkeletonRetargeter::from_preset(RetargetPreset::MixamoTPose);
+        let left_offset = retargeter.bones[BoneId::LeftUpperArm as usize].bind_offset;
+        let right_offset = retargeter.bones[BoneId::RightUpperArm as usize].bind_offset;
+
+        let arms_down = Vec3::new(0.0, -1.0, 0.0);
+        let left_dir = left_offset * arms_down;
+        let right_dir = right_offset * arms_down;
+
+        assert!(
+            (left_dir - Vec3::new(1.0, 0.0, 0.0)).length() < 1e-5,
+            "expected left arm rotated by left_offset to point toward (+1, 0, 0), got {:?}",
+            left_dir
+        );
+        assert!(
+            (right_dir - Vec3::new(-1.0, 0.0, 0.0)).length() < 1e-5,
+            "expected right arm rotated by right_offset to point toward (-1, 0, 0), got {:?}",
+            right_dir
+        );
     }
 }

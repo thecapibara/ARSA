@@ -35,10 +35,8 @@ int main(void) {
     }
 
     float telemetry[ARSA_TELEMETRY_FLOATS_PER_RAGDOLL];
-    size_t t_written =
-        arsa_world_get_ragdoll_telemetry(world, telemetry, ARSA_TELEMETRY_FLOATS_PER_RAGDOLL);
-    if (t_written != ARSA_TELEMETRY_FLOATS_PER_RAGDOLL) {
-        fprintf(stderr, "FAIL: expected 16 telemetry floats, got %zu\n", t_written);
+    if (!arsa_world_get_single_ragdoll_telemetry(world, ragdoll_id, telemetry)) {
+        fprintf(stderr, "FAIL: arsa_world_get_single_ragdoll_telemetry failed\n");
         arsa_world_destroy(world);
         return 1;
     }
@@ -81,8 +79,7 @@ int main(void) {
         arsa_world_step(world, dt);
     }
 
-    t_written = arsa_world_get_ragdoll_telemetry(world, telemetry, ARSA_TELEMETRY_FLOATS_PER_RAGDOLL);
-    if (t_written != ARSA_TELEMETRY_FLOATS_PER_RAGDOLL) {
+    if (!arsa_world_get_single_ragdoll_telemetry(world, ragdoll_id, telemetry)) {
         fprintf(stderr, "FAIL: telemetry read after shot failed\n");
         arsa_world_destroy(world);
         return 1;
@@ -123,9 +120,10 @@ int main(void) {
     }
 
     /* Verify Host-Physics pose synchronization input. */
-    if (!arsa_world_sync_bone_pose(
+    if (!arsa_world_sync_ragdoll_bone_pose(
             world,
-            ARSA_BONE_PELVIS,
+            ragdoll_id,
+            (size_t)ARSA_BONE_PELVIS,
             transforms[0],
             transforms[1],
             transforms[2],
@@ -139,13 +137,25 @@ int main(void) {
             0.0f,
             0.0f,
             0.0f)) {
-        fprintf(stderr, "FAIL: arsa_world_sync_bone_pose failed for valid pelvis bone\n");
+        fprintf(stderr, "FAIL: arsa_world_sync_ragdoll_bone_pose failed for valid pelvis bone\n");
         arsa_world_destroy(world);
         return 1;
     }
-    if (arsa_world_sync_bone_pose(
-            world, 9999, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)) {
-        fprintf(stderr, "FAIL: arsa_world_sync_bone_pose should reject out-of-range body_idx\n");
+    if (arsa_world_sync_ragdoll_bone_pose(
+            world,
+            9999,
+            0,
+            0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)) {
+        fprintf(stderr, "FAIL: arsa_world_sync_ragdoll_bone_pose should reject out-of-range ragdoll_id\n");
+        arsa_world_destroy(world);
+        return 1;
+    }
+    if (arsa_world_sync_ragdoll_bone_pose(
+            world,
+            ragdoll_id,
+            9999,
+            0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f)) {
+        fprintf(stderr, "FAIL: arsa_world_sync_ragdoll_bone_pose should reject out-of-range bone_id\n");
         arsa_world_destroy(world);
         return 1;
     }

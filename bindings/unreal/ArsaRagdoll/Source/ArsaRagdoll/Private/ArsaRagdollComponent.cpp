@@ -382,8 +382,9 @@ void UArsaRagdollComponent::StepHostPhysics(float DeltaTime)
             UnrealToArsaLocation(VelCm, Vx, Vy, Vz);
             UnrealToArsaAngular(AngVelRad, Wx, Wy, Wz);
 
-            arsa_world_sync_bone_pose(
+            arsa_world_sync_ragdoll_bone_pose(
                 WorldHandle,
+                RagdollId,
                 static_cast<size_t>(i),
                 Px, Py, Pz,
                 Qx, Qy, Qz, Qw,
@@ -429,7 +430,7 @@ void UArsaRagdollComponent::StepHostPhysics(float DeltaTime)
         {
             if (ChildBody->IsInstanceSimulatingPhysics())
             {
-                ChildBody->AddTorqueInRadians(ScaledTorque, false, true);
+                ChildBody->AddTorqueInRadians(ScaledTorque, false, false);
             }
         }
 
@@ -437,7 +438,7 @@ void UArsaRagdollComponent::StepHostPhysics(float DeltaTime)
         {
             if (ParentBody->IsInstanceSimulatingPhysics())
             {
-                ParentBody->AddTorqueInRadians(-ScaledTorque, false, true);
+                ParentBody->AddTorqueInRadians(-ScaledTorque, false, false);
             }
         }
     }
@@ -483,11 +484,10 @@ void UArsaRagdollComponent::SyncOutputs()
         }
     }
 
-    const size_t TelFloats = arsa_world_get_ragdoll_telemetry(
-        WorldHandle,
-        TelemetryScratch.GetData(),
-        static_cast<size_t>(TelemetryScratch.Num()));
-    if (TelFloats >= ARSA_TELEMETRY_FLOATS_PER_RAGDOLL)
+    if (arsa_world_get_single_ragdoll_telemetry(
+            WorldHandle,
+            RagdollId,
+            TelemetryScratch.GetData()))
     {
         const int32 StateInt = FMath::RoundToInt(TelemetryScratch[7]);
         CachedBehaviorState = static_cast<EArsaBehaviorState>(FMath::Clamp(StateInt, 0, 6));

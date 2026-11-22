@@ -749,6 +749,51 @@ pub unsafe extern "C" fn arsa_world_sync_bone_pose(
     )
 }
 
+/// Synchronizes a single bone's simulated pose and velocities from an external host physics engine
+/// for `ragdoll_id` and `bone_id` (`0..17`, [`arsa_core::BoneId`]), resolving the underlying body index safely.
+/// Returns `false` if `handle` is null, `ragdoll_id` or `bone_id` is invalid,
+/// or any input is non-finite / degenerate.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_sync_ragdoll_bone_pose(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    bone_id: usize,
+    px: f32,
+    py: f32,
+    pz: f32,
+    qx: f32,
+    qy: f32,
+    qz: f32,
+    qw: f32,
+    vx: f32,
+    vy: f32,
+    vz: f32,
+    wx: f32,
+    wy: f32,
+    wz: f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    let Some(ragdoll) = h.world.ragdolls.get(ragdoll_id) else {
+        return false;
+    };
+    let Some(&body_idx) = ragdoll.body_indices.get(bone_id) else {
+        return false;
+    };
+    h.world.sync_bone_pose(
+        body_idx,
+        Vec3::new(px, py, pz),
+        Quat::from_xyzw(qx, qy, qz, qw),
+        Vec3::new(vx, vy, vz),
+        Vec3::new(wx, wy, wz),
+    )
+}
+
 /// Copies packed transforms (`px, py, pz, qx, qy, qz, qw` per body) into `out_buf`,
 /// writing at most `max_floats` floats, and returns the number of floats written.
 ///
@@ -789,6 +834,35 @@ pub unsafe extern "C" fn arsa_world_get_ragdoll_telemetry(
     };
     h.world.write_ragdoll_telemetry(&mut h.scratch);
     unsafe { copy_floats_to_out(&h.scratch, out_buf, max_floats) }
+}
+
+/// Copies the 16 balance & reflex telemetry floats of a single ragdoll (`ragdoll_id`) into `out_buf_16`.
+/// Returns `false` if `handle` or `out_buf_16` is null, or `ragdoll_id` is out of range.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+/// If `out_buf_16` is non-null, it must be valid for writes of 16 `f32` elements.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_get_single_ragdoll_telemetry(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    out_buf_16: *mut f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    if out_buf_16.is_null() || ragdoll_id >= h.world.ragdolls.len() {
+        return false;
+    }
+    h.world.write_ragdoll_telemetry(&mut h.scratch);
+    let start = ragdoll_id * 16;
+    if start + 16 > h.scratch.len() {
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(h.scratch[start..start + 16].as_ptr(), out_buf_16, 16);
+    }
+    true
 }
 
 /// Copies per-joint PD muscle motor targets (8 floats per joint:
@@ -1818,6 +1892,108 @@ mod tests {
             arsa_world_set_water_level(world, false, 0.0);
             arsa_world_set_floor_friction(world, 0.75);
             arsa_world_step(world, 1.0 / 60.0);
+            arsa_world_destroy(world);
+        }
+    }
+
+    #[test]
+    fn test_c_abi_single_ragdoll_telemetry_and_sync_ragdoll_bone_pose() {
+        unsafe {
+            let mut tel_buf = [0.0_f32; 16];
+            assert!(!arsa_world_get_single_ragdoll_telemetry(
+                std::ptr::null_mut(),
+                0,
+                tel_buf.as_mut_ptr()
+            ));
+            assert!(!arsa_world_sync_ragdoll_bone_pose(
+                std::ptr::null_mut(),
+                0,
+                0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+            ));
+
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+
+            let r0 = arsa_world_spawn_ragdoll(world, 0.0, 0.0, 0.0);
+            let r1 = arsa_world_spawn_ragdoll(world, 5.0, 0.0, 0.0);
+            assert_eq!(r0, 0);
+            assert_eq!(r1, 1);
+
+            assert!(!arsa_world_get_single_ragdoll_telemetry(
+                world,
+                0,
+                std::ptr::null_mut()
+            ));
+            assert!(!arsa_world_get_single_ragdoll_telemetry(
+                world,
+                999,
+                tel_buf.as_mut_ptr()
+            ));
+
+            assert!(arsa_world_get_single_ragdoll_telemetry(
+                world,
+                r0,
+                tel_buf.as_mut_ptr()
+            ));
+            assert_eq!(tel_buf[7] as u32, 0); // Balanced
+            assert_eq!(tel_buf[11], 100.0); // Health
+            let r0_pelvis_x = tel_buf[8];
+            assert!(r0_pelvis_x.abs() < 1.0);
+
+            let mut tel_buf1 = [0.0_f32; 16];
+            assert!(arsa_world_get_single_ragdoll_telemetry(
+                world,
+                r1,
+                tel_buf1.as_mut_ptr()
+            ));
+            let r1_pelvis_x = tel_buf1[8];
+            assert!((r1_pelvis_x - 5.0).abs() < 1.0);
+
+            // Test arsa_world_sync_ragdoll_bone_pose validation and multi-ragdoll index resolution
+            assert!(!arsa_world_sync_ragdoll_bone_pose(
+                world, 999, 0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            ));
+            assert!(!arsa_world_sync_ragdoll_bone_pose(
+                world, r0, 17, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+            ));
+            assert!(!arsa_world_sync_ragdoll_bone_pose(
+                world,
+                r0,
+                0,
+                f32::NAN,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0
+            ));
+
+            // Sync bone 0 (Pelvis) of ragdoll 1 (body index 17)
+            assert!(arsa_world_sync_ragdoll_bone_pose(
+                world, r1, 0, 5.2, 1.1, 0.3, 0.0, 0.0, 0.0, 1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0
+            ));
+            assert_eq!(world.as_ref().unwrap().world.bodies[17].position.x, 5.2);
+
             arsa_world_destroy(world);
         }
     }
