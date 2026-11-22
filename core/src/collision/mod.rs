@@ -220,12 +220,14 @@ pub(crate) fn static_box_world_aabb(sb: &StaticBox) -> (Vec3, Vec3) {
 }
 
 /// Detects all contacts against ground/heightfield/host surfaces, static boxes, and dynamic body pairs.
+#[allow(clippy::too_many_arguments)]
 pub fn detect_contacts(
     bodies: &[RigidBody],
     static_boxes: &[StaticBox],
     heightfield: Option<&Heightfield>,
     query_hooks: Option<&WorldQueryHooks>,
     connected_pairs: &HashSet<(usize, usize)>,
+    held_skip_pairs: &[(usize, usize)],
     body_aabbs: &mut Vec<(Vec3, Vec3)>,
     out: &mut Vec<Contact>,
 ) {
@@ -282,6 +284,9 @@ pub fn detect_contacts(
                 continue;
             }
             if same_ragdoll && connected_pairs.contains(&(i, j)) {
+                continue;
+            }
+            if !held_skip_pairs.is_empty() && held_skip_pairs.contains(&(i, j)) {
                 continue;
             }
             narrowphase::detect_dynamic_pair(bodies, i, j, out);

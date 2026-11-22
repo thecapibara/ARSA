@@ -927,6 +927,89 @@ pub unsafe extern "C" fn arsa_world_set_retargeted_target_pose(
         .set_ragdoll_target_pose(ragdoll_id, &joint_targets, blend_weight)
 }
 
+/// Attaches a ragdoll's left or right hand to dynamic `body_idx` at `local_anchor (lx, ly, lz)`
+/// with grip break threshold `break_force` (N). Returns `false` on null or invalid arguments.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[allow(clippy::too_many_arguments)]
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_grab_body_with_hand(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    is_left: bool,
+    body_idx: usize,
+    lx: f32,
+    ly: f32,
+    lz: f32,
+    break_force: f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    h.world.grab_body_with_hand(
+        ragdoll_id,
+        is_left,
+        body_idx,
+        Vec3::new(lx, ly, lz),
+        break_force,
+    )
+}
+
+/// Releases any held object on the specified hand (`is_left`) of `ragdoll_id`.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_release_hand_hold(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    is_left: bool,
+) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.release_hand_hold(ragdoll_id, is_left);
+    }
+}
+
+/// Spawns a dynamic box directly in front of `ragdoll_id`'s chest and attaches both hands.
+/// Returns the spawned box body index, or `usize::MAX` (`SIZE_MAX`) on null/failure.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_give_ragdoll_held_box(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    hx: f32,
+    hy: f32,
+    hz: f32,
+    mass: f32,
+    break_force: f32,
+) -> usize {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return usize::MAX;
+    };
+    h.world
+        .give_ragdoll_held_box(ragdoll_id, Vec3::new(hx, hy, hz), mass, break_force)
+        .unwrap_or(usize::MAX)
+}
+
+/// Returns `true` if the specified hand (`is_left`) of `ragdoll_id` is currently holding an object.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_is_hand_holding(
+    handle: *const ArsaWorldHandle,
+    ragdoll_id: usize,
+    is_left: bool,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_ref() }) else {
+        return false;
+    };
+    h.world.is_hand_holding(ragdoll_id, is_left)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1419,6 +1502,76 @@ mod tests {
                 .length()
                     < 1e-4
             );
+
+            arsa_world_destroy(world);
+        }
+    }
+
+    #[test]
+    fn test_c_abi_held_object_lifecycle() {
+        unsafe {
+            assert!(!arsa_world_is_hand_holding(std::ptr::null(), 0, true));
+            assert_eq!(
+                arsa_world_give_ragdoll_held_box(
+                    std::ptr::null_mut(),
+                    0,
+                    0.18,
+                    0.18,
+                    0.18,
+                    6.0,
+                    320.0
+                ),
+                usize::MAX
+            );
+            assert!(!arsa_world_grab_body_with_hand(
+                std::ptr::null_mut(),
+                0,
+                true,
+                0,
+                0.0,
+                0.0,
+                0.0,
+                200.0
+            ));
+
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+
+            let rid = arsa_world_spawn_ragdoll(world, 0.0, 0.02, 0.0);
+            assert_eq!(rid, 0);
+
+            let box_idx =
+                arsa_world_give_ragdoll_held_box(world, rid, 0.18, 0.18, 0.18, 6.0, 320.0);
+            assert_ne!(box_idx, usize::MAX);
+            assert_eq!(box_idx, 17);
+            assert!(arsa_world_is_hand_holding(world, rid, true));
+            assert!(arsa_world_is_hand_holding(world, rid, false));
+
+            for _ in 0..60 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+
+            assert!(arsa_world_is_hand_holding(world, rid, true));
+            assert!(arsa_world_is_hand_holding(world, rid, false));
+
+            let mut xforms = [0.0_f32; 18 * 7];
+            assert_eq!(
+                arsa_world_get_transforms(world, xforms.as_mut_ptr(), xforms.len()),
+                18 * 7
+            );
+            let box_y = xforms[box_idx * 7 + 1];
+            assert!(box_y.is_finite() && box_y > 0.75, "box_y={box_y}");
+
+            arsa_world_release_hand_hold(world, rid, true);
+            assert!(!arsa_world_is_hand_holding(world, rid, true));
+            assert!(arsa_world_is_hand_holding(world, rid, false));
+
+            let extra_box =
+                arsa_world_spawn_box(world, 0.2, 1.1, 0.35, 0.1, 0.1, 0.1, 2.0, 0.0, 0.0, 0.0);
+            assert!(arsa_world_grab_body_with_hand(
+                world, rid, true, extra_box, 0.0, 0.0, 0.0, 200.0
+            ));
+            assert!(arsa_world_is_hand_holding(world, rid, true));
 
             arsa_world_destroy(world);
         }

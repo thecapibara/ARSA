@@ -13,11 +13,11 @@ use crate::collision::{
     solve_contacts_velocity_ordered, Contact, Heightfield, StaticBox,
 };
 use crate::joint::Joint;
-use crate::reflex::{apply_procedural_reflexes, IncomingThreat, WoundRegion};
+use crate::reflex::{apply_procedural_reflexes, HeldObject, IncomingThreat, WoundRegion};
 use crate::retarget::{convert_angular_vec_to_target, CoordinateSpace};
 use crate::skeleton::{
-    spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId, RagdollInstance,
-    RagdollLod,
+    spawn_humanoid_with_profile, update_humanoid_profile, BodyProfile, BoneId, JointId,
+    RagdollInstance, RagdollLod,
 };
 
 /// Ballistic weapon presets supported by [`ArsaWorld::fire_weapon`].
@@ -142,6 +142,7 @@ pub struct ArsaWorld {
     pub lod_reduced_dist: f32,
     pub lod_sleep_dist: f32,
     connected_pairs: HashSet<(usize, usize)>,
+    held_skip_pairs_buf: Vec<(usize, usize)>,
     contacts_buf: Vec<Contact>,
     foot_contacts_buf: Vec<(bool, bool)>,
     pre_solve_vels_buf: Vec<Vec3>,
@@ -179,6 +180,7 @@ impl ArsaWorld {
             lod_reduced_dist: 15.0,
             lod_sleep_dist: 35.0,
             connected_pairs: HashSet::new(),
+            held_skip_pairs_buf: Vec::new(),
             contacts_buf: Vec::new(),
             foot_contacts_buf: Vec::new(),
             pre_solve_vels_buf: Vec::new(),
@@ -200,6 +202,7 @@ impl ArsaWorld {
         self.pending_explosions.clear();
         self.earthquake_time = 0.0;
         self.connected_pairs.clear();
+        self.held_skip_pairs_buf.clear();
         self.contacts_buf.clear();
         self.foot_contacts_buf.clear();
         self.pre_solve_vels_buf.clear();
@@ -957,12 +960,36 @@ impl ArsaWorld {
             }
 
             // 2. Collision detection
+            self.held_skip_pairs_buf.clear();
+            for r in &self.ragdolls {
+                if let Some(held) = r.reflex.left_held {
+                    self.held_skip_pairs_buf.push(canonical_pair(
+                        r.body_indices[BoneId::LeftHand as usize],
+                        held.body_idx,
+                    ));
+                    self.held_skip_pairs_buf.push(canonical_pair(
+                        r.body_indices[BoneId::LeftForearm as usize],
+                        held.body_idx,
+                    ));
+                }
+                if let Some(held) = r.reflex.right_held {
+                    self.held_skip_pairs_buf.push(canonical_pair(
+                        r.body_indices[BoneId::RightHand as usize],
+                        held.body_idx,
+                    ));
+                    self.held_skip_pairs_buf.push(canonical_pair(
+                        r.body_indices[BoneId::RightForearm as usize],
+                        held.body_idx,
+                    ));
+                }
+            }
             detect_contacts(
                 &self.bodies,
                 &self.static_boxes,
                 self.heightfield.as_ref(),
                 self.world_query_hooks.as_ref(),
                 &self.connected_pairs,
+                &self.held_skip_pairs_buf,
                 &mut self.body_aabbs_buf,
                 &mut self.contacts_buf,
             );
@@ -1154,10 +1181,15 @@ impl ArsaWorld {
         if self.earthquake_magnitude <= 0.1 {
             let grabbed_idx = self.grab.as_ref().map(|g| g.body_idx);
             for (idx, b) in self.bodies.iter_mut().enumerate() {
+                let held_by_ragdoll = self.ragdolls.iter().any(|r| {
+                    r.reflex.left_held.is_some_and(|h| h.body_idx == idx)
+                        || r.reflex.right_held.is_some_and(|h| h.body_idx == idx)
+                });
                 if b.ragdoll_id.is_none()
                     && b.bone_id != Some(250)
                     && b.inv_mass > 0.0
                     && grabbed_idx != Some(idx)
+                    && !held_by_ragdoll
                 {
                     if b.is_sleeping {
                         continue;
@@ -1783,6 +1815,236 @@ impl ArsaWorld {
     /// Releases the active grab constraint.
     pub fn end_grab(&mut self) {
         self.grab = None;
+    }
+
+    /// Attaches a ragdoll's left or right hand to `body_idx` at `local_anchor` with `break_force`.
+    pub fn grab_body_with_hand(
+        &mut self,
+        ragdoll_id: usize,
+        is_left: bool,
+        body_idx: usize,
+        local_anchor: Vec3,
+        break_force: f32,
+    ) -> bool {
+        if !local_anchor.is_finite() || !break_force.is_finite() || break_force <= 0.0 {
+            return false;
+        }
+        if body_idx >= self.bodies.len() || self.bodies[body_idx].inv_mass <= 0.0 {
+            return false;
+        }
+        let Some(ragdoll) = self.ragdolls.get(ragdoll_id) else {
+            return false;
+        };
+        if !ragdoll.active_enabled || ragdoll.reflex.unconscious || ragdoll.reflex.health <= 18.0 {
+            return false;
+        }
+        let (ua_bid, fa_bid, ha_bid) = if is_left {
+            (BoneId::LeftUpperArm, BoneId::LeftForearm, BoneId::LeftHand)
+        } else {
+            (
+                BoneId::RightUpperArm,
+                BoneId::RightForearm,
+                BoneId::RightHand,
+            )
+        };
+        if ragdoll.reflex.bone_damage[ha_bid as usize] >= 0.20
+            || ragdoll.reflex.bone_damage[fa_bid as usize] >= 0.25
+            || ragdoll.reflex.bone_damage[ua_bid as usize] >= 0.35
+        {
+            return false;
+        }
+        let hand_idx = ragdoll.body_indices[ha_bid as usize];
+        let forearm_idx = ragdoll.body_indices[fa_bid as usize];
+        if body_idx == hand_idx || body_idx == forearm_idx {
+            return false;
+        }
+
+        let hand_mass = self.bodies[hand_idx].mass.max(0.1);
+        let mass_ratio = hand_mass / 0.45;
+        let held = HeldObject {
+            body_idx,
+            local_anchor,
+            break_force,
+            stiffness: 2200.0 * mass_ratio,
+            damping: 48.0 * mass_ratio,
+            hold_time: 0.0,
+        };
+
+        self.bodies[body_idx].wake_up();
+        self.wake_ragdoll(ragdoll_id, 2.5);
+        let ragdoll = &mut self.ragdolls[ragdoll_id];
+        if is_left {
+            ragdoll.reflex.left_held = Some(held);
+            ragdoll.reflex.left_grab = None;
+        } else {
+            ragdoll.reflex.right_held = Some(held);
+            ragdoll.reflex.right_grab = None;
+        }
+        true
+    }
+
+    /// Releases any held object on the specified hand (`is_left`) of `ragdoll_id`.
+    pub fn release_hand_hold(&mut self, ragdoll_id: usize, is_left: bool) {
+        if let Some(ragdoll) = self.ragdolls.get_mut(ragdoll_id) {
+            if is_left {
+                ragdoll.reflex.left_held = None;
+            } else {
+                ragdoll.reflex.right_held = None;
+            }
+        }
+    }
+
+    /// Releases held objects from both hands of `ragdoll_id`.
+    pub fn release_all_holds(&mut self, ragdoll_id: usize) {
+        if let Some(ragdoll) = self.ragdolls.get_mut(ragdoll_id) {
+            ragdoll.reflex.left_held = None;
+            ragdoll.reflex.right_held = None;
+        }
+    }
+
+    /// Returns `true` if the specified hand (`is_left`) of `ragdoll_id` is currently holding an object.
+    pub fn is_hand_holding(&self, ragdoll_id: usize, is_left: bool) -> bool {
+        self.ragdolls.get(ragdoll_id).is_some_and(|r| {
+            if is_left {
+                r.reflex.left_held.is_some()
+            } else {
+                r.reflex.right_held.is_some()
+            }
+        })
+    }
+
+    /// Spawns a dynamic box directly in front of `ragdoll_id`'s chest aligned with the chest's
+    /// yaw orientation and attaches both hands to its left/right side anchors with `break_force`.
+    pub fn give_ragdoll_held_box(
+        &mut self,
+        ragdoll_id: usize,
+        half_extents: Vec3,
+        mass: f32,
+        break_force: f32,
+    ) -> Option<usize> {
+        if !half_extents.is_finite()
+            || half_extents.x <= 0.0
+            || half_extents.y <= 0.0
+            || half_extents.z <= 0.0
+            || !mass.is_finite()
+            || mass <= 0.0
+            || !break_force.is_finite()
+            || break_force <= 0.0
+        {
+            return None;
+        }
+        let (chest_idx, s_h, can_hold) = {
+            let r = self.ragdolls.get(ragdoll_id)?;
+            let can = r.active_enabled && !r.reflex.unconscious && r.reflex.health > 18.0;
+            (
+                r.body_indices[BoneId::Chest as usize],
+                r.profile.sanitized().height_m / 1.78,
+                can,
+            )
+        };
+        if !can_hold {
+            return None;
+        }
+
+        let chest_pos = self.bodies[chest_idx].position;
+        let chest_rot = self.bodies[chest_idx].orientation;
+        let chest_fwd_raw = chest_rot * Vec3::Z;
+        let chest_fwd_xz = Vec3::new(chest_fwd_raw.x, 0.0, chest_fwd_raw.z).normalize_or_zero();
+        let chest_fwd = if chest_fwd_xz.length_squared() > 1e-6 {
+            chest_fwd_xz
+        } else {
+            Vec3::Z
+        };
+        let yaw = chest_fwd.x.atan2(chest_fwd.z);
+        let box_rot = Quat::from_rotation_y(yaw);
+        let box_pos =
+            chest_pos + chest_fwd * (0.38 * s_h + half_extents.z) - Vec3::Y * (0.10 * s_h);
+
+        let box_idx = self.spawn_box(box_pos, half_extents, mass, Vec3::ZERO);
+        self.bodies[box_idx].orientation = box_rot;
+        self.bodies[box_idx].prev_orientation = box_rot;
+        self.bodies[box_idx].update_world_inertia();
+
+        let arm_configs = [
+            (
+                true,
+                1.0_f32,
+                BoneId::LeftUpperArm,
+                BoneId::LeftForearm,
+                BoneId::LeftHand,
+                JointId::LeftShoulder,
+                JointId::LeftElbow,
+                JointId::LeftWrist,
+            ),
+            (
+                false,
+                -1.0_f32,
+                BoneId::RightUpperArm,
+                BoneId::RightForearm,
+                BoneId::RightHand,
+                JointId::RightShoulder,
+                JointId::RightElbow,
+                JointId::RightWrist,
+            ),
+        ];
+        for (is_left, side_sign, ua_bid, fa_bid, ha_bid, sh_jid, el_jid, wr_jid) in arm_configs {
+            let r = &self.ragdolls[ragdoll_id];
+            let healthy = r.reflex.bone_damage[ha_bid as usize] < 0.20
+                && r.reflex.bone_damage[fa_bid as usize] < 0.25
+                && r.reflex.bone_damage[ua_bid as usize] < 0.35;
+            if !healthy {
+                continue;
+            }
+            let ua_idx = r.body_indices[ua_bid as usize];
+            let fa_idx = r.body_indices[fa_bid as usize];
+            let ha_idx = r.body_indices[ha_bid as usize];
+            let sh_j_idx = r.joint_indices[sh_jid as usize];
+            let el_j_idx = r.joint_indices[el_jid as usize];
+            let wr_j_idx = r.joint_indices[wr_jid as usize];
+
+            let q_sh = Quat::from_euler(
+                glam::EulerRot::XYZ,
+                -0.58,
+                -side_sign * 0.22,
+                -side_sign * 0.14,
+            );
+            let q_el = Quat::from_rotation_x(-0.92);
+            let q_wr = Quat::from_rotation_y(-side_sign * 0.18);
+
+            for (j_idx, p_idx, c_idx, q_rel) in [
+                (sh_j_idx, chest_idx, ua_idx, q_sh),
+                (el_j_idx, ua_idx, fa_idx, q_el),
+                (wr_j_idx, fa_idx, ha_idx, q_wr),
+            ] {
+                let p_pos = self.bodies[p_idx].position;
+                let p_rot = self.bodies[p_idx].orientation;
+                let j = &self.joints[j_idx];
+                let anchor_w = p_pos + p_rot * j.anchor_parent;
+                let c_rot = (p_rot * q_rel).normalize();
+                let c_pos = anchor_w - c_rot * j.anchor_child;
+                let cb = &mut self.bodies[c_idx];
+                cb.orientation = c_rot;
+                cb.prev_orientation = c_rot;
+                cb.position = c_pos;
+                cb.prev_position = c_pos;
+                cb.update_world_inertia();
+            }
+
+            let anchor_x = if is_left {
+                half_extents.x
+            } else {
+                -half_extents.x
+            };
+            self.grab_body_with_hand(
+                ragdoll_id,
+                is_left,
+                box_idx,
+                Vec3::new(anchor_x, 0.0, 0.0),
+                break_force,
+            );
+        }
+
+        Some(box_idx)
     }
 
     /// Writes body transforms into `out` (7 floats per body: `px, py, pz, qx, qy, qz, qw`).

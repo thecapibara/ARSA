@@ -153,6 +153,29 @@ pub fn update_ragdoll_balance(
         com_pos += b.position * b.mass;
         com_vel += b.linear_velocity * b.mass;
     }
+    let ragdoll_bone_mass = total_mass;
+    let max_held_mass = 0.5 * ragdoll_bone_mass;
+    let mut held_body_indices = [None; 2];
+    if let Some(held) = ragdoll.reflex.left_held {
+        if held.body_idx < bodies.len() && bodies[held.body_idx].inv_mass > 0.0 {
+            held_body_indices[0] = Some(held.body_idx);
+        }
+    }
+    if let Some(held) = ragdoll.reflex.right_held {
+        if held.body_idx < bodies.len()
+            && bodies[held.body_idx].inv_mass > 0.0
+            && held_body_indices[0] != Some(held.body_idx)
+        {
+            held_body_indices[1] = Some(held.body_idx);
+        }
+    }
+    for b_idx in held_body_indices.into_iter().flatten() {
+        let b = &bodies[b_idx];
+        let eff_mass = b.mass.min(max_held_mass);
+        total_mass += eff_mass;
+        com_pos += b.position * eff_mass;
+        com_vel += b.linear_velocity * eff_mass;
+    }
     if total_mass > 1e-6 {
         com_pos /= total_mass;
         com_vel /= total_mass;

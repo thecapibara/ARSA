@@ -481,6 +481,45 @@ bool arsa_world_set_retargeted_target_pose(
     const float *target_world_quats_17x4,
     float blend_weight);
 
+/**
+ * Attaches a ragdoll's left or right hand to dynamic body_idx at local_anchor (lx, ly, lz)
+ * with grip break threshold break_force (N). Returns false on null/invalid arguments.
+ */
+bool arsa_world_grab_body_with_hand(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    bool is_left,
+    size_t body_idx,
+    float lx,
+    float ly,
+    float lz,
+    float break_force);
+
+/** Releases any held object on the specified hand (is_left) of ragdoll_id. */
+void arsa_world_release_hand_hold(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    bool is_left);
+
+/**
+ * Spawns a dynamic box directly in front of ragdoll_id's chest and attaches both hands.
+ * Returns the spawned box body index, or SIZE_MAX on failure.
+ */
+size_t arsa_world_give_ragdoll_held_box(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    float hx,
+    float hy,
+    float hz,
+    float mass,
+    float break_force);
+
+/** Returns true if the specified hand (is_left) of ragdoll_id is currently holding an object. */
+bool arsa_world_is_hand_holding(
+    const ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    bool is_left);
+
 #ifdef __cplusplus
 }
 #endif

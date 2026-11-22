@@ -57,6 +57,17 @@ pub struct HandGrab {
     pub max_hold_time: f32,
 }
 
+/// Active dynamic object held by a ragdoll hand via an implicit-damped spring constraint.
+#[derive(Debug, Clone, Copy)]
+pub struct HeldObject {
+    pub body_idx: usize,
+    pub local_anchor: Vec3,
+    pub break_force: f32,
+    pub stiffness: f32,
+    pub damping: f32,
+    pub hold_time: f32,
+}
+
 /// Approaching dynamic threat detected by the spatial incoming-threat sensor.
 #[derive(Debug, Clone, Copy)]
 pub struct IncomingThreat {
@@ -79,6 +90,8 @@ pub struct ReflexState {
     pub writhe_time: f32,
     pub left_grab: Option<HandGrab>,
     pub right_grab: Option<HandGrab>,
+    pub left_held: Option<HeldObject>,
+    pub right_held: Option<HeldObject>,
     pub incoming_threat: Option<IncomingThreat>,
 }
 
@@ -95,6 +108,8 @@ impl Default for ReflexState {
             writhe_time: 0.0,
             left_grab: None,
             right_grab: None,
+            left_held: None,
+            right_held: None,
             incoming_threat: None,
         }
     }
@@ -134,17 +149,31 @@ impl RagdollInstance {
 
         if (bone == BoneId::Head && sev >= 0.72) || self.reflex.health <= 10.0 {
             self.reflex.unconscious = true;
+            self.reflex.left_held = None;
+            self.reflex.right_held = None;
         }
         if matches!(
             bone,
             BoneId::LeftUpperArm | BoneId::LeftForearm | BoneId::LeftHand
         ) {
             self.reflex.left_grab = None;
+            if self.reflex.bone_damage[BoneId::LeftHand as usize] >= 0.20
+                || self.reflex.bone_damage[BoneId::LeftForearm as usize] >= 0.25
+                || self.reflex.bone_damage[BoneId::LeftUpperArm as usize] >= 0.35
+            {
+                self.reflex.left_held = None;
+            }
         } else if matches!(
             bone,
             BoneId::RightUpperArm | BoneId::RightForearm | BoneId::RightHand
         ) {
             self.reflex.right_grab = None;
+            if self.reflex.bone_damage[BoneId::RightHand as usize] >= 0.20
+                || self.reflex.bone_damage[BoneId::RightForearm as usize] >= 0.25
+                || self.reflex.bone_damage[BoneId::RightUpperArm as usize] >= 0.35
+            {
+                self.reflex.right_held = None;
+            }
         }
 
         self.reflex.active_wound = Some(WoundEvent {
@@ -188,6 +217,8 @@ pub fn apply_procedural_reflexes(
         ragdoll.reflex.tumbling = false;
         ragdoll.reflex.left_grab = None;
         ragdoll.reflex.right_grab = None;
+        ragdoll.reflex.left_held = None;
+        ragdoll.reflex.right_held = None;
         return;
     }
 
@@ -198,6 +229,8 @@ pub fn apply_procedural_reflexes(
         ragdoll.reflex.tumbling = false;
         ragdoll.reflex.left_grab = None;
         ragdoll.reflex.right_grab = None;
+        ragdoll.reflex.left_held = None;
+        ragdoll.reflex.right_held = None;
         for &j_idx in &ragdoll.joint_indices {
             joints[j_idx].motor_stiffness = 0.0;
             joints[j_idx].motor_damping = 0.0;
@@ -258,6 +291,15 @@ pub fn apply_procedural_reflexes(
     }
 
     // 4. Environmental Hand Grabbing (Ledge, Wall & Platform Edge Catch)
+    let left_holding_initial = ragdoll.reflex.left_held.is_some();
+    let right_holding_initial = ragdoll.reflex.right_held.is_some();
+    if left_holding_initial {
+        ragdoll.reflex.left_grab = None;
+    }
+    if right_holding_initial {
+        ragdoll.reflex.right_grab = None;
+    }
+
     let total_mass: f32 = ragdoll
         .body_indices
         .iter()
@@ -278,30 +320,38 @@ pub fn apply_procedural_reflexes(
     } else if matches!(state, BehaviorState::Falling | BehaviorState::Stumbling)
         && ragdoll.reflex.health > 20.0
     {
-        let left_active = update_hand_grab(
-            ragdoll,
-            bodies,
-            joints,
-            static_boxes,
-            true,
-            total_mass,
-            s_h,
-            grav_scale,
-            damp_scale,
-            dt,
-        );
-        let right_active = update_hand_grab(
-            ragdoll,
-            bodies,
-            joints,
-            static_boxes,
-            false,
-            total_mass,
-            s_h,
-            grav_scale,
-            damp_scale,
-            dt,
-        );
+        let left_active = if left_holding_initial {
+            false
+        } else {
+            update_hand_grab(
+                ragdoll,
+                bodies,
+                joints,
+                static_boxes,
+                true,
+                total_mass,
+                s_h,
+                grav_scale,
+                damp_scale,
+                dt,
+            )
+        };
+        let right_active = if right_holding_initial {
+            false
+        } else {
+            update_hand_grab(
+                ragdoll,
+                bodies,
+                joints,
+                static_boxes,
+                false,
+                total_mass,
+                s_h,
+                grav_scale,
+                damp_scale,
+                dt,
+            )
+        };
         (left_active, right_active)
     } else {
         (
@@ -309,6 +359,9 @@ pub fn apply_procedural_reflexes(
             ragdoll.reflex.right_grab.is_some(),
         )
     };
+
+    let left_arm_busy_pre = left_grab_active || left_holding_initial;
+    let right_arm_busy_pre = right_grab_active || right_holding_initial;
 
     // 5. High Fall (Mid-Air Bicycle & Windmill), Tumble / Fetal Protect, & Brace-for-Impact
     let pelvis_pos = bodies[pelvis_idx].position;
@@ -367,39 +420,45 @@ pub fn apply_procedural_reflexes(
         }
 
         // Arm Windmill: counter-rotating arms flared outward with boosted motor stiffness
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::LeftShoulder,
-            Quat::from_euler(EulerRot::XYZ, 1.1 * cyc, 0.0, 0.95),
-        );
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::RightShoulder,
-            Quat::from_euler(EulerRot::XYZ, -1.1 * cyc, 0.0, -0.95),
-        );
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::LeftElbow,
-            Quat::from_rotation_x(-0.45),
-        );
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::RightElbow,
-            Quat::from_rotation_x(-0.45),
-        );
-        for jid in [JointId::LeftShoulder, JointId::RightShoulder] {
-            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
-            j.motor_stiffness = j.motor_stiffness.max(72.0 * grav_scale);
-            j.max_torque = j.max_torque.max(80.0 * grav_scale);
+        if !left_holding_initial {
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::LeftShoulder,
+                Quat::from_euler(EulerRot::XYZ, 1.1 * cyc, 0.0, 0.95),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::LeftElbow,
+                Quat::from_rotation_x(-0.45),
+            );
+            let sh = &mut joints[ragdoll.joint_indices[JointId::LeftShoulder as usize]];
+            sh.motor_stiffness = sh.motor_stiffness.max(72.0 * grav_scale);
+            sh.max_torque = sh.max_torque.max(80.0 * grav_scale);
+            let el = &mut joints[ragdoll.joint_indices[JointId::LeftElbow as usize]];
+            el.motor_stiffness = el.motor_stiffness.max(45.0 * grav_scale);
+            el.max_torque = el.max_torque.max(50.0 * grav_scale);
         }
-        for jid in [JointId::LeftElbow, JointId::RightElbow] {
-            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
-            j.motor_stiffness = j.motor_stiffness.max(45.0 * grav_scale);
-            j.max_torque = j.max_torque.max(50.0 * grav_scale);
+        if !right_holding_initial {
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightShoulder,
+                Quat::from_euler(EulerRot::XYZ, -1.1 * cyc, 0.0, -0.95),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightElbow,
+                Quat::from_rotation_x(-0.45),
+            );
+            let sh = &mut joints[ragdoll.joint_indices[JointId::RightShoulder as usize]];
+            sh.motor_stiffness = sh.motor_stiffness.max(72.0 * grav_scale);
+            sh.max_torque = sh.max_torque.max(80.0 * grav_scale);
+            let el = &mut joints[ragdoll.joint_indices[JointId::RightElbow as usize]];
+            el.motor_stiffness = el.motor_stiffness.max(45.0 * grav_scale);
+            el.max_torque = el.max_torque.max(50.0 * grav_scale);
         }
 
         // Self-Righting Pitch: subtle spine curl/arch trying to look down toward ground
@@ -495,43 +554,49 @@ pub fn apply_procedural_reflexes(
         }
 
         // Fold elbows tightly with upper arms raised in front of face/temples to shield head
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::LeftShoulder,
-            Quat::from_euler(EulerRot::XYZ, -1.15, 0.35, 0.25),
-        );
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::RightShoulder,
-            Quat::from_euler(EulerRot::XYZ, -1.15, -0.35, -0.25),
-        );
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::LeftElbow,
-            Quat::from_rotation_x(-1.75),
-        );
-        set_motor_target(
-            ragdoll,
-            joints,
-            JointId::RightElbow,
-            Quat::from_rotation_x(-1.75),
-        );
-        for jid in [JointId::LeftShoulder, JointId::RightShoulder] {
-            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
-            j.motor_stiffness = j.motor_stiffness.max(75.0 * grav_scale);
-            j.max_torque = j.max_torque.max(85.0 * grav_scale);
+        if !left_holding_initial {
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::LeftShoulder,
+                Quat::from_euler(EulerRot::XYZ, -1.15, 0.35, 0.25),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::LeftElbow,
+                Quat::from_rotation_x(-1.75),
+            );
+            let sh = &mut joints[ragdoll.joint_indices[JointId::LeftShoulder as usize]];
+            sh.motor_stiffness = sh.motor_stiffness.max(75.0 * grav_scale);
+            sh.max_torque = sh.max_torque.max(85.0 * grav_scale);
+            let el = &mut joints[ragdoll.joint_indices[JointId::LeftElbow as usize]];
+            el.motor_stiffness = el.motor_stiffness.max(60.0 * grav_scale);
+            el.max_torque = el.max_torque.max(65.0 * grav_scale);
         }
-        for jid in [JointId::LeftElbow, JointId::RightElbow] {
-            let j = &mut joints[ragdoll.joint_indices[jid as usize]];
-            j.motor_stiffness = j.motor_stiffness.max(60.0 * grav_scale);
-            j.max_torque = j.max_torque.max(65.0 * grav_scale);
+        if !right_holding_initial {
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightShoulder,
+                Quat::from_euler(EulerRot::XYZ, -1.15, -0.35, -0.25),
+            );
+            set_motor_target(
+                ragdoll,
+                joints,
+                JointId::RightElbow,
+                Quat::from_rotation_x(-1.75),
+            );
+            let sh = &mut joints[ragdoll.joint_indices[JointId::RightShoulder as usize]];
+            sh.motor_stiffness = sh.motor_stiffness.max(75.0 * grav_scale);
+            sh.max_torque = sh.max_torque.max(85.0 * grav_scale);
+            let el = &mut joints[ragdoll.joint_indices[JointId::RightElbow as usize]];
+            el.motor_stiffness = el.motor_stiffness.max(60.0 * grav_scale);
+            el.max_torque = el.max_torque.max(65.0 * grav_scale);
         }
     } else if state == BehaviorState::Falling
         && ragdoll.balance.com_vel.y < -0.5
-        && (!left_grab_active || !right_grab_active)
+        && (!left_arm_busy_pre || !right_arm_busy_pre)
     {
         ragdoll.reflex.high_falling = false;
         ragdoll.reflex.tumbling = false;
@@ -551,7 +616,7 @@ pub fn apply_procedural_reflexes(
                 .normalize_or_zero();
         }
 
-        if !left_grab_active {
+        if !left_arm_busy_pre {
             if dir_l.length_squared() > 0.5 {
                 set_motor_target(
                     ragdoll,
@@ -574,7 +639,7 @@ pub fn apply_procedural_reflexes(
             el.max_torque = el.max_torque.max(40.0 * grav_scale);
         }
 
-        if !right_grab_active {
+        if !right_arm_busy_pre {
             if dir_r.length_squared() > 0.5 {
                 set_motor_target(
                     ragdoll,
@@ -640,12 +705,17 @@ pub fn apply_procedural_reflexes(
                 bodies,
                 joints,
                 threat,
-                left_grab_active,
-                right_grab_active,
+                left_arm_busy_pre,
+                right_arm_busy_pre,
                 grav_scale,
             );
         }
     }
+
+    // 5c. Dynamic Held Objects (Spring-Damper Grip, Carry Pocket Assist & Wound/Break-Force Drop)
+    update_held_objects(ragdoll, bodies, joints, s_h, grav_scale, damp_scale, dt);
+    let left_arm_busy = left_grab_active || ragdoll.reflex.left_held.is_some();
+    let right_arm_busy = right_grab_active || ragdoll.reflex.right_held.is_some();
 
     // 6. Reach-for-Wound (Guard / Clutch Injury) & Downed Writhe
     let Some(mut wound) = ragdoll.reflex.active_wound else {
@@ -744,7 +814,7 @@ pub fn apply_procedural_reflexes(
     }
 
     let mut reach = |is_left: bool, is_leg_reach: bool| {
-        if (is_left && left_grab_active) || (!is_left && right_grab_active) {
+        if (is_left && left_arm_busy) || (!is_left && right_arm_busy) {
             return;
         }
         reach_arm_to_target(
@@ -766,39 +836,43 @@ pub fn apply_procedural_reflexes(
     match wound.region {
         WoundRegion::LeftArm => {
             reach(false, false);
-            // Slightly tuck the injured left arm inward
-            set_motor_target(
-                ragdoll,
-                joints,
-                JointId::LeftShoulder,
-                Quat::from_euler(EulerRot::XYZ, -0.25, 0.0, -0.10),
-            );
-            set_motor_target(
-                ragdoll,
-                joints,
-                JointId::LeftElbow,
-                Quat::from_rotation_x(-0.65),
-            );
+            if !left_arm_busy {
+                // Slightly tuck the injured left arm inward
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    JointId::LeftShoulder,
+                    Quat::from_euler(EulerRot::XYZ, -0.25, 0.0, -0.10),
+                );
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    JointId::LeftElbow,
+                    Quat::from_rotation_x(-0.65),
+                );
+            }
         }
         WoundRegion::RightArm => {
             reach(true, false);
-            // Slightly tuck the injured right arm inward
-            set_motor_target(
-                ragdoll,
-                joints,
-                JointId::RightShoulder,
-                Quat::from_euler(EulerRot::XYZ, -0.25, 0.0, 0.10),
-            );
-            set_motor_target(
-                ragdoll,
-                joints,
-                JointId::RightElbow,
-                Quat::from_rotation_x(-0.65),
-            );
+            if !right_arm_busy {
+                // Slightly tuck the injured right arm inward
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    JointId::RightShoulder,
+                    Quat::from_euler(EulerRot::XYZ, -0.25, 0.0, 0.10),
+                );
+                set_motor_target(
+                    ragdoll,
+                    joints,
+                    JointId::RightElbow,
+                    Quat::from_rotation_x(-0.65),
+                );
+            }
         }
         WoundRegion::Torso => {
             if back_arch_active {
-                if !left_grab_active {
+                if !left_arm_busy {
                     set_motor_target(
                         ragdoll,
                         joints,
@@ -815,7 +889,7 @@ pub fn apply_procedural_reflexes(
                     sh.motor_stiffness = sh.motor_stiffness.max(68.0 * grav_scale * w);
                     sh.max_torque = sh.max_torque.max(75.0 * grav_scale * w);
                 }
-                if !right_grab_active {
+                if !right_arm_busy {
                     set_motor_target(
                         ragdoll,
                         joints,
@@ -1418,5 +1492,202 @@ fn apply_threat_anticipation(
         let j = &mut joints[ragdoll.joint_indices[jid as usize]];
         j.motor_target = (j.motor_target * spine_offset).normalize();
         j.motor_stiffness *= 1.15;
+    }
+}
+
+/// Updates held dynamic objects for both hands: enforces drop conditions (missing/static body,
+/// unconscious/low health, wounded holding arm, downed/prolonged fall, over-stretch, break-force),
+/// applies equal-and-opposite spring-damper hand/object impulses, drives a natural carry pose,
+/// and applies a gentle supportive carry-pocket assist spring on the held body.
+pub fn update_held_objects(
+    ragdoll: &mut RagdollInstance,
+    bodies: &mut [RigidBody],
+    joints: &mut [Joint],
+    s_h: f32,
+    grav_scale: f32,
+    damp_scale: f32,
+    dt: f32,
+) {
+    if dt <= 0.0 {
+        return;
+    }
+
+    let profile = ragdoll.profile.sanitized();
+    let state = ragdoll.balance.state;
+    let chest_idx = ragdoll.body_indices[BoneId::Chest as usize];
+    let chest_pos = bodies[chest_idx].position;
+    let chest_rot = bodies[chest_idx].orientation;
+    let chest_vel = bodies[chest_idx].linear_velocity;
+    let chest_fwd = (chest_rot * Vec3::Z).normalize_or_zero();
+    let chest_right = -(chest_rot * Vec3::X).normalize_or_zero();
+    let health_factor = (ragdoll.reflex.health / 100.0).clamp(0.35, 1.0);
+
+    for is_left in [true, false] {
+        let held_opt = if is_left {
+            ragdoll.reflex.left_held
+        } else {
+            ragdoll.reflex.right_held
+        };
+        let Some(mut held) = held_opt else {
+            continue;
+        };
+
+        let (upper_arm_bid, forearm_bid, hand_bid, shoulder_jid, elbow_jid, wrist_jid, side_sign) =
+            if is_left {
+                (
+                    BoneId::LeftUpperArm,
+                    BoneId::LeftForearm,
+                    BoneId::LeftHand,
+                    JointId::LeftShoulder,
+                    JointId::LeftElbow,
+                    JointId::LeftWrist,
+                    1.0_f32,
+                )
+            } else {
+                (
+                    BoneId::RightUpperArm,
+                    BoneId::RightForearm,
+                    BoneId::RightHand,
+                    JointId::RightShoulder,
+                    JointId::RightElbow,
+                    JointId::RightWrist,
+                    -1.0_f32,
+                )
+            };
+
+        let drop_now = held.body_idx >= bodies.len()
+            || bodies[held.body_idx].inv_mass <= 0.0
+            || !ragdoll.active_enabled
+            || ragdoll.reflex.unconscious
+            || ragdoll.reflex.health <= 18.0
+            || ragdoll.reflex.bone_damage[hand_bid as usize] >= 0.20
+            || ragdoll.reflex.bone_damage[forearm_bid as usize] >= 0.25
+            || ragdoll.reflex.bone_damage[upper_arm_bid as usize] >= 0.35
+            || state == BehaviorState::Downed
+            || (state == BehaviorState::Falling && ragdoll.balance.fallen_time > 0.30);
+
+        if drop_now {
+            if is_left {
+                ragdoll.reflex.left_held = None;
+            } else {
+                ragdoll.reflex.right_held = None;
+            }
+            continue;
+        }
+
+        bodies[held.body_idx].wake_up();
+
+        let hand_idx = ragdoll.body_indices[hand_bid as usize];
+        let anchor_w = bodies[held.body_idx].world_point(held.local_anchor);
+        let hand_pos = bodies[hand_idx].position;
+        let err = anchor_w - hand_pos;
+        if err.length() > 0.42 * s_h {
+            if is_left {
+                ragdoll.reflex.left_held = None;
+            } else {
+                ragdoll.reflex.right_held = None;
+            }
+            continue;
+        }
+
+        let v_hand = bodies[hand_idx].linear_velocity;
+        let v_anchor = bodies[held.body_idx].velocity_at_point(anchor_w);
+        let rel_v = v_anchor - v_hand;
+        let raw_force = err * held.stiffness + rel_v * held.damping;
+        let eff_break = (held.break_force * profile.muscle_ratio * health_factor).max(1.0);
+        let raw_len = raw_force.length();
+
+        if raw_len > eff_break && held.hold_time > 0.15 {
+            if is_left {
+                ragdoll.reflex.left_held = None;
+            } else {
+                ragdoll.reflex.right_held = None;
+            }
+            continue;
+        }
+
+        let force = if raw_len > eff_break && raw_len > 1e-6 {
+            raw_force * (eff_break / raw_len)
+        } else {
+            raw_force
+        };
+
+        let dir = if force.length_squared() > 1e-12 {
+            force.normalize()
+        } else {
+            Vec3::ZERO
+        };
+        let r_held = anchor_w - bodies[held.body_idx].position;
+        let w_sum = bodies[hand_idx].inv_mass
+            + if dir.length_squared() > 0.5 {
+                bodies[held.body_idx].generalized_inv_mass(r_held, dir)
+            } else {
+                bodies[held.body_idx].inv_mass
+            };
+        let stab_denom = 1.0 + w_sum * dt * (held.damping * 0.25);
+        let impulse = (force / stab_denom) * dt;
+
+        bodies[hand_idx].linear_velocity += impulse * bodies[hand_idx].inv_mass;
+        {
+            let hb = &mut bodies[held.body_idx];
+            hb.linear_velocity -= impulse * hb.inv_mass;
+            let dw = hb.inv_inertia_world_mul(r_held.cross(-impulse));
+            hb.angular_velocity += dw;
+        }
+
+        // Carry Pocket Assist: natural carry target in front of chest
+        let carry_target = chest_pos + chest_fwd * (0.38 * s_h) - Vec3::Y * (0.14 * s_h)
+            + chest_right * (if is_left { -0.14 } else { 0.14 } * s_h);
+
+        // Carrying posture: arms forward & elbows bent ~70-85 deg hugging the object
+        set_motor_target(
+            ragdoll,
+            joints,
+            shoulder_jid,
+            Quat::from_euler(EulerRot::XYZ, -0.42, -side_sign * 0.25, -side_sign * 0.16),
+        );
+        set_motor_target(ragdoll, joints, elbow_jid, Quat::from_rotation_x(-1.32));
+        set_motor_target(
+            ragdoll,
+            joints,
+            wrist_jid,
+            Quat::from_rotation_y(-side_sign * 0.18),
+        );
+
+        let sh = &mut joints[ragdoll.joint_indices[shoulder_jid as usize]];
+        sh.motor_stiffness = sh.motor_stiffness.max(110.0 * grav_scale);
+        sh.motor_damping = sh.motor_damping.max(2.2 * damp_scale);
+        sh.max_torque = sh.max_torque.max(130.0 * grav_scale);
+
+        let el = &mut joints[ragdoll.joint_indices[elbow_jid as usize]];
+        el.motor_stiffness = el.motor_stiffness.max(85.0 * grav_scale);
+        el.motor_damping = el.motor_damping.max(1.8 * damp_scale);
+        el.max_torque = el.max_torque.max(95.0 * grav_scale);
+
+        // Gentle supportive carry spring on the held body toward carry_target
+        let held_mass = bodies[held.body_idx].mass;
+        let carry_err = carry_target - anchor_w;
+        let carry_rel_v = bodies[held.body_idx].velocity_at_point(anchor_w) - chest_vel;
+        let mut carry_force = carry_err * (held_mass * 75.0) - carry_rel_v * (held_mass * 8.5)
+            + Vec3::Y * (0.50 * held_mass * 9.81);
+        let max_carry = 0.65 * held_mass * 9.81;
+        let cf_len = carry_force.length();
+        if cf_len > max_carry && cf_len > 1e-6 {
+            carry_force *= max_carry / cf_len;
+        }
+        let carry_imp = carry_force * dt;
+        {
+            let hb = &mut bodies[held.body_idx];
+            hb.linear_velocity += carry_imp * hb.inv_mass;
+            let dw = hb.inv_inertia_world_mul(r_held.cross(carry_imp));
+            hb.angular_velocity += dw;
+        }
+
+        held.hold_time += dt;
+        if is_left {
+            ragdoll.reflex.left_held = Some(held);
+        } else {
+            ragdoll.reflex.right_held = Some(held);
+        }
     }
 }

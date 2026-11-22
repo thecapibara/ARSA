@@ -2600,3 +2600,116 @@ fn test_dynamic_box_resting_on_static_ledge_edge_no_sinking() {
         world.bodies[box_idx].position
     );
 }
+
+#[test]
+fn test_held_box_two_handed_carry_and_drop_on_arm_shot() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    let box_idx = world
+        .give_ragdoll_held_box(id, Vec3::splat(0.18), 6.0, 320.0)
+        .expect("give_ragdoll_held_box should succeed");
+
+    assert!(world.is_hand_holding(id, true));
+    assert!(world.is_hand_holding(id, false));
+
+    for _ in 0..60 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during held box carry"
+            );
+        }
+    }
+
+    assert_eq!(
+        world.ragdolls[id].balance.state,
+        BehaviorState::Balanced,
+        "expected ragdoll carrying 6kg box to remain Balanced, got {:?}",
+        world.ragdolls[id].balance.state
+    );
+    assert!(
+        world.is_hand_holding(id, true) && world.is_hand_holding(id, false),
+        "expected both hands to remain holding after 1.0s carry"
+    );
+    let box_y = world.bodies[box_idx].position.y;
+    assert!(
+        box_y > 0.75,
+        "expected held box to stay lifted (> 0.75m), got box_y={box_y}"
+    );
+
+    // Shoot the right forearm from the right (-X) side to avoid box occlusion.
+    let r_forearm_idx = world.ragdolls[id].body_indices[BoneId::RightForearm as usize];
+    let r_forearm_pos = world.bodies[r_forearm_idx].position;
+    let res = world.fire_weapon(
+        r_forearm_pos + Vec3::new(-2.0, 0.0, 0.0),
+        Vec3::X,
+        WeaponKind::Pistol,
+    );
+    assert_eq!(res.hit_ragdoll_id, Some(id));
+    assert_eq!(res.hit_region, WoundRegion::RightArm);
+    assert!(
+        !world.is_hand_holding(id, false),
+        "expected right hand to immediately drop the box when shot in right forearm"
+    );
+
+    for _ in 0..30 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf after right forearm shot"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_held_box_breaks_free_on_heavy_impact() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    let box_idx = world
+        .give_ragdoll_held_box(id, Vec3::splat(0.18), 6.0, 240.0)
+        .expect("give_ragdoll_held_box should succeed");
+
+    for _ in 0..18 {
+        world.step(1.0 / 60.0);
+    }
+    assert!(world.is_hand_holding(id, true) && world.is_hand_holding(id, false));
+
+    let box_before = world.bodies[box_idx].position;
+    let affected = world.apply_explosion(box_before + Vec3::new(0.0, 0.0, 0.45), 3.2, 85.0, 0.0);
+    assert!(affected > 0);
+
+    for _ in 0..30 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during heavy impact held box break"
+            );
+        }
+    }
+
+    assert!(
+        !world.is_hand_holding(id, true) && !world.is_hand_holding(id, false),
+        "expected both hands to release held box on heavy impact (left={}, right={})",
+        world.is_hand_holding(id, true),
+        world.is_hand_holding(id, false)
+    );
+    let box_after = world.bodies[box_idx].position;
+    assert!(
+        (box_after - box_before).length() > 0.30,
+        "expected released box to fly freely after explosion, moved only {:?}",
+        box_after - box_before
+    );
+}

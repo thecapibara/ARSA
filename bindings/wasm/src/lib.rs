@@ -777,4 +777,53 @@ impl ArsaSim {
             .map(|l| l as u32)
             .unwrap_or(u32::MAX)
     }
+
+    /// Attaches a ragdoll's left or right hand to `body_idx` at local anchor `(lx, ly, lz)`
+    /// with grip break threshold `break_force` (Newtons).
+    #[allow(clippy::too_many_arguments)]
+    pub fn grab_body_with_hand(
+        &mut self,
+        ragdoll_id: usize,
+        is_left: bool,
+        body_idx: usize,
+        lx: f32,
+        ly: f32,
+        lz: f32,
+        break_force: f32,
+    ) -> bool {
+        self.world.grab_body_with_hand(
+            ragdoll_id,
+            is_left,
+            body_idx,
+            Vec3::new(lx, ly, lz),
+            break_force,
+        )
+    }
+
+    /// Releases any held object on the specified hand (`is_left`) of `ragdoll_id`.
+    pub fn release_hand_hold(&mut self, ragdoll_id: usize, is_left: bool) {
+        self.world.release_hand_hold(ragdoll_id, is_left);
+    }
+
+    /// Spawns a dynamic box directly in front of `ragdoll_id`'s chest and attaches both hands.
+    /// Returns the spawned box body index, or `-1` on failure.
+    pub fn give_ragdoll_held_box(
+        &mut self,
+        ragdoll_id: usize,
+        hx: f32,
+        hy: f32,
+        hz: f32,
+        mass: f32,
+        break_force: f32,
+    ) -> i32 {
+        self.world
+            .give_ragdoll_held_box(ragdoll_id, Vec3::new(hx, hy, hz), mass, break_force)
+            .map(|idx| idx as i32)
+            .unwrap_or(-1)
+    }
+
+    /// Returns `true` if the specified hand (`is_left`) of `ragdoll_id` is currently holding an object.
+    pub fn is_hand_holding(&self, ragdoll_id: usize, is_left: bool) -> bool {
+        self.world.is_hand_holding(ragdoll_id, is_left)
+    }
 }
