@@ -140,10 +140,14 @@ export class LabScene {
   private readonly telemetryPool: TelemetryVisual[] = [];
   private readonly comGeo: THREE.SphereGeometry;
   private readonly comMat: THREE.MeshBasicMaterial;
+  private readonly comMatSelected: THREE.MeshBasicMaterial;
   private readonly plumbMat: THREE.LineDashedMaterial;
+  private readonly plumbMatSelected: THREE.LineDashedMaterial;
   private readonly cpRingGeo: THREE.RingGeometry;
   private readonly cpRingMat: THREE.MeshBasicMaterial;
+  private readonly cpRingMatSelected: THREE.MeshBasicMaterial;
   private readonly cpTetherMat: THREE.LineBasicMaterial;
+  private readonly cpTetherMatSelected: THREE.LineBasicMaterial;
   private readonly woundRingGeo: THREE.RingGeometry;
   private readonly woundRingMat: THREE.MeshBasicMaterial;
   private readonly woundCoreGeo: THREE.SphereGeometry;
@@ -290,6 +294,12 @@ export class LabScene {
       opacity: 0.92,
       depthTest: false,
     });
+    this.comMatSelected = new THREE.MeshBasicMaterial({
+      color: 0xe8942c,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+    });
     this.plumbMat = new THREE.LineDashedMaterial({
       color: 0x22d3ee,
       dashSize: 0.06,
@@ -298,18 +308,39 @@ export class LabScene {
       opacity: 0.78,
       depthTest: false,
     });
+    this.plumbMatSelected = new THREE.LineDashedMaterial({
+      color: 0xe8942c,
+      dashSize: 0.06,
+      gapSize: 0.04,
+      transparent: true,
+      opacity: 0.88,
+      depthTest: false,
+    });
     this.cpRingGeo = new THREE.RingGeometry(0.085, 0.125, 28);
     this.cpRingMat = new THREE.MeshBasicMaterial({
-      color: 0xf59e0b,
+      color: 0x22d3ee,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    this.cpRingMatSelected = new THREE.MeshBasicMaterial({
+      color: 0xe8942c,
+      transparent: true,
+      opacity: 0.95,
       side: THREE.DoubleSide,
       depthWrite: false,
     });
     this.cpTetherMat = new THREE.LineBasicMaterial({
-      color: 0xf59e0b,
+      color: 0x22d3ee,
       transparent: true,
       opacity: 0.45,
+      depthWrite: false,
+    });
+    this.cpTetherMatSelected = new THREE.LineBasicMaterial({
+      color: 0xe8942c,
+      transparent: true,
+      opacity: 0.65,
       depthWrite: false,
     });
     this.woundRingGeo = new THREE.RingGeometry(0.052, 0.082, 24);
@@ -585,7 +616,8 @@ export class LabScene {
 
   private clearStaticBoxes(): void {
     while (this.staticGroup.children.length > 0) {
-      const child = this.staticGroup.children.pop()!;
+      const child = this.staticGroup.children[this.staticGroup.children.length - 1];
+      this.staticGroup.remove(child);
       child.traverse((obj) => {
         if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
           obj.geometry.dispose();
@@ -680,10 +712,13 @@ export class LabScene {
     heights: Float32Array | number[]
   ): void {
     while (this.terrainGroup.children.length > 0) {
-      const child = this.terrainGroup.children.pop()!;
-      if (child instanceof THREE.Mesh && child === this.terrainSurfaceMesh) {
-        child.geometry.dispose();
-      }
+      const child = this.terrainGroup.children[this.terrainGroup.children.length - 1];
+      this.terrainGroup.remove(child);
+      child.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) {
+          obj.geometry.dispose();
+        }
+      });
     }
     this.terrainSurfaceMesh = null;
 
@@ -1115,8 +1150,12 @@ export class LabScene {
   /**
    * Updates 3D debug markers (cyan CoM + dashed plumb line + amber Capture Point ring
    * + pulsing crimson Wound marker) from `get_ragdoll_telemetry()`.
+   * Tints selected ragdoll CoM / CP ring amber (0xe8942c) while others remain cyan (0x22d3ee).
    */
-  public syncRagdollTelemetry(telemetry: Float32Array): void {
+  public syncRagdollTelemetry(
+    telemetry: Float32Array,
+    selectedRagdollId = 0
+  ): void {
     const stride = getTelemetryStride(telemetry);
     const count = Math.floor(telemetry.length / stride);
 
@@ -1130,6 +1169,12 @@ export class LabScene {
         entry.group.visible = false;
         continue;
       }
+
+      const isSelected = i === selectedRagdollId;
+      entry.comMarker.material = isSelected ? this.comMatSelected : this.comMat;
+      entry.plumbLine.material = isSelected ? this.plumbMatSelected : this.plumbMat;
+      entry.cpRing.material = isSelected ? this.cpRingMatSelected : this.cpRingMat;
+      entry.cpTether.material = isSelected ? this.cpTetherMatSelected : this.cpTetherMat;
 
       const o = i * stride;
       const comX = telemetry[o];
@@ -1511,7 +1556,7 @@ export class LabScene {
 
     this.placePreviewGroup.visible = true;
     this.placePreviewGroup.position.set(pos.x, Math.max(0, pos.y), pos.z);
-    this.placePreviewGroup.rotation.y = yaw;
+    this.placePreviewGroup.rotation.y = mode === 'ragdoll' ? 0 : yaw;
 
     this.placePreviewRagdoll.visible = mode === 'ragdoll';
     this.placePreviewCurb.visible = mode === 'curb';

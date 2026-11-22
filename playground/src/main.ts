@@ -940,7 +940,7 @@ class PlaygroundApp {
 
     if (typeof this.sim.get_ragdoll_telemetry === 'function') {
       const telemetry = this.sim.get_ragdoll_telemetry();
-      this.lab.syncRagdollTelemetry(telemetry);
+      this.lab.syncRagdollTelemetry(telemetry, this.selectedRagdollId);
       this.updateBrainTelemetryHud(telemetry);
     }
   }
@@ -1440,9 +1440,25 @@ class PlaygroundApp {
       if (py < -15) continue;
       pos.set(transforms[tOff], py, transforms[tOff + 2]);
 
+      // Underwater extinguishing: if burning pelvis/chest is below waterLevel + 0.15, extinguish and remove from refresh map
+      if (
+        waterLevel > -500 &&
+        (boneId === BoneId.Pelvis || boneId === BoneId.Chest) &&
+        py < waterLevel + 0.15
+      ) {
+        if (readStatus(ragdollId) === 1) {
+          if (typeof this.sim.set_ragdoll_status === 'function') {
+            this.sim.set_ragdoll_status(ragdollId, 0, 0, 0);
+          }
+          ragdollStatusCache.set(ragdollId, 0);
+        }
+        this.fireContactRefreshMap.delete(ragdollId);
+      }
+
       // Automatic contact ignition against pelvis, chest, or feet
       if (
         fireSources.length > 0 &&
+        (waterLevel <= -500 || py >= waterLevel + 0.15) &&
         (boneId === BoneId.Pelvis ||
           boneId === BoneId.Chest ||
           boneId === BoneId.LeftFoot ||
@@ -1703,6 +1719,7 @@ class PlaygroundApp {
         break;
       }
     }
+    this.audio.playImpact(false);
   }
 
   private bindUiEvents(): void {
@@ -1745,7 +1762,7 @@ class PlaygroundApp {
     this.throwerBtn.addEventListener('click', () => {
       if (this.activeTool !== 'thrower') {
         this.setTool('thrower');
-        this.setOpenPopover('thrower');
+        this.setOpenPopover(null);
       } else {
         this.setOpenPopover(this.openPopover === 'thrower' ? null : 'thrower');
       }
@@ -1983,11 +2000,7 @@ class PlaygroundApp {
     this.canvas.addEventListener(
       'wheel',
       (e: WheelEvent) => {
-        if (
-          e.shiftKey &&
-          this.activeTool === 'placer' &&
-          this.lab.getCameraMode() === 'orbit'
-        ) {
+        if (e.shiftKey && this.activeTool === 'placer') {
           e.preventDefault();
           e.stopPropagation();
           this.placerYaw -= e.deltaY * 0.0025;
@@ -2021,6 +2034,7 @@ class PlaygroundApp {
         this.lab.getCameraMode() === 'orbit' &&
         this.activeTool === 'ignite'
       ) {
+        e.stopPropagation();
         this.rmbDownX = e.clientX;
         this.rmbDownY = e.clientY;
         this.rmbTrackActive = true;
@@ -2161,7 +2175,11 @@ class PlaygroundApp {
       } else if (this.activeTool === 'taser') {
         this.fireTaser(ray);
       } else if (this.activeTool === 'ignite') {
-        this.executeIgnite(ray);
+        if (e.shiftKey) {
+          this.executeExtinguish(ray);
+        } else {
+          this.executeIgnite(ray);
+        }
       }
     });
 
@@ -2301,6 +2319,14 @@ class PlaygroundApp {
         case 'Digit0':
           this.setOpenPopover(null);
           this.setTool('force_wave');
+          break;
+        case 'KeyZ':
+          this.setOpenPopover(null);
+          this.setTool('taser');
+          break;
+        case 'KeyX':
+          this.setOpenPopover(null);
+          this.setTool('ignite');
           break;
         case 'Escape':
           this.setOpenPopover(null);

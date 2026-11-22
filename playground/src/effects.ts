@@ -763,6 +763,7 @@ export class LabEffectsManager {
 
   private disposeGroundFirePatch(patch: GroundFirePatch): void {
     this.scene.remove(patch.group);
+    patch.light.dispose();
     (patch.disc.material as THREE.Material).dispose();
     (patch.ring.material as THREE.Material).dispose();
   }
