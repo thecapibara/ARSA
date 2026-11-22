@@ -429,6 +429,34 @@ impl ArsaWorld {
         }
     }
 
+    /// Sets the horizontal desired locomotion velocity `(vx, vz)` in m/s (clamped `<= 3.5` m/s)
+    /// for `ragdoll_id`. Returns `false` if `ragdoll_id` is out of range.
+    pub fn set_ragdoll_desired_velocity(&mut self, ragdoll_id: usize, vx: f32, vz: f32) -> bool {
+        let Some(ragdoll) = self.ragdolls.get_mut(ragdoll_id) else {
+            return false;
+        };
+        let sx = if vx.is_finite() { vx } else { 0.0 };
+        let sz = if vz.is_finite() { vz } else { 0.0 };
+        let mut v = Vec3::new(sx, 0.0, sz);
+        let len = v.length();
+        if len > 3.5 {
+            v *= 3.5 / len;
+        }
+        ragdoll.balance.desired_velocity = v;
+        if len > 1e-4 {
+            self.wake_ragdoll(ragdoll_id, 2.5);
+        }
+        true
+    }
+
+    /// Sets the horizontal desired locomotion velocity `(vx, vz)` in m/s (clamped `<= 3.5` m/s)
+    /// for all ragdolls in the world.
+    pub fn set_all_ragdolls_desired_velocity(&mut self, vx: f32, vz: f32) {
+        for ragdoll_id in 0..self.ragdolls.len() {
+            self.set_ragdoll_desired_velocity(ragdoll_id, vx, vz);
+        }
+    }
+
     /// Sets an external target pose (16 parent-relative joint orientations in `JointId` order)
     /// blended onto the ragdoll's active motor targets with weight `blend_weight` (`0.0..=1.0`).
     /// Returns `false` if `ragdoll_id` is out of range or any input quaternion / weight is non-finite or zero.

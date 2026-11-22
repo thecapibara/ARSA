@@ -860,4 +860,16 @@ impl ArsaSim {
             .map(|(s, _)| s as u32)
             .unwrap_or(u32::MAX)
     }
+
+    /// Sets the horizontal desired locomotion velocity `(vx, vz)` in m/s (clamped `<= 3.5` m/s)
+    /// for `ragdoll_id`. Returns `false` if `ragdoll_id` is out of range.
+    pub fn set_ragdoll_desired_velocity(&mut self, ragdoll_id: usize, vx: f32, vz: f32) -> bool {
+        self.world.set_ragdoll_desired_velocity(ragdoll_id, vx, vz)
+    }
+
+    /// Sets the horizontal desired locomotion velocity `(vx, vz)` in m/s (clamped `<= 3.5` m/s)
+    /// for all ragdolls in the world.
+    pub fn set_all_ragdolls_desired_velocity(&mut self, vx: f32, vz: f32) {
+        self.world.set_all_ragdolls_desired_velocity(vx, vz);
+    }
 }

@@ -2827,3 +2827,89 @@ fn test_on_fire_panic_flail_and_stagger() {
         "expected gentle health drain with floor 25.0, got {health}"
     );
 }
+
+#[test]
+fn test_procedural_locomotion_walks_forward_upright() {
+    let mut world = ArsaWorld::new();
+    let id = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+    let standing_pelvis_y = world.ragdolls[id].standing_pelvis_y;
+    let pelvis_idx = world.ragdolls[id].body_indices[BoneId::Pelvis as usize];
+    let start_z = world.bodies[pelvis_idx].position.z;
+
+    assert!(world.set_ragdoll_desired_velocity(id, 0.0, 1.4));
+
+    for _ in 0..150 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during procedural locomotion"
+            );
+        }
+    }
+
+    let pelvis_pos = world.bodies[pelvis_idx].position;
+    let traveled_z = pelvis_pos.z - start_z;
+    assert!(
+        traveled_z > 1.5,
+        "expected pelvis to travel > 1.5m in +Z over 2.5s, got {traveled_z:.3}m"
+    );
+    assert!(
+        pelvis_pos.y > 0.72 * standing_pelvis_y,
+        "expected pelvis to stay upright (>{:.3}m), got {:.3}m",
+        0.72 * standing_pelvis_y,
+        pelvis_pos.y
+    );
+    assert!(
+        matches!(
+            world.ragdolls[id].balance.state,
+            BehaviorState::Balanced | BehaviorState::Stumbling
+        ),
+        "expected Balanced or Stumbling while walking, got {:?}",
+        world.ragdolls[id].balance.state
+    );
+}
+
+#[test]
+fn test_locomotion_with_leg_wound_limps_slower() {
+    let mut world = ArsaWorld::new();
+    let healthy_id = world.spawn_ragdoll(Vec3::new(-1.5, 0.02, 0.0));
+    let wounded_id = world.spawn_ragdoll(Vec3::new(1.5, 0.02, 0.0));
+
+    world.ragdolls[wounded_id].reflex.bone_damage[BoneId::LeftThigh as usize] = 0.65;
+
+    assert!(world.set_ragdoll_desired_velocity(healthy_id, 0.0, 1.4));
+    assert!(world.set_ragdoll_desired_velocity(wounded_id, 0.0, 1.4));
+
+    let healthy_pelvis = world.ragdolls[healthy_id].body_indices[BoneId::Pelvis as usize];
+    let wounded_pelvis = world.ragdolls[wounded_id].body_indices[BoneId::Pelvis as usize];
+    let healthy_start_z = world.bodies[healthy_pelvis].position.z;
+    let wounded_start_z = world.bodies[wounded_pelvis].position.z;
+
+    for _ in 0..120 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during wounded locomotion"
+            );
+        }
+    }
+
+    let healthy_dist = world.bodies[healthy_pelvis].position.z - healthy_start_z;
+    let wounded_dist = world.bodies[wounded_pelvis].position.z - wounded_start_z;
+    assert!(
+        healthy_dist > 1.0 && wounded_dist > 0.5,
+        "expected both ragdolls to move forward cleanly, got healthy={healthy_dist:.3}m, wounded={wounded_dist:.3}m"
+    );
+    assert!(
+        wounded_dist < healthy_dist * 0.88,
+        "expected wounded ragdoll to limp noticeably slower than healthy (healthy={healthy_dist:.3}m, wounded={wounded_dist:.3}m)"
+    );
+}

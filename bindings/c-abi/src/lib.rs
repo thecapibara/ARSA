@@ -1053,6 +1053,40 @@ pub unsafe extern "C" fn arsa_world_get_ragdoll_status(
         .unwrap_or(u32::MAX)
 }
 
+/// Sets the horizontal desired locomotion velocity `(vx, vz)` in m/s (clamped `<= 3.5` m/s)
+/// for `ragdoll_id`. Returns `false` if `handle` is null or `ragdoll_id` is out of range.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_ragdoll_desired_velocity(
+    handle: *mut ArsaWorldHandle,
+    ragdoll_id: usize,
+    vx: f32,
+    vz: f32,
+) -> bool {
+    let Some(h) = (unsafe { handle.as_mut() }) else {
+        return false;
+    };
+    h.world.set_ragdoll_desired_velocity(ragdoll_id, vx, vz)
+}
+
+/// Sets the horizontal desired locomotion velocity `(vx, vz)` in m/s (clamped `<= 3.5` m/s)
+/// for all ragdolls in the world.
+///
+/// # Safety
+/// `handle` must be null or a valid pointer to an `ArsaWorldHandle`.
+#[no_mangle]
+pub unsafe extern "C" fn arsa_world_set_all_desired_velocity(
+    handle: *mut ArsaWorldHandle,
+    vx: f32,
+    vz: f32,
+) {
+    if let Some(h) = unsafe { handle.as_mut() } {
+        h.world.set_all_ragdolls_desired_velocity(vx, vz);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1669,6 +1703,65 @@ mod tests {
             let mut xforms = [0.0_f32; 18 * 7];
             let written = arsa_world_get_transforms(world, xforms.as_mut_ptr(), xforms.len());
             assert_eq!(written, 18 * 7);
+            for &v in &xforms[..written] {
+                assert!(v.is_finite());
+            }
+
+            arsa_world_destroy(world);
+        }
+    }
+
+    #[test]
+    fn test_c_abi_locomotion_velocity() {
+        unsafe {
+            assert!(!arsa_world_set_ragdoll_desired_velocity(
+                std::ptr::null_mut(),
+                0,
+                0.0,
+                1.4
+            ));
+            arsa_world_set_all_desired_velocity(std::ptr::null_mut(), 0.0, 1.4);
+
+            let world = arsa_world_create();
+            assert!(!world.is_null());
+            assert!(!arsa_world_set_ragdoll_desired_velocity(world, 0, 0.0, 1.4));
+
+            let rid = arsa_world_spawn_ragdoll(world, 0.0, 0.02, 0.0);
+            assert_eq!(rid, 0);
+
+            assert!(arsa_world_set_ragdoll_desired_velocity(
+                world, rid, 0.0, 1.4
+            ));
+            for _ in 0..90 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+
+            let mut telemetry = [0.0_f32; 16];
+            assert_eq!(
+                arsa_world_get_ragdoll_telemetry(world, telemetry.as_mut_ptr(), 16),
+                16
+            );
+            let pelvis_y = telemetry[9];
+            let pelvis_z = telemetry[10];
+            let state = telemetry[7] as u32;
+            assert!(
+                pelvis_z > 0.8,
+                "expected ragdoll to walk forward in +Z (> 0.8m), got z={pelvis_z:.3}"
+            );
+            assert!(
+                pelvis_y > 0.65,
+                "expected ragdoll to stay upright, got y={pelvis_y:.3}"
+            );
+            assert!(state <= 1, "expected Balanced or Stumbling, got {state}");
+
+            arsa_world_set_all_desired_velocity(world, 0.0, 0.0);
+            for _ in 0..60 {
+                arsa_world_step(world, 1.0 / 60.0);
+            }
+
+            let mut xforms = [0.0_f32; 17 * 7];
+            let written = arsa_world_get_transforms(world, xforms.as_mut_ptr(), xforms.len());
+            assert_eq!(written, 17 * 7);
             for &v in &xforms[..written] {
                 assert!(v.is_finite());
             }

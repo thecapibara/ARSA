@@ -6,7 +6,7 @@ use glam::{Quat, Vec3};
 
 use crate::body::RigidBody;
 use crate::joint::Joint;
-use crate::reflex::StatusEffect;
+use crate::reflex::{StatusEffect, WoundRegion};
 use crate::skeleton::{BoneId, JointId, RagdollInstance};
 
 /// Behavioral balance state of an active ragdoll.
@@ -77,6 +77,8 @@ pub struct BalanceState {
     pub teeter_escape_dir: Vec3,
     pub intoxication: f32,
     pub concussion_timer: f32,
+    pub desired_velocity: Vec3,
+    pub gait_phase: f32,
 }
 
 impl Default for BalanceState {
@@ -108,6 +110,8 @@ impl Default for BalanceState {
             teeter_escape_dir: Vec3::ZERO,
             intoxication: 0.0,
             concussion_timer: 0.0,
+            desired_velocity: Vec3::ZERO,
+            gait_phase: 0.0,
         }
     }
 }
@@ -148,6 +152,24 @@ pub fn update_ragdoll_balance(
     };
     let taser_lock = ragdoll.reflex.status_effect == StatusEffect::Electrocuted
         && ragdoll.reflex.status_intensity > 0.2;
+    let is_electrocuted = taser_lock;
+    let raw_desired = {
+        let v = Vec3::new(
+            ragdoll.balance.desired_velocity.x,
+            0.0,
+            ragdoll.balance.desired_velocity.z,
+        );
+        if v.is_finite() {
+            let len = v.length();
+            if len > 3.5 {
+                v * (3.5 / len)
+            } else {
+                v
+            }
+        } else {
+            Vec3::ZERO
+        }
+    };
     let drunk = ragdoll
         .balance
         .intoxication
@@ -388,6 +410,21 @@ pub fn update_ragdoll_balance(
     };
     ragdoll.balance.state = next_state;
 
+    let locomotion_active = grounded_count > 0
+        && raw_desired.length() > 0.08
+        && !is_electrocuted
+        && !matches!(
+            next_state,
+            BehaviorState::Falling
+                | BehaviorState::Downed
+                | BehaviorState::Recovering
+                | BehaviorState::Passive
+                | BehaviorState::Unconscious
+        );
+    if !locomotion_active && raw_desired.length() <= 0.08 {
+        ragdoll.balance.gait_phase = 0.0;
+    }
+
     // 7. Behavioral control per state
     match next_state {
         BehaviorState::Balanced | BehaviorState::Stumbling => {
@@ -435,6 +472,57 @@ pub fn update_ragdoll_balance(
             let counter_pitch = (-local_vel.z * 0.10).clamp(-0.22, 0.22);
             let counter_roll = (local_vel.x * 0.10).clamp(-0.20, 0.20);
 
+            // Locomotion state (injury-aware limp, drunk weave, gait phase)
+            let left_leg_dmg = ragdoll.reflex.bone_damage[BoneId::LeftThigh as usize]
+                .max(ragdoll.reflex.bone_damage[BoneId::LeftShin as usize])
+                .max(ragdoll.reflex.bone_damage[BoneId::LeftFoot as usize]);
+            let right_leg_dmg = ragdoll.reflex.bone_damage[BoneId::RightThigh as usize]
+                .max(ragdoll.reflex.bone_damage[BoneId::RightShin as usize])
+                .max(ragdoll.reflex.bone_damage[BoneId::RightFoot as usize]);
+            let max_leg_dmg = left_leg_dmg.max(right_leg_dmg);
+            let limp_active = locomotion_active && max_leg_dmg >= 0.20;
+            let speed_limp_scale = if limp_active {
+                1.0 - 0.45 * max_leg_dmg.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            let left_leg_scale = if left_leg_dmg >= 0.20 {
+                (1.0 - 0.50 * left_leg_dmg.clamp(0.0, 1.0)).max(0.35)
+            } else {
+                1.0
+            };
+            let right_leg_scale = if right_leg_dmg >= 0.20 {
+                (1.0 - 0.50 * right_leg_dmg.clamp(0.0, 1.0)).max(0.35)
+            } else {
+                1.0
+            };
+
+            let mut eff_desired = if locomotion_active {
+                raw_desired * speed_limp_scale
+            } else {
+                Vec3::ZERO
+            };
+            if locomotion_active && drunk > 0.05 {
+                let weave = (ragdoll.balance.idle_time * 1.4).sin() * 0.45 * drunk;
+                eff_desired = Quat::from_rotation_y(weave) * eff_desired;
+            }
+            let eff_speed = eff_desired.length();
+            if locomotion_active {
+                if ragdoll.balance.gait_phase == 0.0 {
+                    ragdoll.balance.gait_phase = std::f32::consts::FRAC_PI_2;
+                }
+                ragdoll.balance.gait_phase = (ragdoll.balance.gait_phase
+                    + dt * (2.6 + 1.5 * eff_speed))
+                    % std::f32::consts::TAU;
+            }
+            let gait_phase = ragdoll.balance.gait_phase;
+            let stride_amp = (eff_speed / 1.8).clamp(0.25, 1.15);
+            let limp_roll = if limp_active {
+                (right_leg_dmg - left_leg_dmg).clamp(-1.0, 1.0) * 0.12
+            } else {
+                0.0
+            };
+
             // Spine, chest, neck, head (forward bracing crouch lean during earthquakes, lean-back when teetering)
             let quake_lean = 0.08 * quake_crouch;
             set_target(
@@ -449,7 +537,7 @@ pub fn update_ragdoll_balance(
                         + teeter_pitch * 0.5
                         + drunk_pitch * 0.6,
                     0.0,
-                    counter_roll * 0.5 + teeter_roll * 0.5 + drunk_roll * 0.6,
+                    counter_roll * 0.5 + teeter_roll * 0.5 + drunk_roll * 0.6 + limp_roll * 0.6,
                 ),
             );
             set_target(
@@ -464,7 +552,7 @@ pub fn update_ragdoll_balance(
                         + teeter_pitch * 0.5
                         + drunk_pitch * 0.6,
                     0.0,
-                    counter_roll * 0.6 + teeter_roll * 0.5 + drunk_roll * 0.6,
+                    counter_roll * 0.6 + teeter_roll * 0.5 + drunk_roll * 0.6 + limp_roll * 0.6,
                 ),
             );
             set_target(
@@ -484,7 +572,7 @@ pub fn update_ragdoll_balance(
                 ),
             );
 
-            // Arms: relaxed standing bend, flaring outward/opposite velocity when stumbling, bracing in quake, or windmilling on edge
+            // Arms: counter-swing during active walking (unless holding/wounded/OnFire), otherwise standing/stumbling flare
             let is_stumbling = next_state == BehaviorState::Stumbling;
             let mut flare = if is_stumbling { 0.48 } else { 0.10 };
             flare += 0.55 * quake_crouch;
@@ -502,49 +590,181 @@ pub fn update_ragdoll_balance(
             } else {
                 -0.25
             };
+            let on_fire = ragdoll.reflex.status_effect == StatusEffect::OnFire
+                && ragdoll.reflex.status_intensity > 0.05;
+            let left_arm_wounded = ragdoll.reflex.bone_damage[BoneId::LeftUpperArm as usize]
+                >= 0.20
+                || ragdoll.reflex.bone_damage[BoneId::LeftForearm as usize] >= 0.20
+                || ragdoll.reflex.bone_damage[BoneId::LeftHand as usize] >= 0.20
+                || ragdoll
+                    .reflex
+                    .active_wound
+                    .is_some_and(|w| w.region == WoundRegion::LeftArm);
+            let right_arm_wounded = ragdoll.reflex.bone_damage[BoneId::RightUpperArm as usize]
+                >= 0.20
+                || ragdoll.reflex.bone_damage[BoneId::RightForearm as usize] >= 0.20
+                || ragdoll.reflex.bone_damage[BoneId::RightHand as usize] >= 0.20
+                || ragdoll
+                    .reflex
+                    .active_wound
+                    .is_some_and(|w| w.region == WoundRegion::RightArm);
 
             // Left arm (+X): +Z rotation flares outward
-            set_target(
-                ragdoll,
-                joints,
-                JointId::LeftShoulder,
-                Quat::from_euler(
-                    glam::EulerRot::XYZ,
-                    arm_pitch_swing + windmill,
-                    0.0,
-                    flare + (-local_vel.x * 0.18).clamp(-0.35, 0.35),
-                ),
-            );
-            set_target(
-                ragdoll,
-                joints,
-                JointId::LeftElbow,
-                Quat::from_rotation_x(elbow_bend),
-            );
+            if locomotion_active
+                && ragdoll.reflex.left_held.is_none()
+                && !left_arm_wounded
+                && !on_fire
+            {
+                let left_shoulder_pitch = 0.40 * stride_amp * gait_phase.sin();
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::LeftShoulder,
+                    Quat::from_euler(glam::EulerRot::XYZ, left_shoulder_pitch, 0.0, 0.10),
+                );
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::LeftElbow,
+                    Quat::from_rotation_x(-0.35),
+                );
+            } else {
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::LeftShoulder,
+                    Quat::from_euler(
+                        glam::EulerRot::XYZ,
+                        arm_pitch_swing + windmill,
+                        0.0,
+                        flare + (-local_vel.x * 0.18).clamp(-0.35, 0.35),
+                    ),
+                );
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::LeftElbow,
+                    Quat::from_rotation_x(elbow_bend),
+                );
+            }
             set_target(ragdoll, joints, JointId::LeftWrist, Quat::IDENTITY);
 
             // Right arm (-X): -Z rotation flares outward
-            set_target(
-                ragdoll,
-                joints,
-                JointId::RightShoulder,
-                Quat::from_euler(
-                    glam::EulerRot::XYZ,
-                    arm_pitch_swing - windmill,
-                    0.0,
-                    -flare + (-local_vel.x * 0.18).clamp(-0.35, 0.35),
-                ),
-            );
-            set_target(
-                ragdoll,
-                joints,
-                JointId::RightElbow,
-                Quat::from_rotation_x(elbow_bend),
-            );
+            if locomotion_active
+                && ragdoll.reflex.right_held.is_none()
+                && !right_arm_wounded
+                && !on_fire
+            {
+                let right_shoulder_pitch = -0.40 * stride_amp * gait_phase.sin();
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::RightShoulder,
+                    Quat::from_euler(glam::EulerRot::XYZ, right_shoulder_pitch, 0.0, -0.10),
+                );
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::RightElbow,
+                    Quat::from_rotation_x(-0.35),
+                );
+            } else {
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::RightShoulder,
+                    Quat::from_euler(
+                        glam::EulerRot::XYZ,
+                        arm_pitch_swing - windmill,
+                        0.0,
+                        -flare + (-local_vel.x * 0.18).clamp(-0.35, 0.35),
+                    ),
+                );
+                set_target(
+                    ragdoll,
+                    joints,
+                    JointId::RightElbow,
+                    Quat::from_rotation_x(elbow_bend),
+                );
+            }
             set_target(ragdoll, joints, JointId::RightWrist, Quat::IDENTITY);
 
-            // Legs: capture-point stepping vs stance
-            if is_stumbling && grounded_count > 0 && !taser_lock {
+            // Legs: procedural anti-phase bipedal walking vs capture-point stepping vs stance
+            if locomotion_active {
+                ragdoll.balance.step_active = false;
+                ragdoll.balance.step_phase = 0.0;
+                let limp_hip_dip = if limp_active {
+                    (right_leg_dmg - left_leg_dmg).clamp(-1.0, 1.0) * 0.08
+                } else {
+                    0.0
+                };
+                for (is_left, phase, leg_scale, hip_jid, knee_jid, ankle_jid) in [
+                    (
+                        true,
+                        gait_phase,
+                        left_leg_scale,
+                        JointId::LeftHip,
+                        JointId::LeftKnee,
+                        JointId::LeftAnkle,
+                    ),
+                    (
+                        false,
+                        gait_phase + std::f32::consts::PI,
+                        right_leg_scale,
+                        JointId::RightHip,
+                        JointId::RightKnee,
+                        JointId::RightAnkle,
+                    ),
+                ] {
+                    let s = phase.sin();
+                    let p_wrap = phase % std::f32::consts::TAU;
+                    let (hip_x, knee_x, ankle_x) = if s > 0.0 {
+                        // Swing phase (0..PI): lift knee to clear floor, swing hip forward, extend knee for heel-strike
+                        let u = (p_wrap / std::f32::consts::PI).clamp(0.0, 1.0);
+                        let swing_t =
+                            0.5 - 0.5 * ((u / 0.80).clamp(0.0, 1.0) * std::f32::consts::PI).cos();
+                        let hip_angle = (0.26 - 0.84 * swing_t) * stride_amp * leg_scale;
+                        let lift_wave = (u.powf(0.70) * std::f32::consts::PI).sin().max(0.0);
+                        let knee_angle = 0.12 + 0.85 * stride_amp * lift_wave;
+                        let ankle_angle = (-0.52 * lift_wave).clamp(-0.55, 0.0);
+                        (hip_angle, knee_angle, ankle_angle)
+                    } else {
+                        // Stance phase (PI..2*PI): sweep hip from -0.58 forward to +0.26 back, firm knee, push-off ankle
+                        let u = ((p_wrap - std::f32::consts::PI) / std::f32::consts::PI)
+                            .clamp(0.0, 1.0);
+                        let stance_t = 0.5 - 0.5 * (u * std::f32::consts::PI).cos();
+                        let hip_angle = (-0.58 + 0.84 * stance_t) * stride_amp * leg_scale;
+                        (hip_angle, 0.12, 0.20 * (-s))
+                    };
+                    let hip_z = if is_left {
+                        0.06 + limp_hip_dip
+                    } else {
+                        -0.06 + limp_hip_dip
+                    };
+                    set_target(
+                        ragdoll,
+                        joints,
+                        hip_jid,
+                        Quat::from_euler(glam::EulerRot::XYZ, hip_x, 0.0, hip_z),
+                    );
+                    set_target(ragdoll, joints, knee_jid, Quat::from_rotation_x(knee_x));
+                    set_target(ragdoll, joints, ankle_jid, Quat::from_rotation_x(ankle_x));
+
+                    let gain_boost = if s > 0.0 { 2.25 } else { 1.65 };
+                    let damp_scale_leg = if s > 0.0 { 0.45 } else { 1.0 };
+                    for jid in [hip_jid, knee_jid] {
+                        let j = &mut joints[ragdoll.joint_indices[jid as usize]];
+                        j.motor_stiffness *= gain_boost;
+                        j.motor_damping *= damp_scale_leg;
+                        j.max_torque *= gain_boost;
+                    }
+                    if s > 0.0 {
+                        let j = &mut joints[ragdoll.joint_indices[ankle_jid as usize]];
+                        j.motor_stiffness *= 1.8;
+                        j.max_torque *= 1.8;
+                    }
+                }
+            } else if is_stumbling && grounded_count > 0 && !taser_lock {
                 if !ragdoll.balance.step_active {
                     let swing_left = match foot_contacts {
                         (false, true) => true,
@@ -686,7 +906,13 @@ pub fn update_ragdoll_balance(
 
             // Virtual upright & CoM support ONLY when grounded
             if grounded_count > 0 {
-                let foot_scale = if grounded_count >= 2 { 1.0 } else { 0.55 };
+                let foot_scale = if grounded_count >= 2 {
+                    1.0
+                } else if locomotion_active {
+                    0.85
+                } else {
+                    0.55
+                };
                 let taser_scale = if taser_lock {
                     (1.0 - 0.88 * ragdoll.reflex.status_intensity).clamp(0.05, 1.0)
                 } else {
@@ -720,20 +946,21 @@ pub fn update_ragdoll_balance(
                 } else {
                     (Vec3::Y, Vec3::Y)
                 };
+                let upright_walk_boost = if locomotion_active { 2.4 } else { 1.0 };
                 apply_pitched_upright_pd(
                     &mut bodies[pelvis_idx],
                     pelvis_target_up,
-                    320.0 * m_ratio * h_ratio * strength_scale,
+                    320.0 * m_ratio * h_ratio * strength_scale * upright_walk_boost,
                     22.0 * damp_scale * foot_scale,
-                    165.0 * m_ratio * h_ratio * strength_scale,
+                    165.0 * m_ratio * h_ratio * strength_scale * upright_walk_boost,
                     dt,
                 );
                 apply_pitched_upright_pd(
                     &mut bodies[chest_idx],
                     chest_target_up,
-                    260.0 * m_ratio * h_ratio * strength_scale,
+                    260.0 * m_ratio * h_ratio * strength_scale * upright_walk_boost,
                     18.0 * damp_scale * foot_scale,
-                    135.0 * m_ratio * h_ratio * strength_scale,
+                    135.0 * m_ratio * h_ratio * strength_scale * upright_walk_boost,
                     dt,
                 );
 
@@ -741,11 +968,13 @@ pub fn update_ragdoll_balance(
                 let rel_frac = pelvis_rel_y / ragdoll.standing_pelvis_y.max(0.2);
                 if (0.72..=1.08).contains(&rel_frac) && bodies[pelvis_idx].linear_velocity.y < 0.8 {
                     let height_fade = ((rel_frac - 0.72) / 0.12).clamp(0.0, 1.0);
-                    let target_y =
-                        foot_ground_y + (0.96 - 0.10 * quake_crouch) * ragdoll.standing_pelvis_y;
+                    let target_y = foot_ground_y
+                        + (if locomotion_active { 0.98 } else { 0.96 } - 0.10 * quake_crouch)
+                            * ragdoll.standing_pelvis_y;
                     let height_err = target_y - pelvis_pos.y;
                     let pelvis = &mut bodies[pelvis_idx];
-                    let fy_raw = (total_mass * gravity_mag * 0.36
+                    let grav_ff = if locomotion_active { 0.72 } else { 0.36 };
+                    let fy_raw = (total_mass * gravity_mag * grav_ff
                         + height_err * (total_mass * 28.0)
                         - pelvis.linear_velocity.y * (total_mass * 4.5))
                         * strength_scale
@@ -806,17 +1035,88 @@ pub fn update_ragdoll_balance(
                 } else {
                     1.0
                 };
+                let ankle_walk_blend = if locomotion_active { 0.12 } else { 1.0 };
                 let mut f_horiz = (horiz_err * (total_mass * 10.0)
                     - com_vel_xz * (total_mass * 8.0))
                     * strength_scale
-                    * stumble_scale;
-                let max_f_horiz = total_mass * 2.2 * strength_scale * stumble_scale;
+                    * stumble_scale
+                    * ankle_walk_blend;
+                let max_f_horiz =
+                    total_mass * 2.2 * strength_scale * stumble_scale * ankle_walk_blend;
                 let f_len = f_horiz.length();
                 if f_len > max_f_horiz && f_len > 1e-6 {
                     f_horiz *= max_f_horiz / f_len;
                 }
+                if locomotion_active {
+                    let walk_dir = eff_desired.normalize_or_zero();
+                    let lead_foot_ahead = match foot_contacts {
+                        (true, true) => (lf_pos - pelvis_pos)
+                            .dot(walk_dir)
+                            .max((rf_pos - pelvis_pos).dot(walk_dir)),
+                        (true, false) => (lf_pos - pelvis_pos).dot(walk_dir),
+                        (false, true) => (rf_pos - pelvis_pos).dot(walk_dir),
+                        (false, false) => 0.0,
+                    };
+                    // Throttle forward push if pelvis has already outrun all grounded feet
+                    let overshot = (-lead_foot_ahead - 0.16 * s_h).max(0.0);
+                    let propulsion_guard = (1.0 - overshot / (0.22 * s_h)).clamp(0.15, 1.0);
+                    let mut f_walk = (eff_desired - com_vel_xz)
+                        * (total_mass * 6.5)
+                        * strength_scale
+                        * propulsion_guard;
+                    let max_f_walk = total_mass * 6.0 * strength_scale * propulsion_guard;
+                    let fw_len = f_walk.length();
+                    if fw_len > max_f_walk && fw_len > 1e-6 {
+                        f_walk *= max_f_walk / fw_len;
+                    }
+                    f_horiz += f_walk;
+                }
                 let pelvis = &mut bodies[pelvis_idx];
                 pelvis.linear_velocity += f_horiz * (dt * pelvis.inv_mass);
+
+                // Smooth yaw steering toward eff_desired during active locomotion
+                if locomotion_active {
+                    if let Some(target_fwd) = eff_desired.try_normalize() {
+                        let apply_yaw_pd = |body: &mut RigidBody, cur_fwd_xz: Vec3| {
+                            if body.inv_mass == 0.0 || cur_fwd_xz.length_squared() < 1e-6 {
+                                return;
+                            }
+                            let yaw_err = cur_fwd_xz
+                                .cross(target_fwd)
+                                .y
+                                .atan2(cur_fwd_xz.dot(target_fwd));
+                            let kp_yaw = 45.0 * m_ratio * h_ratio * strength_scale;
+                            let kd_yaw = 10.0 * damp_scale;
+                            let raw_tau_y = yaw_err * kp_yaw - body.angular_velocity.y * kd_yaw;
+                            let w_ang = body.generalized_angular_inv_mass(Vec3::Y);
+                            if w_ang < 1e-12 {
+                                return;
+                            }
+                            let denom = 1.0 + w_ang * dt * (kd_yaw + dt * kp_yaw);
+                            let max_tau = 45.0 * m_ratio * h_ratio * strength_scale;
+                            let mut tau_y = (raw_tau_y / denom).clamp(-max_tau, max_tau);
+                            let max_dw = 0.25;
+                            if (tau_y * dt * w_ang).abs() > max_dw {
+                                tau_y = tau_y.signum() * (max_dw / (dt * w_ang));
+                            }
+                            let dw = body.inv_inertia_world_mul(Vec3::Y * (tau_y * dt));
+                            body.angular_velocity += dw;
+                        };
+
+                        apply_yaw_pd(&mut bodies[pelvis_idx], fwd_xz);
+                        let chest_fwd = bodies[chest_idx].orientation * Vec3::Z;
+                        let chest_fwd_xz =
+                            Vec3::new(chest_fwd.x, 0.0, chest_fwd.z).normalize_or_zero();
+                        apply_yaw_pd(
+                            &mut bodies[chest_idx],
+                            if chest_fwd_xz.length_squared() > 1e-6 {
+                                chest_fwd_xz
+                            } else {
+                                fwd_xz
+                            },
+                        );
+                    }
+                }
 
                 if taser_lock {
                     let phase = ragdoll.reflex.status_phase;
@@ -828,11 +1128,12 @@ pub fn update_ragdoll_balance(
                     chest.linear_velocity += spasm_dir * (spasm_force * dt * chest.inv_mass);
                 }
 
-                // Damp idle yaw spin & plant feet firmly on the floor when Balanced (disabled during earthquakes >= 3.0 or stagger/drunk or taser lock or 1-foot cliff teeter)
+                // Damp idle yaw spin & plant feet firmly on the floor when Balanced (disabled during earthquakes >= 3.0 or stagger/drunk or taser lock or active walking or 1-foot cliff teeter)
                 if !is_stumbling
                     && !taser_lock
                     && quake_mag < 3.0
                     && drunk < 0.05
+                    && raw_desired.length() <= 0.08
                     && (!teeter_active || grounded_count >= 2)
                 {
                     let foot_grip = (-45.0 * dt).exp();

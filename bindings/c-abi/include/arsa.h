@@ -546,6 +546,25 @@ uint32_t arsa_world_get_ragdoll_status(
     const ArsaWorldHandle *handle,
     size_t ragdoll_id);
 
+/**
+ * Sets the horizontal desired locomotion velocity (vx, vz in m/s, clamped <= 3.5 m/s)
+ * for ragdoll_id. Returns false if handle is NULL or ragdoll_id is invalid.
+ */
+bool arsa_world_set_ragdoll_desired_velocity(
+    ArsaWorldHandle *handle,
+    size_t ragdoll_id,
+    float vx,
+    float vz);
+
+/**
+ * Sets the horizontal desired locomotion velocity (vx, vz in m/s, clamped <= 3.5 m/s)
+ * for all ragdolls in the world.
+ */
+void arsa_world_set_all_desired_velocity(
+    ArsaWorldHandle *handle,
+    float vx,
+    float vz);
+
 #ifdef __cplusplus
 }
 #endif
