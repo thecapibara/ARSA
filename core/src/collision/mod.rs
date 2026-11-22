@@ -474,8 +474,9 @@ pub fn solve_contacts_velocity_ordered(
                         (bodies[a].collider, c.body_b.map(|b| bodies[b].collider)),
                         (ColliderShape::Box { .. }, Some(ColliderShape::Box { .. }))
                     );
-                    let stiction = (c.body_b.is_none() && c.normal.y > 0.5 && v_t_len < 0.08)
-                        || (is_box_pair && c.normal.y.abs() > 0.7 && v_t_len < 0.06);
+                    let stiction = c.friction > 0.25
+                        && ((c.body_b.is_none() && c.normal.y > 0.5 && v_t_len < 0.08)
+                            || (is_box_pair && c.normal.y.abs() > 0.7 && v_t_len < 0.06));
                     let j_f_mag = if stiction {
                         // Static friction stiction so resting bodies on ground/stacks stop cleanly
                         v_t_len / w_t

@@ -1823,8 +1823,23 @@ fn test_intoxication_causes_visible_sway_and_stagger() {
     let mut saw_stumble = false;
 
     // Step 2.5 seconds (150 frames at 1/60s)
-    for _ in 0..150 {
+    for frame in 0..150 {
         world.step(1.0 / 60.0);
+        if frame % 15 == 0 {
+            let r = &world.ragdolls[id];
+            let pz = world.bodies[pelvis_idx].position.z;
+            println!(
+                "frame {frame}: state={:?} vz={:.3} pz={:.3} py={:.3} gr={} air={:.3}",
+                r.balance.state,
+                r.balance.com_vel.z,
+                pz,
+                world.bodies[r.body_indices[BoneId::Pelvis as usize]]
+                    .position
+                    .y,
+                r.balance.left_foot_grounded as i32 + r.balance.right_foot_grounded as i32,
+                r.balance.airborne_time
+            );
+        }
         for (i, b) in world.bodies.iter().enumerate() {
             assert!(
                 b.position.is_finite()
@@ -2838,8 +2853,23 @@ fn test_procedural_locomotion_walks_forward_upright() {
 
     assert!(world.set_ragdoll_desired_velocity(id, 0.0, 1.4));
 
-    for _ in 0..150 {
+    for frame in 0..150 {
         world.step(1.0 / 60.0);
+        if frame % 15 == 0 {
+            let r = &world.ragdolls[id];
+            let pz = world.bodies[pelvis_idx].position.z;
+            println!(
+                "frame {frame}: state={:?} vz={:.3} pz={:.3} py={:.3} gr={} air={:.3}",
+                r.balance.state,
+                r.balance.com_vel.z,
+                pz,
+                world.bodies[r.body_indices[BoneId::Pelvis as usize]]
+                    .position
+                    .y,
+                r.balance.left_foot_grounded as i32 + r.balance.right_foot_grounded as i32,
+                r.balance.airborne_time
+            );
+        }
         for (i, b) in world.bodies.iter().enumerate() {
             assert!(
                 b.position.is_finite()
@@ -3103,5 +3133,83 @@ fn test_low_friction_ice_allows_sliding() {
     assert!(
         ice_ragdoll_x > 0.2,
         "expected shoved ragdoll on ice to slide in +X, got ice_ragdoll_x={ice_ragdoll_x:.3}"
+    );
+}
+
+#[test]
+fn test_two_walking_npcs_shoulder_bump_stay_upright() {
+    let mut world = ArsaWorld::new();
+    let r0 = world.spawn_ragdoll(Vec3::new(0.0, 0.02, -1.5));
+    let r1 = world.spawn_ragdoll(Vec3::new(0.40, 0.02, 1.5));
+
+    assert!(world.set_ragdoll_desired_velocity(r0, 0.0, 1.3));
+    assert!(world.set_ragdoll_desired_velocity(r1, 0.0, -1.3));
+
+    for _ in 0..150 {
+        world.step(1.0 / 60.0);
+        for (i, b) in world.bodies.iter().enumerate() {
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "body {i} produced NaN/Inf during shoulder bump test"
+            );
+        }
+    }
+
+    let state0 = world.ragdolls[r0].balance.state;
+    let state1 = world.ragdolls[r1].balance.state;
+
+    assert!(
+        matches!(state0, BehaviorState::Balanced | BehaviorState::Stumbling),
+        "expected ragdoll 0 to stay upright (Balanced or Stumbling), got {state0:?}"
+    );
+    assert!(
+        matches!(state1, BehaviorState::Balanced | BehaviorState::Stumbling),
+        "expected ragdoll 1 to stay upright (Balanced or Stumbling), got {state1:?}"
+    );
+}
+
+#[test]
+fn test_1500kg_car_hit_no_bounce_and_registers_trauma() {
+    let mut world = ArsaWorld::new();
+    let r = world.spawn_ragdoll(Vec3::new(0.0, 0.02, 0.0));
+
+    for _ in 0..10 {
+        world.step(1.0 / 60.0);
+    }
+
+    let _car = world.spawn_box(
+        Vec3::new(0.0, 0.6, -2.5),
+        Vec3::new(1.0, 0.6, 2.0),
+        1500.0,
+        Vec3::new(0.0, 0.0, 12.0),
+    );
+
+    let mut max_y = 0.0_f32;
+    for _ in 0..60 {
+        world.step(1.0 / 60.0);
+        for &b_idx in &world.ragdolls[r].body_indices {
+            let b = &world.bodies[b_idx];
+            assert!(
+                b.position.is_finite()
+                    && b.orientation.is_finite()
+                    && b.linear_velocity.is_finite()
+                    && b.angular_velocity.is_finite(),
+                "ragdoll body {b_idx} produced NaN/Inf during car hit test"
+            );
+            max_y = max_y.max(b.position.y);
+        }
+    }
+
+    let health = world.ragdolls[r].reflex.health;
+    assert!(
+        health < 95.0,
+        "expected car impact trauma to reduce health (< 95.0), got {health:.2}"
+    );
+    assert!(
+        max_y < 2.5,
+        "expected ragdoll not to launch > 2.5m vertically, got max_y={max_y:.3}m"
     );
 }

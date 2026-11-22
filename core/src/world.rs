@@ -152,6 +152,7 @@ pub struct ArsaWorld {
     pre_solve_vels_buf: Vec<Vec3>,
     pre_solve_ang_vels_buf: Vec<Vec3>,
     body_aabbs_buf: Vec<(Vec3, Vec3)>,
+    frame_depen_dv_buf: Vec<f32>,
 }
 
 impl Default for ArsaWorld {
@@ -192,6 +193,7 @@ impl ArsaWorld {
             pre_solve_vels_buf: Vec::new(),
             pre_solve_ang_vels_buf: Vec::new(),
             body_aabbs_buf: Vec::new(),
+            frame_depen_dv_buf: Vec::new(),
         }
     }
 
@@ -984,6 +986,10 @@ impl ArsaWorld {
                 .map(|r| (r.balance.left_foot_grounded, r.balance.right_foot_grounded)),
         );
 
+        let mut heavy_impact_ragdolls: Vec<usize> = Vec::new();
+        self.frame_depen_dv_buf.resize(self.bodies.len(), 0.0);
+        self.frame_depen_dv_buf.fill(0.0);
+
         for substep in 0..substeps {
             // 1. Save previous state & integrate external forces
             let gravity = self.gravity;
@@ -1061,14 +1067,8 @@ impl ArsaWorld {
             if let Some(wl) = self.water_level {
                 for b in &mut self.bodies {
                     if b.inv_mass > 0.0 && !b.is_sleeping {
-                        let hy = match b.collider {
-                            ColliderShape::Sphere { radius } => radius,
-                            ColliderShape::Capsule {
-                                radius,
-                                half_length,
-                            } => radius + half_length,
-                            ColliderShape::Box { half_extents } => half_extents.y,
-                        };
+                        let aabb = crate::collision::body_world_aabb(b);
+                        let hy = (aabb.1.y - aabb.0.y) * 0.5;
                         let sub =
                             ((wl - (b.position.y - hy)) / (2.0 * hy).max(0.05)).clamp(0.0, 1.0);
                         if sub > 0.0 {
@@ -1224,6 +1224,109 @@ impl ArsaWorld {
                 self.wake_ragdoll(r_id, 2.5);
             }
 
+            // Handle heavy dynamic body impact into ragdoll bones
+            struct HeavyImpactHit {
+                heavy_idx: usize,
+                bone_idx: usize,
+                r_id: usize,
+                contact_pt: Vec3,
+                normal_to_bone: Vec3,
+            }
+
+            let mut hits: Vec<HeavyImpactHit> = Vec::new();
+            for c in &self.contacts_buf {
+                let Some(b_idx) = c.body_b else { continue };
+                let (heavy_idx, bone_idx) = if self.bodies[c.body_a].ragdoll_id.is_none()
+                    && self.bodies[b_idx].ragdoll_id.is_some()
+                {
+                    (c.body_a, b_idx)
+                } else if self.bodies[b_idx].ragdoll_id.is_none()
+                    && self.bodies[c.body_a].ragdoll_id.is_some()
+                {
+                    (b_idx, c.body_a)
+                } else {
+                    continue;
+                };
+
+                let heavy_inv_m = self.bodies[heavy_idx].inv_mass;
+                if heavy_inv_m <= 0.0 || heavy_inv_m > (1.0 / 24.99) {
+                    continue;
+                }
+                if self.bodies[heavy_idx].linear_velocity.length() <= 2.5 {
+                    continue;
+                }
+
+                if let Some(r_id) = self.bodies[bone_idx].ragdoll_id {
+                    let contact_pt = if bone_idx == c.body_a {
+                        c.point_a
+                    } else {
+                        c.point_b
+                    };
+                    let normal_to_bone = if bone_idx == c.body_a {
+                        c.normal
+                    } else {
+                        -c.normal
+                    };
+                    hits.push(HeavyImpactHit {
+                        heavy_idx,
+                        bone_idx,
+                        r_id,
+                        contact_pt,
+                        normal_to_bone,
+                    });
+                }
+            }
+
+            for hit in hits {
+                let heavy_mass = 1.0 / self.bodies[hit.heavy_idx].inv_mass;
+                let heavy_vel = self.bodies[hit.heavy_idx].linear_velocity;
+                let heavy_speed = heavy_vel.length();
+                let bone_id = self.bodies[hit.bone_idx]
+                    .bone_id
+                    .and_then(BoneId::from_u8)
+                    .unwrap_or(BoneId::Pelvis);
+
+                let pelvis_idx = self.ragdolls[hit.r_id].body_indices[BoneId::Pelvis as usize];
+                let chest_idx = self.ragdolls[hit.r_id].body_indices[BoneId::Chest as usize];
+                let hit_dir = heavy_vel / heavy_speed;
+                let transfer_vel = Vec3::new(heavy_vel.x, 0.0, heavy_vel.z) * 0.55;
+
+                let v_rel = heavy_vel - self.bodies[hit.bone_idx].linear_velocity;
+                let v_closing = v_rel.dot(hit.normal_to_bone);
+                if v_closing <= 1.0 {
+                    continue;
+                }
+                let impact_energy = 0.5 * heavy_mass * v_rel.length_squared();
+                if impact_energy > 150.0 && !heavy_impact_ragdolls.contains(&hit.r_id) {
+                    self.bodies[pelvis_idx].linear_velocity += transfer_vel;
+                    self.bodies[chest_idx].linear_velocity += transfer_vel;
+                    self.bodies[pelvis_idx].linear_velocity.y =
+                        self.bodies[pelvis_idx].linear_velocity.y.min(2.0);
+                    self.bodies[chest_idx].linear_velocity.y =
+                        self.bodies[chest_idx].linear_velocity.y.min(2.0);
+                    self.bodies[hit.bone_idx].linear_velocity.y =
+                        self.bodies[hit.bone_idx].linear_velocity.y.min(2.0);
+                    heavy_impact_ragdolls.push(hit.r_id);
+                    let damage = (impact_energy / 2000.0 + 10.0).clamp(10.0, 65.0);
+                    let severity = (damage / 75.0).clamp(0.2, 1.0);
+                    let chest_fwd = self.bodies[chest_idx].orientation * Vec3::Z;
+                    let hit_from_back = hit_dir.dot(chest_fwd) > 0.25;
+                    let local_pt = self.bodies[hit.bone_idx].orientation.conjugate()
+                        * (hit.contact_pt - self.bodies[hit.bone_idx].position);
+                    self.ragdolls[hit.r_id].register_hit_with_dir(
+                        bone_id,
+                        local_pt,
+                        severity,
+                        damage,
+                        hit_from_back,
+                    );
+                    self.ragdolls[hit.r_id].balance.concussion_timer =
+                        (self.ragdolls[hit.r_id].balance.concussion_timer + 3.0 * severity)
+                            .min(5.0);
+                    self.wake_ragdoll(hit.r_id, 2.5);
+                }
+            }
+
             // Track per-ragdoll foot grounding from detected contacts & near-support fallback
             for (r_idx, ragdoll) in self.ragdolls.iter_mut().enumerate() {
                 if ragdoll.lod == RagdollLod::Sleep {
@@ -1305,12 +1408,14 @@ impl ArsaWorld {
                 let pre_ang_vels = &self.pre_solve_ang_vels_buf;
                 self.bodies
                     .par_iter_mut()
+                    .zip(self.frame_depen_dv_buf.par_iter_mut())
                     .enumerate()
-                    .for_each(|(b_idx, b)| {
+                    .for_each(|(b_idx, (b, depen_dv))| {
                         derive_body_velocity_step(
                             b,
                             pre_vels[b_idx],
                             pre_ang_vels[b_idx],
+                            depen_dv,
                             inv_dt,
                             sub_dt,
                         );
@@ -1321,6 +1426,7 @@ impl ArsaWorld {
                         b,
                         self.pre_solve_vels_buf[b_idx],
                         self.pre_solve_ang_vels_buf[b_idx],
+                        &mut self.frame_depen_dv_buf[b_idx],
                         inv_dt,
                         sub_dt,
                     );
@@ -1328,7 +1434,6 @@ impl ArsaWorld {
             }
             #[cfg(not(feature = "parallel"))]
             {
-                const MAX_DEPENETRATION_DV: f32 = 6.0;
                 const MAX_DEPENETRATION_DW: f32 = 25.0;
                 for (b_idx, b) in self.bodies.iter_mut().enumerate() {
                     if b.inv_mass == 0.0 || b.is_sleeping {
@@ -1338,11 +1443,24 @@ impl ArsaWorld {
                     let derived_vel = (b.position - b.prev_position) * inv_dt;
                     let dv = derived_vel - pre_solve_vel;
                     let dv_len = dv.length();
-                    b.linear_velocity = if dv_len > MAX_DEPENETRATION_DV {
-                        pre_solve_vel + dv * (MAX_DEPENETRATION_DV / dv_len)
+                    let max_dv = if b.ragdoll_id.is_some() { 3.0 } else { 6.0 };
+                    let mut clamped_vel = if dv_len > max_dv {
+                        pre_solve_vel + dv * (max_dv / dv_len)
                     } else {
                         derived_vel
                     };
+                    if b.ragdoll_id.is_some() && clamped_vel.y > pre_solve_vel.y {
+                        let upward_dv = clamped_vel.y - pre_solve_vel.y;
+                        let max_upward_sub: f32 = 1.0;
+                        let max_upward_frame: f32 = 1.5;
+                        let budget_left =
+                            (max_upward_frame - self.frame_depen_dv_buf[b_idx]).max(0.0);
+                        let allowed_upward = max_upward_sub.min(budget_left);
+                        let actual_upward = upward_dv.min(allowed_upward);
+                        self.frame_depen_dv_buf[b_idx] += actual_upward;
+                        clamped_vel.y = pre_solve_vel.y + actual_upward;
+                    }
+                    b.linear_velocity = clamped_vel;
 
                     let pre_solve_ang_vel = self.pre_solve_ang_vels_buf[b_idx];
                     let mut dq = b.orientation * b.prev_orientation.conjugate();
@@ -2380,10 +2498,10 @@ fn derive_body_velocity_step(
     b: &mut RigidBody,
     pre_solve_vel: Vec3,
     pre_solve_ang_vel: Vec3,
+    frame_depen_dv: &mut f32,
     inv_dt: f32,
     sub_dt: f32,
 ) {
-    const MAX_DEPENETRATION_DV: f32 = 6.0;
     const MAX_DEPENETRATION_DW: f32 = 25.0;
     if b.inv_mass == 0.0 || b.is_sleeping {
         return;
@@ -2391,11 +2509,23 @@ fn derive_body_velocity_step(
     let derived_vel = (b.position - b.prev_position) * inv_dt;
     let dv = derived_vel - pre_solve_vel;
     let dv_len = dv.length();
-    b.linear_velocity = if dv_len > MAX_DEPENETRATION_DV {
-        pre_solve_vel + dv * (MAX_DEPENETRATION_DV / dv_len)
+    let max_dv = if b.ragdoll_id.is_some() { 3.0 } else { 6.0 };
+    let mut clamped_vel = if dv_len > max_dv {
+        pre_solve_vel + dv * (max_dv / dv_len)
     } else {
         derived_vel
     };
+    if b.ragdoll_id.is_some() && clamped_vel.y > pre_solve_vel.y {
+        let upward_dv = clamped_vel.y - pre_solve_vel.y;
+        let max_upward_sub: f32 = 1.0;
+        let max_upward_frame: f32 = 1.5;
+        let budget_left = (max_upward_frame - *frame_depen_dv).max(0.0);
+        let allowed_upward = max_upward_sub.min(budget_left);
+        let actual_upward = upward_dv.min(allowed_upward);
+        *frame_depen_dv += actual_upward;
+        clamped_vel.y = pre_solve_vel.y + actual_upward;
+    }
+    b.linear_velocity = clamped_vel;
 
     let mut dq = b.orientation * b.prev_orientation.conjugate();
     if dq.w < 0.0 {

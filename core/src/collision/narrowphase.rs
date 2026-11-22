@@ -8,7 +8,7 @@ use crate::world::WorldQueryHooks;
 use super::{Contact, ContactMaterial, Heightfield, StaticBox};
 
 #[inline]
-fn combine_material(f1: f32, r1: f32, f2: f32, r2: f32) -> ContactMaterial {
+fn combine_material(f1: f32, r1: f32, f2: f32, r2: f32, either_ragdoll: bool) -> ContactMaterial {
     let min_f = f1.min(f2);
     ContactMaterial {
         friction: if min_f < 0.25 {
@@ -16,7 +16,11 @@ fn combine_material(f1: f32, r1: f32, f2: f32, r2: f32) -> ContactMaterial {
         } else {
             (f1 * f2).sqrt()
         },
-        restitution: r1.max(r2),
+        restitution: if either_ragdoll {
+            r1.min(r2)
+        } else {
+            r1.max(r2)
+        },
     }
 }
 
@@ -96,7 +100,7 @@ pub(super) fn detect_ground_contacts(
             let pen = (ground_y - lowest_y) * ground_normal.y.max(0.25);
             let pa = pt - ground_normal * radius;
             let pb = pa + ground_normal * pen;
-            let mat = combine_material(b.friction, b.restitution, gf, gr);
+            let mat = combine_material(b.friction, b.restitution, gf, gr, b.ragdoll_id.is_some());
             out.push(Contact::new(
                 bodies,
                 idx,
@@ -136,7 +140,13 @@ pub(super) fn detect_static_box_contacts(
     out: &mut Vec<Contact>,
 ) {
     let b = &bodies[idx];
-    let mat = combine_material(b.friction, b.restitution, sb.friction, sb.restitution);
+    let mat = combine_material(
+        b.friction,
+        b.restitution,
+        sb.friction,
+        sb.restitution,
+        b.ragdoll_id.is_some(),
+    );
     let is_axis_aligned = sb.orientation.w.abs() > 0.99999;
 
     if is_axis_aligned {
@@ -286,7 +296,17 @@ pub(super) fn detect_dynamic_pair(
 ) {
     let a = &bodies[i];
     let b = &bodies[j];
-    let mat = combine_material(a.friction, a.restitution, b.friction, b.restitution);
+    let either_ragdoll = a.ragdoll_id.is_some() || b.ragdoll_id.is_some();
+    let mut mat = combine_material(
+        a.friction,
+        a.restitution,
+        b.friction,
+        b.restitution,
+        either_ragdoll,
+    );
+    if a.ragdoll_id.is_some() && b.ragdoll_id.is_some() && a.ragdoll_id != b.ragdoll_id {
+        mat.friction = mat.friction.min(0.18);
+    }
 
     match (a.collider, b.collider) {
         (ColliderShape::Sphere { radius: ra }, ColliderShape::Sphere { radius: rb }) => {
@@ -1027,7 +1047,7 @@ fn closest_points_segment_segment(p1: Vec3, q1: Vec3, p2: Vec3, q2: Vec3) -> (Ve
         } else {
             let b = d1.dot(d2);
             let denom = a * e - b * b;
-            let mut s = if denom != 0.0 {
+            let mut s = if denom > 1e-8 {
                 ((b * f - c * e) / denom).clamp(0.0, 1.0)
             } else {
                 0.5

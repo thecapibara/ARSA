@@ -298,7 +298,7 @@ pub fn apply_procedural_reflexes(
         }
     }
     let status_drop = (ragdoll.reflex.status_effect == StatusEffect::Electrocuted
-        && ragdoll.reflex.status_intensity > 0.25)
+        && ragdoll.reflex.status_intensity > 0.20)
         || (ragdoll.reflex.status_effect == StatusEffect::OnFire
             && ragdoll.reflex.status_intensity > 0.7);
     if status_drop {
@@ -856,8 +856,10 @@ pub fn apply_procedural_reflexes(
             el.max_torque = el.max_torque.max(40.0 * grav_scale);
         }
 
-        // Snap legs toward ground in landing brace when airborne above standing height
-        if height_above_ground > 0.85 * ragdoll.standing_pelvis_y {
+        // Snap legs toward ground in landing brace when airborne approaching ground
+        if height_above_ground <= 0.85 * ragdoll.standing_pelvis_y
+            && height_above_ground > 0.15 * s_h
+        {
             set_motor_target(
                 ragdoll,
                 joints,
@@ -957,9 +959,12 @@ pub fn apply_procedural_reflexes(
         _ => {}
     }
 
-    // Do not hijack healthy arms or spine hunch while actively standing up (`Recovering`)
-    // or while executing High Fall / Tumble aerial protection reflexes.
-    if state == BehaviorState::Recovering || ragdoll.reflex.high_falling || ragdoll.reflex.tumbling
+    // Do not hijack healthy arms or spine hunch while actively standing up (`Recovering`),
+    // while executing High Fall / Tumble aerial protection reflexes, or while treading water.
+    if state == BehaviorState::Recovering
+        || ragdoll.reflex.high_falling
+        || ragdoll.reflex.tumbling
+        || treading_water
     {
         return;
     }
@@ -1560,7 +1565,7 @@ fn apply_status_effect_reflex(
     match ragdoll.reflex.status_effect {
         StatusEffect::None => false,
         StatusEffect::Electrocuted => {
-            if intensity <= 0.05 {
+            if intensity <= 0.20 {
                 return false;
             }
             let tremor = (phase * 125.0).sin() * 0.14 * intensity;
@@ -1990,13 +1995,14 @@ pub fn update_held_objects(
             || ragdoll.reflex.unconscious
             || ragdoll.reflex.health <= 18.0
             || (ragdoll.reflex.status_effect == StatusEffect::Electrocuted
-                && ragdoll.reflex.status_intensity > 0.25)
+                && ragdoll.reflex.status_intensity > 0.20)
             || (ragdoll.reflex.status_effect == StatusEffect::OnFire
                 && ragdoll.reflex.status_intensity > 0.7)
             || ragdoll.reflex.bone_damage[hand_bid as usize] >= 0.20
             || ragdoll.reflex.bone_damage[forearm_bid as usize] >= 0.25
             || ragdoll.reflex.bone_damage[upper_arm_bid as usize] >= 0.35
             || state == BehaviorState::Downed
+            || state == BehaviorState::Recovering
             || (state == BehaviorState::Falling && ragdoll.balance.fallen_time > 0.30);
 
         if drop_now {
@@ -2098,12 +2104,19 @@ pub fn update_held_objects(
         el.max_torque = el.max_torque.max(95.0 * grav_scale);
 
         // Gentle supportive carry spring on the held body toward carry_target
+        let both_hold_same = match (ragdoll.reflex.left_held, ragdoll.reflex.right_held) {
+            (Some(l), Some(r)) => l.body_idx == r.body_idx,
+            _ => false,
+        };
         let held_mass = bodies[held.body_idx].mass;
         let carry_err = carry_target - anchor_w;
         let carry_rel_v = bodies[held.body_idx].velocity_at_point(anchor_w) - chest_vel;
         let mut carry_force = carry_err * (held_mass * 75.0) - carry_rel_v * (held_mass * 8.5)
             + Vec3::Y * (0.50 * held_mass * 9.81);
-        let max_carry = 0.65 * held_mass * 9.81;
+        if both_hold_same {
+            carry_force *= 0.5;
+        }
+        let max_carry = 0.65 * held_mass * 9.81 * if both_hold_same { 0.5 } else { 1.0 };
         let cf_len = carry_force.length();
         if cf_len > max_carry && cf_len > 1e-6 {
             carry_force *= max_carry / cf_len;
@@ -2115,6 +2128,7 @@ pub fn update_held_objects(
             let dw = hb.inv_inertia_world_mul(r_held.cross(carry_imp));
             hb.angular_velocity += dw;
         }
+        bodies[chest_idx].linear_velocity -= carry_imp * bodies[chest_idx].inv_mass;
 
         held.hold_time += dt;
         if is_left {

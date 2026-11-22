@@ -92,6 +92,9 @@ impl Joint {
 
     /// Projects the ball-and-socket anchor positions together via XPBD.
     pub fn solve_position(&self, bodies: &mut [RigidBody], dt: f32) {
+        if dt <= 0.0 || !dt.is_finite() {
+            return;
+        }
         if bodies[self.parent].is_sleeping && bodies[self.child].is_sleeping {
             return;
         }
@@ -124,6 +127,9 @@ impl Joint {
 
     /// Enforces hinge axis alignment + angle clamp, or spherical swing-twist limits.
     pub fn solve_limits(&self, bodies: &mut [RigidBody], dt: f32) {
+        if dt <= 0.0 || !dt.is_finite() {
+            return;
+        }
         if bodies[self.parent].is_sleeping && bodies[self.child].is_sleeping {
             return;
         }
@@ -243,12 +249,16 @@ impl Joint {
                 let mid = 0.5 * (twist_min + twist_max);
                 let twist_angle = unwrap_near(raw_twist_angle, mid);
 
-                let twist_violation = if twist_angle < twist_min {
-                    twist_angle - twist_min
-                } else if twist_angle > twist_max {
-                    twist_angle - twist_max
-                } else {
+                let twist_violation = if twist_angle >= twist_min && twist_angle <= twist_max {
                     0.0
+                } else {
+                    let d_min = diff_angle(raw_twist_angle, twist_min);
+                    let d_max = diff_angle(raw_twist_angle, twist_max);
+                    if d_min.abs() < d_max.abs() {
+                        d_min
+                    } else {
+                        d_max
+                    }
                 };
 
                 if twist_violation.abs() > 1e-6 {
@@ -447,6 +457,17 @@ fn hinge_reference_vector(axis_norm: Vec3) -> Vec3 {
 fn any_perpendicular(n: Vec3) -> Vec3 {
     let seed = if n.x.abs() < 0.8 { Vec3::X } else { Vec3::Y };
     n.cross(seed).normalize()
+}
+
+#[inline]
+fn diff_angle(a: f32, b: f32) -> f32 {
+    let mut d = (a - b) % TAU;
+    if d > PI {
+        d -= TAU;
+    } else if d < -PI {
+        d += TAU;
+    }
+    d
 }
 
 #[inline]
