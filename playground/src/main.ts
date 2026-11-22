@@ -8,6 +8,7 @@ import {
   getTelemetryStride,
   LabScene,
   PlacerMode,
+  ThemeMode,
 } from './scene.ts';
 import { BoneId } from './mannequin.ts';
 
@@ -64,6 +65,23 @@ type ArsaSimExt = ArsaSim & {
     vz: number
   ) => boolean;
   set_all_ragdolls_desired_velocity?: (vx: number, vz: number) => void;
+  spawn_box_oriented?: (
+    x: number,
+    y: number,
+    z: number,
+    hx: number,
+    hy: number,
+    hz: number,
+    qx: number,
+    qy: number,
+    qz: number,
+    qw: number,
+    mass: number,
+    vx: number,
+    vy: number,
+    vz: number
+  ) => number;
+  get_water_level?: () => number;
 };
 
 type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
@@ -166,7 +184,7 @@ class PlaygroundApp {
   private activeTool: ToolMode = 'grab';
   private activePlacerMode: PlacerMode = 'curb';
   private activeThrowerMode: ThrowerMode = 'cube';
-  private openPopover: 'placer' | 'thrower' | null = null;
+  private openPopover: 'placer' | 'thrower' | 'scenario' | null = null;
   private activeScenario = 0;
   private timeScale = 1.0;
   private paused = false;
@@ -179,6 +197,12 @@ class PlaygroundApp {
   private statusFxAccum = 0;
   private fireClockSec = 0;
   private readonly fireContactRefreshMap = new Map<number, number>();
+  private theme: ThemeMode = 'dark';
+  private placerYaw = 0;
+  private selectedRagdollId = 0;
+  private rmbDownX = 0;
+  private rmbDownY = 0;
+  private rmbTrackActive = false;
 
   private bodyProfile: BodyProfile = { ...PROFILE_PRESETS.standard };
 
@@ -262,11 +286,22 @@ class PlaygroundApp {
   private readonly throwerLabel = document.getElementById('label-tool-thrower')!;
   private readonly throwerChevron = document.getElementById('chevron-thrower')!;
   private readonly throwerPopover = document.getElementById('popover-thrower')!;
+  private readonly scenarioTriggerBtn = document.getElementById(
+    'btn-scenario-trigger'
+  ) as HTMLButtonElement;
+  private readonly scenarioLabel = document.getElementById('scenario-label')!;
+  private readonly scenarioPopover = document.getElementById('popover-scenario')!;
   private readonly giveBoxBtn = document.getElementById(
     'btn-give-box'
   ) as HTMLButtonElement;
   private readonly walkToggleBtn = document.getElementById(
     'btn-walk-toggle'
+  ) as HTMLButtonElement;
+  private readonly themeToggleBtn = document.getElementById(
+    'btn-theme-toggle'
+  ) as HTMLButtonElement;
+  private readonly selectedMannequinBtn = document.getElementById(
+    'btn-selected-mannequin'
   ) as HTMLButtonElement;
 
   constructor() {
@@ -309,6 +344,7 @@ class PlaygroundApp {
     this.lab.clearEffects();
     this.fireContactRefreshMap.clear();
     this.fireClockSec = 0;
+    this.selectedRagdollId = 0;
     this.setWalkForward(false);
     this.activeScenario = scenario;
 
@@ -345,24 +381,42 @@ class PlaygroundApp {
     } else {
       this.lab.syncHeightfield([], []);
     }
+
+    const waterLevel =
+      typeof this.sim.get_water_level === 'function'
+        ? this.sim.get_water_level()
+        : -1000;
+    this.lab.syncWaterLevel(waterLevel);
+    this.lab.setIceFloorVisual(scenario === 11);
+
     this.syncSimulationView();
 
     if (scenario === 4 || scenario === 5) {
       this.lab.frameCamera([0, 2.1, 5.4], [0, 1.1, 0]);
     } else if (scenario === 6) {
-      this.lab.frameCamera([5.5, 2.8, 3.8], [0, 1.1, 0.0]);
+      this.lab.frameCamera([7.2, 4.0, 3.5], [0, 1.5, -0.5]);
     } else if (scenario === 7) {
       this.lab.frameCamera([5.5, 3.8, 6.0], [0, 0.8, -0.5]);
     } else if (scenario === 8) {
       this.lab.frameCamera([4.2, 5.2, 4.2], [0, 4.2, 0.2]);
     } else if (scenario === 9) {
       this.lab.frameCamera([0.0, 7.0, 10.0], [0, 1.2, -10.0]);
+    } else if (scenario === 10) {
+      this.lab.frameCamera([5.8, 4.4, 5.8], [0, 1.35, -0.8]);
+    } else if (scenario === 11) {
+      this.lab.frameCamera([5.0, 3.2, 5.6], [0, 0.8, 0.2]);
+    } else if (scenario === 12) {
+      this.lab.frameCamera([6.2, 4.2, 4.4], [0, 2.2, 0.4]);
     }
 
     document
       .querySelectorAll<HTMLButtonElement>('[data-scenario]')
       .forEach((btn) => {
-        btn.classList.toggle('active', Number(btn.dataset.scenario) === scenario);
+        const isActive = Number(btn.dataset.scenario) === scenario;
+        btn.classList.toggle('active', isActive);
+        if (isActive && btn.textContent) {
+          this.scenarioLabel.textContent = btn.textContent.trim();
+        }
       });
   }
 
@@ -428,7 +482,7 @@ class PlaygroundApp {
     this.updateToolReadout();
   }
 
-  private setOpenPopover(target: 'placer' | 'thrower' | null): void {
+  private setOpenPopover(target: 'placer' | 'thrower' | 'scenario' | null): void {
     this.openPopover = target;
 
     const showPlacer = target === 'placer';
@@ -440,6 +494,11 @@ class PlaygroundApp {
     this.throwerPopover.hidden = !showThrower;
     this.throwerPopover.classList.toggle('open', showThrower);
     this.throwerBtn.setAttribute('aria-expanded', String(showThrower));
+
+    const showScenario = target === 'scenario';
+    this.scenarioPopover.hidden = !showScenario;
+    this.scenarioPopover.classList.toggle('open', showScenario);
+    this.scenarioTriggerBtn.setAttribute('aria-expanded', String(showScenario));
   }
 
   private setCameraMode(mode: CameraMode): void {
@@ -517,7 +576,7 @@ class PlaygroundApp {
     this.walkToggleBtn.setAttribute('aria-pressed', String(enabled));
   }
 
-  private giveBoxToRagdolls(): void {
+  private giveBoxToRagdolls(all = false): void {
     if (!this.sim || typeof this.sim.give_ragdoll_held_box !== 'function') {
       return;
     }
@@ -530,9 +589,15 @@ class PlaygroundApp {
     }
 
     const sortedIds = Array.from(ragdollIds).sort((a, b) => a - b);
+    const targets = all
+      ? sortedIds
+      : ragdollIds.has(this.selectedRagdollId)
+        ? [this.selectedRagdollId]
+        : sortedIds.slice(0, 1);
+
     let given = 0;
-    for (const id of sortedIds) {
-      if (given >= 4) break;
+    for (const id of targets) {
+      if (given >= (all ? 4 : 1)) break;
       const holdingLeft =
         typeof this.sim.is_hand_holding === 'function' &&
         this.sim.is_hand_holding(id, true);
@@ -672,24 +737,79 @@ class PlaygroundApp {
       : `${this.timeScale.toFixed(2)}×`;
   }
 
+  private findFreeSpawnXZ(): [number, number] {
+    if (!this.sim || typeof this.sim.get_ragdoll_telemetry !== 'function') {
+      return [0, 0];
+    }
+    const telemetry = this.sim.get_ragdoll_telemetry();
+    const stride = getTelemetryStride(telemetry);
+    const count = Math.floor(telemetry.length / stride);
+    const occupied: Array<[number, number]> = [];
+    for (let i = 0; i < count; i++) {
+      const o = i * stride;
+      const px = stride >= 11 ? telemetry[o + 8] : telemetry[o];
+      const pz = stride >= 11 ? telemetry[o + 10] : telemetry[o + 2];
+      occupied.push([px, pz]);
+    }
+
+    const minDistSq = 0.9 * 0.9;
+    const isFree = (x: number, z: number): boolean => {
+      for (let i = 0; i < occupied.length; i++) {
+        const dx = x - occupied[i][0];
+        const dz = z - occupied[i][1];
+        if (dx * dx + dz * dz < minDistSq) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    const rings = [0, 1.0, 1.9, 2.8, 3.7, 4.6, 5.5, 6.4];
+    for (const r of rings) {
+      if (r === 0) {
+        if (isFree(0, 0)) return [0, 0];
+        continue;
+      }
+      const steps = Math.max(8, Math.round(r * 6));
+      for (let s = 0; s < steps; s++) {
+        const angle = (s / steps) * Math.PI * 2;
+        const x = Math.cos(angle) * r;
+        const z = Math.sin(angle) * r;
+        if (isFree(x, z)) return [x, z];
+      }
+    }
+
+    return [0, 7.2];
+  }
+
   private spawnRagdoll(): void {
     if (!this.sim) return;
-    const jitterX = (Math.random() - 0.5) * 0.65;
-    const jitterZ = (Math.random() - 0.5) * 0.65;
-    const spawnY = this.activeScenario === 2 ? 3.2 : 1.35;
+    const [spawnX, spawnZ] = this.findFreeSpawnXZ();
+    let spawnY = 0.02;
+    if (this.activeScenario === 2) {
+      spawnY = Math.abs(spawnX) <= 1.1 && Math.abs(spawnZ) <= 1.1 ? 2.15 : 0.02;
+    } else if (this.activeScenario === 10) {
+      if (Math.abs(spawnX) < 2.8 && Math.abs(spawnZ) < 2.8) {
+        spawnY = 1.25;
+      } else if (Math.abs(spawnX) <= 4.5 && Math.abs(spawnZ) <= 4.5) {
+        spawnY = 1.97;
+      }
+    } else if (this.activeScenario === 7) {
+      spawnY = 0.95;
+    }
     const heightM = this.bodyProfile.heightCm / 100;
 
     if (typeof this.sim.spawn_ragdoll_with_profile === 'function') {
       this.sim.spawn_ragdoll_with_profile(
-        jitterX,
+        spawnX,
         spawnY,
-        jitterZ,
+        spawnZ,
         heightM,
         this.bodyProfile.massKg,
         this.bodyProfile.strength
       );
     } else {
-      this.sim.spawn_ragdoll(jitterX, spawnY, jitterZ);
+      this.sim.spawn_ragdoll(spawnX, spawnY, spawnZ);
     }
 
     this.applyRagdollControlModes();
@@ -735,10 +855,14 @@ class PlaygroundApp {
         center.z += n.z * (hz + eps);
         center.y = Math.max(0.0, surf.point.y);
       } else {
-        // Exact support distance of an axis-aligned box along normal `n`:
-        // |n.x|*hx + |n.y|*hy + |n.z|*hz, then convert center -> bottom-center (y - hy)
+        // Exact support distance of an axis-aligned or yaw-rotated box along normal `n`:
+        // |localN.x|*hx + |n.y|*hy + |localN.z|*hz, then convert center -> bottom-center (y - hy)
+        const c = Math.cos(this.placerYaw);
+        const s = Math.sin(this.placerYaw);
+        const localNx = n.x * c - n.z * s;
+        const localNz = n.x * s + n.z * c;
         const support =
-          Math.abs(n.x) * hx + Math.abs(n.y) * hy + Math.abs(n.z) * hz + eps;
+          Math.abs(localNx) * hx + Math.abs(n.y) * hy + Math.abs(localNz) * hz + eps;
         center.addScaledVector(n, support);
         center.y = Math.max(0.0, center.y - hy);
       }
@@ -762,7 +886,8 @@ class PlaygroundApp {
       true,
       this.activePlacerMode,
       hit,
-      this.bodyProfile.heightCm / 100
+      this.bodyProfile.heightCm / 100,
+      this.placerYaw
     );
     return true;
   }
@@ -820,9 +945,24 @@ class PlaygroundApp {
     }
   }
 
+  private selectRagdollFromBodyIdx(bodyIdx: number): void {
+    if (!this.sim || bodyIdx < 0) return;
+    const descriptors = this.sim.get_body_descriptors();
+    const dOff = bodyIdx * 6;
+    if (dOff + 4 < descriptors.length) {
+      const ragdollId = Math.round(descriptors[dOff + 4]);
+      if (ragdollId >= 0) {
+        this.selectedRagdollId = ragdollId;
+      }
+    }
+  }
+
   private updateBrainTelemetryHud(telemetry: Float32Array): void {
     const stride = getTelemetryStride(telemetry);
-    if (telemetry.length < stride) {
+    const count = Math.floor(telemetry.length / stride);
+    if (count === 0) {
+      this.selectedMannequinBtn.textContent = 'MANNEQUIN #--';
+      this.selectedMannequinBtn.disabled = true;
       this.statRagdollState.textContent = 'NONE';
       this.statRagdollState.className = 'state-badge state-passive';
       this.contactLeft.classList.remove('grounded');
@@ -831,9 +971,17 @@ class PlaygroundApp {
       return;
     }
 
-    const leftGrounded = telemetry[5] > 0.5;
-    const rightGrounded = telemetry[6] > 0.5;
-    const stateCode = Math.round(telemetry[7]);
+    this.selectedRagdollId = Math.max(
+      0,
+      Math.min(count - 1, this.selectedRagdollId)
+    );
+    this.selectedMannequinBtn.textContent = `MANNEQUIN #${this.selectedRagdollId + 1}`;
+    this.selectedMannequinBtn.disabled = count <= 1;
+
+    const base = this.selectedRagdollId * stride;
+    const leftGrounded = telemetry[base + 5] > 0.5;
+    const rightGrounded = telemetry[base + 6] > 0.5;
+    const stateCode = Math.round(telemetry[base + 7]);
     const badge = STATE_BADGES[stateCode] ?? STATE_BADGES[4];
 
     this.statRagdollState.textContent = badge.label;
@@ -842,7 +990,11 @@ class PlaygroundApp {
     this.contactRight.classList.toggle('grounded', rightGrounded);
 
     if (stride >= 16) {
-      this.updateVitalHud(telemetry[11], Math.round(telemetry[12]), false);
+      this.updateVitalHud(
+        telemetry[base + 11],
+        Math.round(telemetry[base + 12]),
+        false
+      );
     } else {
       this.updateVitalHud(100, 0, false);
     }
@@ -924,6 +1076,7 @@ class PlaygroundApp {
             result[base + 2]
           );
           this.lab.spawnTracer(muzzle, hitPt, spec.tracerColor, true);
+          this.selectRagdollFromBodyIdx(Math.round(result[base + 3]));
         }
       } else {
         this.spawnMissedTracers(muzzle, ray, weapon, spec);
@@ -943,6 +1096,7 @@ class PlaygroundApp {
       spec.fallbackImpulse
     );
     if (hitIdx >= 0) {
+      this.selectRagdollFromBodyIdx(hitIdx);
       const hitPt = this.resolveHitPoint(this.sim.get_transforms(), hitIdx);
       this.lab.spawnTracer(muzzle, hitPt, spec.tracerColor, true);
     } else {
@@ -1017,6 +1171,7 @@ class PlaygroundApp {
 
     const hit = this.lab.raycastDynamicBody(this.raycaster, 25.0);
     if (hit && hit.ragdollId >= 0) {
+      this.selectedRagdollId = hit.ragdollId;
       if (typeof this.sim.set_ragdoll_status === 'function') {
         this.sim.set_ragdoll_status(hit.ragdollId, 2, 1.0, 3.0);
       }
@@ -1109,11 +1264,13 @@ class PlaygroundApp {
     const hit = this.lab.raycastDynamicBody(this.raycaster, 28.0);
     if (hit) {
       if (hit.ragdollId >= 0) {
+        this.selectedRagdollId = hit.ragdollId;
         if (typeof this.sim.set_ragdoll_status === 'function') {
           this.sim.set_ragdoll_status(hit.ragdollId, 1, 1.0, 6.0);
         }
         this.lab.emitFlameParticles(hit.point, 12, 0.24);
         this.audio.playIgnite();
+        this.syncSimulationView();
         return;
       }
 
@@ -1154,6 +1311,78 @@ class PlaygroundApp {
     }
   }
 
+  private executeExtinguish(ray: THREE.Ray): void {
+    if (!this.sim) return;
+
+    let hitPos: THREE.Vector3 | null = null;
+    const dynHit = this.lab.raycastDynamicBody(this.raycaster, 32.0);
+    if (dynHit) {
+      hitPos = dynHit.point.clone();
+    } else {
+      const surf = this.lab.raycastPlacementSurface(this.raycaster);
+      if (surf && ray.origin.distanceTo(surf.point) <= 32.0) {
+        hitPos = surf.point.clone();
+      } else if (
+        ray.intersectPlane(this.groundPlane, this.groundHit) &&
+        ray.origin.distanceTo(this.groundHit) <= 32.0
+      ) {
+        hitPos = this.groundHit.clone();
+      }
+    }
+    if (!hitPos) return;
+
+    const maxRadius = 2.5;
+    const maxRadiusSq = maxRadius * maxRadius;
+    const visualBest = this.lab.getNearestFireVisualSource(hitPos, maxRadius);
+
+    let bestRagdollId = -1;
+    let bestRagdollDistSq = maxRadiusSq;
+    if (
+      typeof this.sim.get_ragdoll_status === 'function' &&
+      typeof this.sim.set_ragdoll_status === 'function'
+    ) {
+      const count = this.sim.body_count();
+      const descriptors = this.sim.get_body_descriptors();
+      const transforms = this.sim.get_transforms();
+      const statusCache = new Map<number, number>();
+      const bodyPos = new THREE.Vector3();
+
+      for (let i = 0; i < count; i++) {
+        const dOff = i * 6;
+        const ragdollId = Math.round(descriptors[dOff + 4]);
+        if (ragdollId < 0) continue;
+
+        let st = statusCache.get(ragdollId);
+        if (st === undefined) {
+          st = this.sim.get_ragdoll_status(ragdollId);
+          statusCache.set(ragdollId, st);
+        }
+        if (st !== 1) continue;
+
+        const tOff = i * 7;
+        if (tOff + 2 >= transforms.length) continue;
+        bodyPos.set(transforms[tOff], transforms[tOff + 1], transforms[tOff + 2]);
+        const dSq = bodyPos.distanceToSquared(hitPos);
+        if (dSq <= bestRagdollDistSq) {
+          bestRagdollDistSq = dSq;
+          bestRagdollId = ragdollId;
+        }
+      }
+    }
+
+    if (
+      bestRagdollId >= 0 &&
+      (!visualBest || bestRagdollDistSq <= visualBest.distSq)
+    ) {
+      this.sim.set_ragdoll_status?.(bestRagdollId, 0, 0, 0);
+      this.fireContactRefreshMap.delete(bestRagdollId);
+      this.selectedRagdollId = bestRagdollId;
+      this.syncSimulationView();
+    } else if (visualBest) {
+      this.lab.removeFireVisualSource(visualBest.kind, visualBest.index);
+    }
+  }
+
   private updateFireAndStatusEffects(
     rawDt: number,
     simDt: number,
@@ -1161,6 +1390,14 @@ class PlaygroundApp {
   ): void {
     if (!this.sim) return;
     if (simDt <= 0) return;
+
+    const waterLevel =
+      typeof this.sim.get_water_level === 'function'
+        ? this.sim.get_water_level()
+        : -1000;
+    if (waterLevel > -500) {
+      this.lab.extinguishPropsBelowY(waterLevel + 0.15, transforms);
+    }
 
     this.fireClockSec += simDt;
     const count = this.sim.body_count();
@@ -1385,7 +1622,30 @@ class PlaygroundApp {
     mass: number
   ): void {
     if (!this.sim) return;
-    this.sim.spawn_box(x, y + hy + 0.002, z, hx, hy, hz, mass, 0, 0, 0);
+    if (typeof this.sim.spawn_box_oriented === 'function') {
+      const q = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0),
+        this.placerYaw
+      );
+      this.sim.spawn_box_oriented(
+        x,
+        y + hy + 0.002,
+        z,
+        hx,
+        hy,
+        hz,
+        q.x,
+        q.y,
+        q.z,
+        q.w,
+        mass,
+        0,
+        0,
+        0
+      );
+    } else {
+      this.sim.spawn_box(x, y + hy + 0.002, z, hx, hy, hz, mass, 0, 0, 0);
+    }
   }
 
   private executeThrower(ray: THREE.Ray): void {
@@ -1528,12 +1788,22 @@ class PlaygroundApp {
       }
     });
 
+    this.scenarioTriggerBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.setOpenPopover(this.openPopover === 'scenario' ? null : 'scenario');
+      this.scenarioTriggerBtn.blur();
+    });
+
     document
       .querySelectorAll<HTMLButtonElement>('[data-scenario]')
       .forEach((btn) => {
-        btn.addEventListener('click', () => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
           const scenario = Number(btn.dataset.scenario);
-          if (!Number.isNaN(scenario)) this.loadScenario(scenario);
+          if (!Number.isNaN(scenario)) {
+            this.loadScenario(scenario);
+            this.setOpenPopover(null);
+          }
           btn.blur();
         });
       });
@@ -1665,14 +1935,34 @@ class PlaygroundApp {
       this.spawnRagdoll();
       (e.currentTarget as HTMLElement).blur();
     });
-    this.giveBoxBtn.addEventListener('click', () => {
+    this.giveBoxBtn.addEventListener('click', (e: MouseEvent) => {
       this.audio.unlock();
-      this.giveBoxToRagdolls();
+      this.giveBoxToRagdolls(e.shiftKey);
       this.giveBoxBtn.blur();
     });
     this.walkToggleBtn.addEventListener('click', () => {
       this.setWalkForward(!this.walkForward);
       this.walkToggleBtn.blur();
+    });
+    this.themeToggleBtn.addEventListener('click', () => {
+      this.theme = this.theme === 'dark' ? 'day' : 'dark';
+      this.lab.setTheme(this.theme);
+      this.themeToggleBtn.textContent =
+        this.theme === 'dark' ? '🌙 Dark' : '☀️ Day';
+      this.themeToggleBtn.blur();
+    });
+    this.selectedMannequinBtn.addEventListener('click', () => {
+      if (!this.sim || typeof this.sim.get_ragdoll_telemetry !== 'function') {
+        return;
+      }
+      const telemetry = this.sim.get_ragdoll_telemetry();
+      const stride = getTelemetryStride(telemetry);
+      const count = Math.floor(telemetry.length / stride);
+      if (count > 1) {
+        this.selectedRagdollId = (this.selectedRagdollId + 1) % count;
+        this.updateBrainTelemetryHud(telemetry);
+      }
+      this.selectedMannequinBtn.blur();
     });
   }
 
@@ -1693,12 +1983,25 @@ class PlaygroundApp {
     this.canvas.addEventListener(
       'wheel',
       (e: WheelEvent) => {
+        if (
+          e.shiftKey &&
+          this.activeTool === 'placer' &&
+          this.lab.getCameraMode() === 'orbit'
+        ) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.placerYaw -= e.deltaY * 0.0025;
+          if (this.hasLastPointer) {
+            this.updatePlacePreview(this.lastPointerX, this.lastPointerY);
+          }
+          return;
+        }
         if (this.lab.getCameraMode() === 'fly') {
           e.preventDefault();
           this.lab.adjustFlySpeed(e.deltaY);
         }
       },
-      { passive: false }
+      { passive: false, capture: true }
     );
 
     this.canvas.addEventListener('pointerdown', (e: PointerEvent) => {
@@ -1710,6 +2013,17 @@ class PlaygroundApp {
       if (e.button === 2 && this.lab.getCameraMode() === 'fly') {
         this.isFlyLooking = true;
         this.canvas.setPointerCapture(e.pointerId);
+        return;
+      }
+
+      if (
+        e.button === 2 &&
+        this.lab.getCameraMode() === 'orbit' &&
+        this.activeTool === 'ignite'
+      ) {
+        this.rmbDownX = e.clientX;
+        this.rmbDownY = e.clientY;
+        this.rmbTrackActive = true;
         return;
       }
 
@@ -1726,6 +2040,7 @@ class PlaygroundApp {
           ray.direction.z
         );
         if (hitIdx >= 0) {
+          this.selectRagdollFromBodyIdx(hitIdx);
           this.grabbedBodyIndex = hitIdx;
           const transforms = this.sim.get_transforms();
           const tOff = hitIdx * 7;
@@ -1743,6 +2058,7 @@ class PlaygroundApp {
           this.canvas.setPointerCapture(e.pointerId);
           this.canvas.classList.add('is-grabbing');
           this.lab.setGrabTether(true, this.grabbedBodyPos, this.dragTarget);
+          this.syncSimulationView();
         }
       } else if (this.activeTool === 'shove') {
         const hitIdx =
@@ -1766,9 +2082,11 @@ class PlaygroundApp {
                 38.0
               );
         if (hitIdx >= 0) {
+          this.selectRagdollFromBodyIdx(hitIdx);
           const hitPt = this.resolveHitPoint(this.sim.get_transforms(), hitIdx);
           this.lab.spawnImpulseEffect(hitPt, 'shove');
           this.audio.playImpact(false);
+          this.syncSimulationView();
         }
       } else if (this.activeTool === 'punch') {
         const hitIdx =
@@ -1792,9 +2110,11 @@ class PlaygroundApp {
                 52.0
               );
         if (hitIdx >= 0) {
+          this.selectRagdollFromBodyIdx(hitIdx);
           const hitPt = this.resolveHitPoint(this.sim.get_transforms(), hitIdx);
           this.lab.spawnImpulseEffect(hitPt, 'punch');
           this.audio.playImpact(true);
+          this.syncSimulationView();
         }
       } else if (
         this.activeTool === 'pistol' ||
@@ -1876,6 +2196,23 @@ class PlaygroundApp {
     });
 
     const onEndPointer = (e: PointerEvent) => {
+      if (this.rmbTrackActive && e.button === 2) {
+        this.rmbTrackActive = false;
+        const dist = Math.hypot(
+          e.clientX - this.rmbDownX,
+          e.clientY - this.rmbDownY
+        );
+        if (
+          dist < 6 &&
+          this.activeTool === 'ignite' &&
+          this.lab.getCameraMode() === 'orbit'
+        ) {
+          const ray = this.updatePointerRay(e.clientX, e.clientY);
+          this.executeExtinguish(ray);
+        }
+      } else if (e.type === 'pointercancel') {
+        this.rmbTrackActive = false;
+      }
       if (this.isFlyLooking && (e.button === 2 || e.type === 'pointercancel')) {
         this.isFlyLooking = false;
         if (this.canvas.hasPointerCapture(e.pointerId)) {
@@ -1895,6 +2232,7 @@ class PlaygroundApp {
     window.addEventListener('blur', () => {
       this.releaseGrab();
       this.isFlyLooking = false;
+      this.rmbTrackActive = false;
       this.lab.clearFlyKeys();
     });
   }
@@ -1966,6 +2304,28 @@ class PlaygroundApp {
           break;
         case 'Escape':
           this.setOpenPopover(null);
+          break;
+        case 'KeyQ':
+          if (
+            this.activeTool === 'placer' &&
+            this.lab.getCameraMode() === 'orbit'
+          ) {
+            this.placerYaw += Math.PI / 12;
+            if (this.hasLastPointer) {
+              this.updatePlacePreview(this.lastPointerX, this.lastPointerY);
+            }
+          }
+          break;
+        case 'KeyE':
+          if (
+            this.activeTool === 'placer' &&
+            this.lab.getCameraMode() === 'orbit'
+          ) {
+            this.placerYaw -= Math.PI / 12;
+            if (this.hasLastPointer) {
+              this.updatePlacePreview(this.lastPointerX, this.lastPointerY);
+            }
+          }
           break;
         case 'KeyF':
           if (!e.repeat) {

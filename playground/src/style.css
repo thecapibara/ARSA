@@ -81,7 +81,7 @@ body,
   top: 16px;
   left: 16px;
   padding: 12px 14px;
-  min-width: 278px;
+  min-width: 312px;
 }
 
 .brand-header {
@@ -190,7 +190,32 @@ body,
 .brain-state-wrap {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
+}
+
+.mannequin-badge {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--accent-cyan);
+  background: rgba(34, 211, 238, 0.12);
+  border: 1px solid rgba(34, 211, 238, 0.36);
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.mannequin-badge:hover:not(:disabled) {
+  background: rgba(34, 211, 238, 0.22);
+  border-color: rgba(34, 211, 238, 0.65);
+}
+
+.mannequin-badge:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .state-badge {
@@ -619,32 +644,32 @@ kbd,
 /* Bottom-Center Toolbar Dock */
 .hud-dock {
   position: absolute;
-  bottom: 16px;
+  bottom: 14px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
+  flex-direction: column;
   align-items: center;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 10px;
+  gap: 6px;
   padding: 8px 12px;
-  max-width: calc(100vw - 32px);
+  width: fit-content;
+  max-width: calc(100vw - 24px);
 }
 
-.dock-group {
+.dock-row {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   gap: 4px;
+  flex-wrap: nowrap;
   max-width: 100%;
 }
 
-.dock-label {
-  font-family: var(--font-mono);
-  font-size: 8.5px;
-  font-weight: 600;
-  letter-spacing: 0.11em;
-  color: var(--text-muted);
-  padding-left: 2px;
+.dock-subrow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
 }
 
 .btn-row {
@@ -656,10 +681,11 @@ kbd,
 
 .dock-divider {
   width: 1px;
-  height: 30px;
+  height: 18px;
   background: var(--panel-border);
-  align-self: flex-end;
-  margin-bottom: 2px;
+  align-self: center;
+  margin: 0 2px;
+  flex-shrink: 0;
 }
 
 .hud-btn {
@@ -677,6 +703,13 @@ kbd,
   cursor: pointer;
   white-space: nowrap;
   transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.hud-dock .hud-btn {
+  padding: 4px 7px;
+  font-size: 11px;
+  gap: 4px;
+  white-space: nowrap;
 }
 
 .hud-btn-sm {
@@ -793,16 +826,19 @@ kbd,
 .speed-val {
   color: var(--accent-amber);
   font-family: 'JetBrains Mono', monospace;
+  font-size: 10.5px;
   font-weight: 600;
-  margin-left: 4px;
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .speed-slider {
-  width: 82px;
+  width: 72px;
   height: 4px;
   accent-color: var(--accent-amber);
   cursor: pointer;
-  margin: 0 4px;
+  margin: 0 2px;
   align-self: center;
 }
 
@@ -932,6 +968,27 @@ kbd,
   opacity: 1;
   transform: translateX(-50%) translateY(0);
   pointer-events: auto;
+}
+
+.scenario-popover {
+  min-width: 310px;
+  left: 0;
+  transform: translateY(4px);
+}
+
+.scenario-popover.open {
+  transform: translateY(0);
+}
+
+.scenario-popover-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+}
+
+#btn-scenario-trigger strong {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 
 .popover-header {

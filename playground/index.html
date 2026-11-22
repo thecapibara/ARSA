@@ -21,7 +21,7 @@
         <aside class="hud-panel hud-telemetry" aria-label="Simulation Telemetry">
           <div class="brand-header">
             <span class="brand-badge">ARSA</span>
-            <span class="brand-version">v0.7 — ARSA Engine</span>
+            <span class="brand-version">v0.8 — ARSA Engine</span>
             <button
               class="audio-toggle-btn"
               id="btn-audio-toggle"
@@ -54,7 +54,14 @@
           <!-- Active Balance State & Foot Contacts -->
           <div class="brain-telemetry-bar">
             <div class="brain-state-wrap">
-              <span class="metric-label">STATE</span>
+              <button
+                type="button"
+                class="mannequin-badge"
+                id="btn-selected-mannequin"
+                title="Active Mannequin (click to cycle)"
+              >
+                MANNEQUIN #1
+              </button>
               <span class="state-badge state-balanced" id="stat-ragdoll-state">BALANCED</span>
             </div>
             <div class="foot-contacts" title="Foot Ground Contacts (Left / Right)">
@@ -102,6 +109,12 @@
 
           <button class="hud-btn hud-btn-sm active" id="btn-debug-telemetry" title="Toggle CoM &amp; Capture Point 3D overlay [D]">
             Telemetry <span class="key-cap">D</span>
+          </button>
+
+          <div class="bar-divider"></div>
+
+          <button class="hud-btn hud-btn-sm" id="btn-theme-toggle" title="Toggle Dark Lab / Day Park Theme">
+            🌙 Dark
           </button>
         </div>
 
@@ -219,147 +232,157 @@
           <span class="reticle-dot"></span>
         </div>
 
-        <!-- Bottom-center: Compact Tactical Toolbar -->
+        <!-- Bottom-center: Compact 2-Row Tactical Toolbar -->
         <nav class="hud-panel hud-dock" aria-label="Simulation Controls">
-          <div class="dock-group">
-            <span class="dock-label">TOOL</span>
-            <div class="btn-row" role="group" aria-label="Interaction Tools">
-              <button class="hud-btn active" data-tool="grab" title="Grab and drag any limb [1]">
-                <span class="key-cap">1</span> Grab
-              </button>
-              <button class="hud-btn" data-tool="shove" title="Broad realistic push [2]">
-                <span class="key-cap">2</span> Shove
-              </button>
-              <button class="hud-btn" data-tool="punch" title="Fast localized strike [3]">
-                <span class="key-cap">3</span> Punch
-              </button>
-              <button class="hud-btn" data-tool="pistol" title="9mm Pistol — limb wounds &amp; Reach-for-Wound [4]">
-                <span class="key-cap">4</span> Pistol
-              </button>
-              <button class="hud-btn" data-tool="shotgun" title="12ga Shotgun — multi-pellet knockback &amp; bracing [5]">
-                <span class="key-cap">5</span> Shotgun
-              </button>
-              <button class="hud-btn" data-tool="rifle" title="5.56 Rifle — high-velocity stagger &amp; headshot KO [6]">
-                <span class="key-cap">6</span> Rifle
-              </button>
-              <div class="tool-selector-wrap" id="wrap-placer">
-                <button
-                  type="button"
-                  class="hud-btn tool-selector-btn"
-                  id="btn-tool-placer"
-                  data-tool="placer"
-                  aria-expanded="false"
-                  title="Place ragdoll, obstacle, or dynamite on floor [7]"
-                >
-                  <span class="key-cap">7</span>
-                  <span id="label-tool-placer">Placer: Curb</span>
-                  <span class="tool-chevron" id="chevron-placer" aria-hidden="true">▾</span>
-                </button>
-                <div class="tool-popover" id="popover-placer" aria-label="Placer Items" hidden>
-                  <div class="popover-header">PLACER</div>
-                  <button type="button" class="popover-item" data-placer-item="ragdoll">
-                    <span class="popover-item-title">Mannequin</span>
-                    <span class="popover-item-meta">Active Profile</span>
-                  </button>
-                  <button type="button" class="popover-item active" data-placer-item="curb">
-                    <span class="popover-item-title">Tripping Curb</span>
-                    <span class="popover-item-meta">Low Obstacle</span>
-                  </button>
-                  <button type="button" class="popover-item" data-placer-item="cube">
-                    <span class="popover-item-title">Cube Crate</span>
-                    <span class="popover-item-meta">22 kg</span>
-                  </button>
-                  <button type="button" class="popover-item" data-placer-item="sphere">
-                    <span class="popover-item-title">Steel Sphere</span>
-                    <span class="popover-item-meta">r=0.28 · 30 kg</span>
-                  </button>
-                  <button type="button" class="popover-item popover-item-danger" data-placer-item="dynamite">
-                    <span class="popover-item-title">Dynamite 💥</span>
-                    <span class="popover-item-meta">1.8s Fuse</span>
-                  </button>
-                </div>
-              </div>
+          <!-- Row 1: Interaction Tools -->
+          <div class="dock-row" role="group" aria-label="Interaction Tools">
+            <button class="hud-btn active" data-tool="grab" title="Grab and drag any limb [1]">
+              <span class="key-cap">1</span> Grab
+            </button>
+            <button class="hud-btn" data-tool="shove" title="Broad realistic push [2]">
+              <span class="key-cap">2</span> Shove
+            </button>
+            <button class="hud-btn" data-tool="punch" title="Fast localized strike [3]">
+              <span class="key-cap">3</span> Punch
+            </button>
+            <button class="hud-btn" data-tool="pistol" title="9mm Pistol — limb wounds &amp; Reach-for-Wound [4]">
+              <span class="key-cap">4</span> Pistol
+            </button>
+            <button class="hud-btn" data-tool="shotgun" title="12ga Shotgun — multi-pellet knockback &amp; bracing [5]">
+              <span class="key-cap">5</span> Shotgun
+            </button>
+            <button class="hud-btn" data-tool="rifle" title="5.56 Rifle — high-velocity stagger &amp; headshot KO [6]">
+              <span class="key-cap">6</span> Rifle
+            </button>
+            <button
+              type="button"
+              class="hud-btn"
+              data-tool="taser"
+              title="Taser — 2-wire stun gun [Electrocute]"
+            >
+              ⚡ Taser
+            </button>
+            <button
+              type="button"
+              class="hud-btn"
+              data-tool="ignite"
+              title="Ignite — LMB: Ignite | RMB: Extinguish"
+            >
+              🔥 Ignite
+            </button>
 
-              <div class="tool-selector-wrap" id="wrap-thrower">
-                <button
-                  type="button"
-                  class="hud-btn tool-selector-btn"
-                  id="btn-tool-thrower"
-                  data-tool="thrower"
-                  aria-expanded="false"
-                  title="Throw physics prop [8]"
-                >
-                  <span class="key-cap">8</span>
-                  <span id="label-tool-thrower">Thrower: Cube</span>
-                  <span class="tool-chevron" id="chevron-thrower" aria-hidden="true">▾</span>
-                </button>
-                <div class="tool-popover" id="popover-thrower" aria-label="Thrower Projectiles" hidden>
-                  <div class="popover-header">THROWER</div>
-                  <button type="button" class="popover-item active" data-thrower-item="cube">
-                    <span class="popover-item-title">Cube Box</span>
-                    <span class="popover-item-meta">16 kg</span>
-                  </button>
-                  <button type="button" class="popover-item" data-thrower-item="crate">
-                    <span class="popover-item-title">Long Crate</span>
-                    <span class="popover-item-meta">22 kg</span>
-                  </button>
-                  <button type="button" class="popover-item" data-thrower-item="sphere">
-                    <span class="popover-item-title">Steel Sphere</span>
-                    <span class="popover-item-meta">r=0.24 · 32 kg</span>
-                  </button>
-                </div>
-              </div>
-
-              <button type="button" class="hud-btn" data-tool="force_wave" title="Directional kinetic shockwave [9 / 0]">
-                <span class="key-cap">9</span> Force Wave
-              </button>
+            <div class="tool-selector-wrap" id="wrap-placer">
               <button
                 type="button"
-                class="hud-btn"
-                data-tool="taser"
-                title="Taser — 2-wire stun gun [Electrocute]"
+                class="hud-btn tool-selector-btn"
+                id="btn-tool-placer"
+                data-tool="placer"
+                aria-expanded="false"
+                title="Place ragdoll, obstacle, or dynamite on floor [7]"
               >
-                ⚡ Taser
+                <span class="key-cap">7</span>
+                <span id="label-tool-placer">Placer: Curb</span>
+                <span class="tool-chevron" id="chevron-placer" aria-hidden="true">▾</span>
               </button>
+              <div class="tool-popover" id="popover-placer" aria-label="Placer Items" hidden>
+                <div class="popover-header">PLACER</div>
+                <button type="button" class="popover-item" data-placer-item="ragdoll">
+                  <span class="popover-item-title">Mannequin</span>
+                  <span class="popover-item-meta">Active Profile</span>
+                </button>
+                <button type="button" class="popover-item active" data-placer-item="curb">
+                  <span class="popover-item-title">Tripping Curb</span>
+                  <span class="popover-item-meta">Low Obstacle</span>
+                </button>
+                <button type="button" class="popover-item" data-placer-item="cube">
+                  <span class="popover-item-title">Cube Crate</span>
+                  <span class="popover-item-meta">22 kg</span>
+                </button>
+                <button type="button" class="popover-item" data-placer-item="sphere">
+                  <span class="popover-item-title">Steel Sphere</span>
+                  <span class="popover-item-meta">r=0.28 · 30 kg</span>
+                </button>
+                <button type="button" class="popover-item popover-item-danger" data-placer-item="dynamite">
+                  <span class="popover-item-title">Dynamite 💥</span>
+                  <span class="popover-item-meta">1.8s Fuse</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="tool-selector-wrap" id="wrap-thrower">
               <button
                 type="button"
-                class="hud-btn"
-                data-tool="ignite"
-                title="Ignite — set fire to ground, cubes, or mannequins"
+                class="hud-btn tool-selector-btn"
+                id="btn-tool-thrower"
+                data-tool="thrower"
+                aria-expanded="false"
+                title="Throw physics prop [8]"
               >
-                🔥 Ignite
+                <span class="key-cap">8</span>
+                <span id="label-tool-thrower">Thrower: Cube</span>
+                <span class="tool-chevron" id="chevron-thrower" aria-hidden="true">▾</span>
               </button>
+              <div class="tool-popover" id="popover-thrower" aria-label="Thrower Projectiles" hidden>
+                <div class="popover-header">THROWER</div>
+                <button type="button" class="popover-item active" data-thrower-item="cube">
+                  <span class="popover-item-title">Cube Box</span>
+                  <span class="popover-item-meta">16 kg</span>
+                </button>
+                <button type="button" class="popover-item" data-thrower-item="crate">
+                  <span class="popover-item-title">Long Crate</span>
+                  <span class="popover-item-meta">22 kg</span>
+                </button>
+                <button type="button" class="popover-item" data-thrower-item="sphere">
+                  <span class="popover-item-title">Steel Sphere</span>
+                  <span class="popover-item-meta">r=0.24 · 32 kg</span>
+                </button>
+              </div>
             </div>
+
+            <button type="button" class="hud-btn" data-tool="force_wave" title="Directional kinetic shockwave [9 / 0]">
+              <span class="key-cap">9</span> Wave
+            </button>
           </div>
 
-          <div class="dock-divider"></div>
-
-          <div class="dock-group">
-            <span class="dock-label">SCENARIO</span>
-            <div class="btn-row" role="group" aria-label="Test Scenarios">
-              <button class="hud-btn active" data-scenario="0">Flat Lab</button>
-              <button class="hud-btn" data-scenario="3" title="Tripping obstacle behind heels">Trip Test</button>
-              <button class="hud-btn" data-scenario="1">Staircase</button>
-              <button class="hud-btn" data-scenario="2">Drop Platform</button>
-              <button class="hud-btn" data-scenario="4" title="Tethered steel wrecking ball pendulum">Wrecking Ball</button>
-              <button class="hud-btn" data-scenario="5" title="4× diverse crowd stress test">Crowd 4×</button>
-              <button class="hud-btn" data-scenario="6" title="20° sloped concrete ramp &amp; tumbling crates">Slope Ramp</button>
-              <button class="hud-btn" data-scenario="7" title="33×33 procedural rolling heightfield hills">Terrain Hills</button>
-              <button class="hud-btn" data-scenario="8" title="4.4m cliff brink teeter, ledge-grab &amp; high-fall">Cliff Teeter</button>
-              <button class="hud-btn" data-scenario="9" title="16× crowd with dynamic camera-distance LOD">Crowd 16× LOD</button>
+          <!-- Row 2: Scenario Popover, Speed Controls & Lab Actions -->
+          <div class="dock-row">
+            <div class="tool-selector-wrap" id="wrap-scenario">
+              <button
+                type="button"
+                class="hud-btn tool-selector-btn"
+                id="btn-scenario-trigger"
+                aria-expanded="false"
+                title="Select physics test scenario"
+              >
+                <span>Scenario: <strong id="scenario-label">Flat Lab</strong></span>
+                <span class="tool-chevron" aria-hidden="true">▾</span>
+              </button>
+              <div class="tool-popover scenario-popover" id="popover-scenario" aria-label="Test Scenarios" hidden>
+                <div class="popover-header">SCENARIOS</div>
+                <div class="scenario-popover-grid">
+                  <button type="button" class="popover-item active" data-scenario="0">Flat Lab</button>
+                  <button type="button" class="popover-item" data-scenario="3" title="Tripping obstacle behind heels">Trip Test</button>
+                  <button type="button" class="popover-item" data-scenario="1">Staircase</button>
+                  <button type="button" class="popover-item" data-scenario="2">Drop Platform</button>
+                  <button type="button" class="popover-item" data-scenario="4" title="Tethered steel wrecking ball pendulum">Wrecking Ball</button>
+                  <button type="button" class="popover-item" data-scenario="5" title="4× diverse crowd stress test">Crowd 4×</button>
+                  <button type="button" class="popover-item" data-scenario="6" title="32° steep low-friction slide &amp; tumbling crates">Slope Ramp</button>
+                  <button type="button" class="popover-item" data-scenario="7" title="33×33 procedural rolling heightfield hills">Terrain Hills</button>
+                  <button type="button" class="popover-item" data-scenario="8" title="4.4m cliff brink teeter, ledge-grab &amp; high-fall">Cliff Teeter</button>
+                  <button type="button" class="popover-item" data-scenario="9" title="16× crowd with dynamic camera-distance LOD">Crowd 16× LOD</button>
+                  <button type="button" class="popover-item" data-scenario="10" title="Concrete swimming pool with buoyancy &amp; floating crates">Swimming Pool</button>
+                  <button type="button" class="popover-item" data-scenario="11" title="Low-friction ice rink with bumper walls &amp; sliding crates">Ice Rink</button>
+                  <button type="button" class="popover-item" data-scenario="12" title="4.2m grand 16-step staircase">Grand Staircase</button>
+                </div>
+              </div>
             </div>
-          </div>
 
-          <div class="dock-divider"></div>
+            <div class="dock-divider"></div>
 
-          <div class="dock-group">
-            <span class="dock-label">SIM SPEED <span id="val-sim-speed" class="speed-val">1.00×</span></span>
-            <div class="btn-row" role="group" aria-label="Simulation Speed">
-              <button class="hud-btn" data-timescale="0.1">0.1x</button>
-              <button class="hud-btn" data-timescale="0.25">0.25x</button>
-              <button class="hud-btn" data-timescale="0.5">0.5x</button>
-              <button class="hud-btn active" data-timescale="1">1.0x</button>
-              <button class="hud-btn" data-timescale="2">2.0x</button>
+            <div class="dock-subrow" role="group" aria-label="Simulation Speed">
+              <button class="hud-btn" data-timescale="0.25">0.25×</button>
+              <button class="hud-btn" data-timescale="0.5">0.5×</button>
+              <button class="hud-btn active" data-timescale="1">1×</button>
               <input
                 type="range"
                 id="slider-sim-speed"
@@ -371,6 +394,7 @@
                 title="Continuous Simulation Speed (0.05x – 2.0x) — [ / ] or T for Bullet-Time"
                 aria-label="Simulation Speed"
               />
+              <span id="val-sim-speed" class="speed-val">1.00×</span>
               <button class="hud-btn" id="btn-slowmo" title="Toggle Bullet-Time 0.15x [T]">
                 Slow-Mo <span class="key-cap">T</span>
               </button>
@@ -378,13 +402,10 @@
                 Pause <span class="key-cap">P</span>
               </button>
             </div>
-          </div>
 
-          <div class="dock-divider"></div>
+            <div class="dock-divider"></div>
 
-          <div class="dock-group">
-            <span class="dock-label">LAB</span>
-            <div class="btn-row" role="group" aria-label="Lab Actions">
+            <div class="dock-subrow" role="group" aria-label="Lab Actions">
               <button class="hud-btn btn-accent" id="btn-spawn" title="Spawn ragdoll with active Body Profile [+]">
                 Spawn <span class="key-cap">+</span>
               </button>
@@ -395,9 +416,9 @@
                 type="button"
                 class="hud-btn"
                 id="btn-give-box"
-                title="Give a held physics box to standing mannequins (up to 4)"
+                title="Give a held physics box to active mannequin (Shift+Click: up to 4)"
               >
-                📦 Give Box
+                📦 Box
               </button>
               <button
                 type="button"
@@ -407,7 +428,7 @@
                 title="Toggle procedural Walk Forward (+Z at 1.35 m/s)"
               >
                 <span class="walk-dot"></span>
-                <span>Walk Forward</span>
+                <span>Walk</span>
               </button>
             </div>
           </div>

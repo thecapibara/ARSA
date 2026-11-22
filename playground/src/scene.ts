@@ -31,6 +31,8 @@ export interface DynamicRaycastHit {
 
 export const DYNAMITE_BONE_ID = 250;
 
+export type ThemeMode = 'dark' | 'day';
+
 interface CachedBody {
   object: THREE.Object3D;
   signature: string;
@@ -97,6 +99,23 @@ export class LabScene {
   private readonly terrainMat: THREE.MeshStandardMaterial;
   private readonly terrainWireMat: THREE.MeshBasicMaterial;
   private terrainSurfaceMesh: THREE.Mesh | null = null;
+
+  private hemiLight!: THREE.HemisphereLight;
+  private keyLight!: THREE.DirectionalLight;
+  private rimLight!: THREE.DirectionalLight;
+  private fillLight!: THREE.DirectionalLight;
+  private floorMat!: THREE.MeshStandardMaterial;
+  private darkFloorTex!: THREE.CanvasTexture;
+  private dayFloorTex!: THREE.CanvasTexture;
+  private iceFloorTex!: THREE.CanvasTexture;
+  private currentTheme: ThemeMode = 'dark';
+  private isIceFloor = false;
+
+  private waterMesh!: THREE.Mesh;
+  private waterMat!: THREE.MeshStandardMaterial;
+  private waterBasePositions!: Float32Array;
+  private waterLevel = -1000;
+  private waterAnimTime = 0;
 
   private readonly placePreviewGroup: THREE.Group;
   private readonly placePreviewRagdoll: THREE.Group;
@@ -224,6 +243,7 @@ export class LabScene {
 
     this.setupLighting();
     this.setupFloor();
+    this.setupWaterSurface();
 
     this.scene.add(this.staticGroup);
     this.scene.add(this.terrainGroup);
@@ -313,43 +333,48 @@ export class LabScene {
   }
 
   private setupLighting(): void {
-    const hemi = new THREE.HemisphereLight(0xcbe0fa, 0x1a212c, 0.58);
-    this.scene.add(hemi);
+    this.hemiLight = new THREE.HemisphereLight(0xcbe0fa, 0x1a212c, 0.58);
+    this.scene.add(this.hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff4e6, 2.25);
-    keyLight.position.set(7.5, 13.5, 8.5);
-    keyLight.castShadow = true;
-    keyLight.shadow.mapSize.set(2048, 2048);
-    keyLight.shadow.camera.near = 1;
-    keyLight.shadow.camera.far = 42;
+    this.keyLight = new THREE.DirectionalLight(0xfff4e6, 2.25);
+    this.keyLight.position.set(7.5, 13.5, 8.5);
+    this.keyLight.castShadow = true;
+    this.keyLight.shadow.mapSize.set(2048, 2048);
+    this.keyLight.shadow.camera.near = 1;
+    this.keyLight.shadow.camera.far = 42;
     const frustum = 11;
-    keyLight.shadow.camera.left = -frustum;
-    keyLight.shadow.camera.right = frustum;
-    keyLight.shadow.camera.top = frustum;
-    keyLight.shadow.camera.bottom = -frustum;
-    keyLight.shadow.bias = -0.0004;
-    keyLight.shadow.normalBias = 0.022;
-    this.scene.add(keyLight);
+    this.keyLight.shadow.camera.left = -frustum;
+    this.keyLight.shadow.camera.right = frustum;
+    this.keyLight.shadow.camera.top = frustum;
+    this.keyLight.shadow.camera.bottom = -frustum;
+    this.keyLight.shadow.bias = -0.0004;
+    this.keyLight.shadow.normalBias = 0.022;
+    this.scene.add(this.keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x7ca9e8, 0.9);
-    rimLight.position.set(-8.5, 6.5, -7.5);
-    this.scene.add(rimLight);
+    this.rimLight = new THREE.DirectionalLight(0x7ca9e8, 0.9);
+    this.rimLight.position.set(-8.5, 6.5, -7.5);
+    this.scene.add(this.rimLight);
 
-    const fillLight = new THREE.DirectionalLight(0xa3b7cf, 0.38);
-    fillLight.position.set(0, 2.8, 10);
-    this.scene.add(fillLight);
+    this.fillLight = new THREE.DirectionalLight(0xa3b7cf, 0.38);
+    this.fillLight.position.set(0, 2.8, 10);
+    this.scene.add(this.fillLight);
   }
 
-  private setupFloor(): void {
+  private buildFloorGridTexture(
+    bgHex: string,
+    subGridStroke: string,
+    majorGridStroke: string,
+    accentCornerStroke: string
+  ): THREE.CanvasTexture {
     const texCanvas = document.createElement('canvas');
     texCanvas.width = 512;
     texCanvas.height = 512;
     const ctx = texCanvas.getContext('2d');
     if (ctx) {
-      ctx.fillStyle = '#1b2029';
+      ctx.fillStyle = bgHex;
       ctx.fillRect(0, 0, 512, 512);
 
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.032)';
+      ctx.strokeStyle = subGridStroke;
       ctx.lineWidth = 1;
       for (let i = 1; i < 4; i++) {
         const p = (i * 512) / 4;
@@ -364,11 +389,11 @@ export class LabScene {
         ctx.stroke();
       }
 
-      ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+      ctx.strokeStyle = majorGridStroke;
       ctx.lineWidth = 2;
       ctx.strokeRect(0, 0, 512, 512);
 
-      ctx.strokeStyle = 'rgba(232, 148, 44, 0.35)';
+      ctx.strokeStyle = accentCornerStroke;
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(0, 14);
@@ -383,18 +408,132 @@ export class LabScene {
     gridTex.repeat.set(64, 64);
     gridTex.anisotropy = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
     gridTex.colorSpace = THREE.SRGBColorSpace;
+    return gridTex;
+  }
+
+  private setupFloor(): void {
+    this.darkFloorTex = this.buildFloorGridTexture(
+      '#1b2029',
+      'rgba(255, 255, 255, 0.032)',
+      'rgba(148, 163, 184, 0.16)',
+      'rgba(232, 148, 44, 0.35)'
+    );
+    this.dayFloorTex = this.buildFloorGridTexture(
+      '#4c8040',
+      'rgba(108, 160, 92, 0.28)',
+      'rgba(108, 160, 92, 0.52)',
+      'rgba(142, 197, 252, 0.4)'
+    );
+    this.iceFloorTex = this.buildFloorGridTexture(
+      '#b8e3fa',
+      'rgba(255, 255, 255, 0.25)',
+      'rgba(255, 255, 255, 0.45)',
+      'rgba(56, 189, 248, 0.5)'
+    );
 
     const floorGeo = new THREE.PlaneGeometry(64, 64);
-    const floorMat = new THREE.MeshStandardMaterial({
-      map: gridTex,
+    this.floorMat = new THREE.MeshStandardMaterial({
+      map: this.darkFloorTex,
       roughness: 0.56,
       metalness: 0.2,
     });
 
-    const floor = new THREE.Mesh(floorGeo, floorMat);
+    const floor = new THREE.Mesh(floorGeo, this.floorMat);
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
     this.scene.add(floor);
+  }
+
+  private setupWaterSurface(): void {
+    const waterGeo = new THREE.PlaneGeometry(6.1, 6.1, 24, 24);
+    waterGeo.rotateX(-Math.PI / 2);
+    const posAttr = waterGeo.getAttribute('position') as THREE.BufferAttribute;
+    this.waterBasePositions = new Float32Array(posAttr.array as Float32Array);
+
+    this.waterMat = new THREE.MeshStandardMaterial({
+      color: 0x22b8e6,
+      emissive: 0x06405c,
+      emissiveIntensity: 0.35,
+      roughness: 0.08,
+      metalness: 0.18,
+      transparent: true,
+      opacity: 0.62,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+
+    this.waterMesh = new THREE.Mesh(waterGeo, this.waterMat);
+    this.waterMesh.visible = false;
+    this.waterMesh.renderOrder = 3;
+    this.waterMesh.receiveShadow = true;
+    this.scene.add(this.waterMesh);
+  }
+
+  private applyFloorAppearance(): void {
+    if (this.isIceFloor) {
+      this.floorMat.map = this.iceFloorTex;
+      this.floorMat.color.setHex(0xe8f7ff);
+      this.floorMat.roughness = 0.15;
+      this.floorMat.metalness = 0.22;
+    } else if (this.currentTheme === 'day') {
+      this.floorMat.map = this.dayFloorTex;
+      this.floorMat.color.setHex(0xffffff);
+      this.floorMat.roughness = 0.85;
+      this.floorMat.metalness = 0.04;
+    } else {
+      this.floorMat.map = this.darkFloorTex;
+      this.floorMat.color.setHex(0xffffff);
+      this.floorMat.roughness = 0.56;
+      this.floorMat.metalness = 0.2;
+    }
+    this.floorMat.needsUpdate = true;
+  }
+
+  public syncWaterLevel(waterLevel: number): void {
+    this.waterLevel = waterLevel;
+    if (waterLevel > -500) {
+      this.waterMesh.visible = true;
+      this.waterMesh.position.set(0, waterLevel, 0);
+    } else {
+      this.waterMesh.visible = false;
+    }
+  }
+
+  public setIceFloorVisual(isIce: boolean): void {
+    this.isIceFloor = isIce;
+    this.applyFloorAppearance();
+  }
+
+  public setTheme(theme: ThemeMode): void {
+    this.currentTheme = theme;
+    if (theme === 'day') {
+      this.scene.background = new THREE.Color(0x8ec5fc);
+      this.scene.fog = new THREE.FogExp2(0xcfe8ff, 0.012);
+      this.hemiLight.color.setHex(0xdff2ff);
+      this.hemiLight.groundColor.setHex(0x4f7d3a);
+      this.hemiLight.intensity = 1.15;
+      this.keyLight.color.setHex(0xfff1d0);
+      this.keyLight.intensity = 2.65;
+      this.rimLight.color.setHex(0xb8dcff);
+      this.rimLight.intensity = 0.55;
+      this.fillLight.color.setHex(0xe8f3ff);
+      this.fillLight.intensity = 0.45;
+      this.renderer.toneMappingExposure = 1.0;
+    } else {
+      this.scene.background = new THREE.Color(0x14181f);
+      this.scene.fog = new THREE.FogExp2(0x14181f, 0.02);
+      this.hemiLight.color.setHex(0xcbe0fa);
+      this.hemiLight.groundColor.setHex(0x1a212c);
+      this.hemiLight.intensity = 0.58;
+      this.keyLight.color.setHex(0xfff4e6);
+      this.keyLight.intensity = 2.25;
+      this.rimLight.color.setHex(0x7ca9e8);
+      this.rimLight.intensity = 0.9;
+      this.fillLight.color.setHex(0xa3b7cf);
+      this.fillLight.intensity = 0.38;
+      this.renderer.toneMappingExposure = 1.06;
+    }
+    this.applyFloorAppearance();
   }
 
   public getCameraMode(): CameraMode {
@@ -1362,7 +1501,8 @@ export class LabScene {
     visible: boolean,
     mode: PlacerMode = 'curb',
     pos?: THREE.Vector3,
-    heightM = 1.78
+    heightM = 1.78,
+    yaw = 0
   ): void {
     if (!visible || !pos) {
       this.placePreviewGroup.visible = false;
@@ -1371,6 +1511,7 @@ export class LabScene {
 
     this.placePreviewGroup.visible = true;
     this.placePreviewGroup.position.set(pos.x, Math.max(0, pos.y), pos.z);
+    this.placePreviewGroup.rotation.y = yaw;
 
     this.placePreviewRagdoll.visible = mode === 'ragdoll';
     this.placePreviewCurb.visible = mode === 'curb';
@@ -1568,6 +1709,26 @@ export class LabScene {
     return this.effects.getActiveFireSources();
   }
 
+  public extinguishPropsBelowY(maxY: number, transforms: Float32Array): void {
+    this.effects.extinguishPropsBelowY(maxY, transforms);
+  }
+
+  public getNearestFireVisualSource(
+    pos: THREE.Vector3,
+    maxRadius: number
+  ): {
+    kind: 'patch' | 'prop';
+    index: number;
+    distSq: number;
+    pos: THREE.Vector3;
+  } | null {
+    return this.effects.getNearestFireVisualSource(pos, maxRadius);
+  }
+
+  public removeFireVisualSource(kind: 'patch' | 'prop', index: number): void {
+    this.effects.removeFireVisualSource(kind, index);
+  }
+
   public emitFlameParticles(
     pos: THREE.Vector3,
     count: number,
@@ -1602,6 +1763,27 @@ export class LabScene {
     simDt = dt
   ): void {
     this.effects.update(dt, this.dynamiteFuseTips, transforms, simDt);
+
+    if (this.waterMesh.visible && this.waterLevel > -500) {
+      this.waterAnimTime += dt;
+      const posAttr = this.waterMesh.geometry.getAttribute(
+        'position'
+      ) as THREE.BufferAttribute;
+      const arr = posAttr.array as Float32Array;
+      const base = this.waterBasePositions;
+      const t = this.waterAnimTime;
+      for (let i = 0; i < arr.length; i += 3) {
+        const bx = base[i];
+        const bz = base[i + 2];
+        arr[i + 1] =
+          base[i + 1] +
+          0.016 * Math.sin(bx * 1.9 + t * 2.4) * Math.cos(bz * 1.7 - t * 1.8) +
+          0.008 * Math.sin((bx + bz) * 3.1 + t * 3.4);
+      }
+      posAttr.needsUpdate = true;
+      this.waterMesh.geometry.computeVertexNormals();
+      this.waterMat.opacity = 0.58 + 0.06 * Math.sin(t * 2.1);
+    }
 
     // Pulse & billboard active wound rings
     if (this.telemetryGroup.visible) {

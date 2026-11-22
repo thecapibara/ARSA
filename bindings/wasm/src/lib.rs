@@ -39,6 +39,9 @@ impl ArsaSim {
     /// - `7`: Rolling Hills (Terrain Hills)
     /// - `8`: Cliff Ledge (Cliff Teeter)
     /// - `9`: Crowd 16x LOD
+    /// - `10`: Swimming Pool
+    /// - `11`: Ice Rink
+    /// - `12`: Grand Staircase
     pub fn reset_lab_scene(&mut self, scenario: u32) {
         self.reset_lab_scene_with_profile(scenario, 1.78, 75.0, 1.0);
     }
@@ -50,10 +53,13 @@ impl ArsaSim {
     /// - `3`: Trip Test (standing mannequin + low obstacle box behind heels)
     /// - `4`: Wrecking Ball (standing mannequin + gantry beam + tethered 85kg wrecking ball)
     /// - `5`: Crowd (4x diverse builds in tight staggered formation facing +Z)
-    /// - `6`: Slope Ramp (elevated start platform + 20° ramp + 2 tumbling crates)
+    /// - `6`: Slope Ramp (3.2m platform + seamless 32° low-friction slide + guardrails + 2 crates)
     /// - `7`: Rolling Hills (33x33 procedural heightfield terrain + 2 ragdolls + 3 crates)
     /// - `8`: Cliff Ledge (4.4m tower + mid-cliff ledge + ragdoll near front brink)
     /// - `9`: Crowd 16x LOD (4x4 formation with spatial camera-distance LOD)
+    /// - `10`: Swimming Pool (water level 1.65m + concrete deck + 2 ragdolls + 2 floating crates)
+    /// - `11`: Ice Rink (low-friction 0.04 floor + bumper walls + 2 ragdolls + 2 sliding crates)
+    /// - `12`: Grand Staircase (4.2m platform + 16 descending concrete steps + ragdoll at top brink)
     pub fn reset_lab_scene_with_profile(
         &mut self,
         scenario: u32,
@@ -64,6 +70,8 @@ impl ArsaSim {
         self.world.clear();
         self.world.set_heightfield(None);
         self.world.set_lod_focus(None, 15.0, 35.0);
+        self.world.set_water_level(None);
+        self.world.set_floor_friction(0.75);
         let profile = BodyProfile {
             height_m,
             mass_kg,
@@ -170,34 +178,47 @@ impl ArsaSim {
                 );
             }
             6 => {
-                // Slope Ramp: elevated start platform + 20-deg sloped ramp + 2 tumbling crates
+                // Slope Ramp: 3.2m elevated platform + seamless 32-deg low-friction slide + guardrails
                 self.world.add_static_box(
-                    Vec3::new(0.0, 1.55, -2.6),
-                    Vec3::new(1.6, 0.15, 1.0),
+                    Vec3::new(0.0, 1.60, -3.55),
+                    Vec3::new(1.45, 1.60, 0.85),
                     0.75,
                     0.05,
                 );
+                let theta = 32.0_f32.to_radians();
+                let cos_t = theta.cos();
+                let sin_t = theta.sin();
+                let q = Quat::from_rotation_x(theta);
+                let half_y = 0.12_f32;
+                let half_z = 3.0_f32;
+                let offset = q * Vec3::new(0.0, half_y, -half_z);
+                let ramp_center = Vec3::new(0.0, 3.20, -2.70) - offset;
                 self.world.add_static_oriented_box(
-                    Vec3::new(0.0, 0.78, 0.85),
-                    Vec3::new(1.5, 0.12, 2.6),
-                    Quat::from_rotation_x(20.0_f32.to_radians()),
-                    0.55,
+                    ramp_center,
+                    Vec3::new(1.45, half_y, half_z),
+                    q,
+                    0.08,
                     0.05,
                 );
+                for side in [-1.0_f32, 1.0_f32] {
+                    self.world.add_static_oriented_box(
+                        ramp_center + Vec3::new(side * 1.48, 0.22 * cos_t, 0.22 * sin_t),
+                        Vec3::new(0.06, 0.32, half_z),
+                        q,
+                        0.12,
+                        0.05,
+                    );
+                }
                 self.world
-                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 1.72, -2.0), profile);
-                self.world.spawn_box(
-                    Vec3::new(-0.75, 1.98, -1.4),
-                    Vec3::splat(0.22),
-                    12.0,
-                    Vec3::ZERO,
-                );
-                self.world.spawn_box(
-                    Vec3::new(0.75, 1.98, -1.4),
-                    Vec3::splat(0.22),
-                    12.0,
-                    Vec3::ZERO,
-                );
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 3.22, -2.85), profile);
+                for x in [-0.65_f32, 0.65_f32] {
+                    self.world.spawn_box(
+                        Vec3::new(x, 3.25, -2.15),
+                        Vec3::splat(0.22),
+                        12.0,
+                        Vec3::ZERO,
+                    );
+                }
             }
             7 => {
                 // Rolling Hills: 33x33 procedural heightfield terrain + 2 ragdolls + 3 crates
@@ -288,6 +309,122 @@ impl ArsaSim {
                 }
                 self.world
                     .set_lod_focus(Some(Vec3::new(0.0, 1.5, 4.0)), 10.0, 22.0);
+            }
+            10 => {
+                // Swimming Pool: water level 1.65m + concrete deck perimeter + 2 ragdolls + 2 crates
+                self.world.set_water_level(Some(1.65));
+                // North, South, West, East concrete deck walls (top_y = 1.95)
+                self.world.add_static_box(
+                    Vec3::new(0.0, 0.975, -3.75),
+                    Vec3::new(4.5, 0.975, 0.75),
+                    0.75,
+                    0.05,
+                );
+                self.world.add_static_box(
+                    Vec3::new(0.0, 0.975, 3.75),
+                    Vec3::new(4.5, 0.975, 0.75),
+                    0.75,
+                    0.05,
+                );
+                self.world.add_static_box(
+                    Vec3::new(-3.75, 0.975, 0.0),
+                    Vec3::new(0.75, 0.975, 3.0),
+                    0.75,
+                    0.05,
+                );
+                self.world.add_static_box(
+                    Vec3::new(3.75, 0.975, 0.0),
+                    Vec3::new(0.75, 0.975, 3.0),
+                    0.75,
+                    0.05,
+                );
+                // Active-profile ragdoll standing on the North deck edge
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 1.97, -3.25), profile);
+                // Second ragdoll already in the pool treading water
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.6, 1.25, 0.3), BodyProfile::default());
+                // 2 wooden floating crates inside the pool
+                self.world.spawn_box(
+                    Vec3::new(-1.2, 1.8, -0.4),
+                    Vec3::splat(0.22),
+                    8.0,
+                    Vec3::ZERO,
+                );
+                self.world.spawn_box(
+                    Vec3::new(1.3, 1.8, -1.0),
+                    Vec3::splat(0.22),
+                    8.0,
+                    Vec3::ZERO,
+                );
+            }
+            11 => {
+                // Ice Rink: low-friction 0.04 floor + bumper walls + 2 ragdolls + 2 sliding crates
+                self.world.set_floor_friction(0.04);
+                self.world.add_static_box(
+                    Vec3::new(0.0, 0.25, -6.25),
+                    Vec3::new(6.5, 0.25, 0.25),
+                    0.75,
+                    0.05,
+                );
+                self.world.add_static_box(
+                    Vec3::new(0.0, 0.25, 6.25),
+                    Vec3::new(6.5, 0.25, 0.25),
+                    0.75,
+                    0.05,
+                );
+                self.world.add_static_box(
+                    Vec3::new(-6.25, 0.25, 0.0),
+                    Vec3::new(0.25, 0.25, 6.0),
+                    0.75,
+                    0.05,
+                );
+                self.world.add_static_box(
+                    Vec3::new(6.25, 0.25, 0.0),
+                    Vec3::new(0.25, 0.25, 6.0),
+                    0.75,
+                    0.05,
+                );
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(-0.8, 0.02, 0.0), profile);
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(1.1, 0.02, -0.4), BodyProfile::default());
+                self.world.spawn_box(
+                    Vec3::new(-0.2, 0.25, 1.4),
+                    Vec3::splat(0.24),
+                    12.0,
+                    Vec3::ZERO,
+                );
+                self.world.spawn_box(
+                    Vec3::new(1.4, 0.25, 1.0),
+                    Vec3::splat(0.24),
+                    12.0,
+                    Vec3::ZERO,
+                );
+            }
+            12 => {
+                // Grand Staircase: 4.2m platform + 16 descending concrete steps + ragdoll at top edge
+                self.world.add_static_box(
+                    Vec3::new(0.0, 2.1, -3.6),
+                    Vec3::new(1.8, 2.1, 1.2),
+                    0.75,
+                    0.05,
+                );
+                let step_depth = 0.40_f32;
+                let step_height = 0.2625_f32;
+                let half_width = 1.8_f32;
+                for i in 0..16 {
+                    let top_y = (16 - i) as f32 * step_height;
+                    let center_z = -2.4 + (i as f32 + 0.5) * step_depth;
+                    self.world.add_static_box(
+                        Vec3::new(0.0, top_y * 0.5, center_z),
+                        Vec3::new(half_width, top_y * 0.5, step_depth * 0.5),
+                        0.75,
+                        0.05,
+                    );
+                }
+                self.world
+                    .spawn_ragdoll_with_profile(Vec3::new(0.0, 4.22, -2.58), profile);
             }
             _ => {
                 // 0: Flat Lab
@@ -508,6 +645,44 @@ impl ArsaSim {
             mass,
             Vec3::new(vx, vy, vz),
         )
+    }
+
+    /// Spawns a dynamic oriented box (XYZW quaternion) and returns its body index.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_box_oriented(
+        &mut self,
+        x: f32,
+        y: f32,
+        z: f32,
+        hx: f32,
+        hy: f32,
+        hz: f32,
+        qx: f32,
+        qy: f32,
+        qz: f32,
+        qw: f32,
+        mass: f32,
+        vx: f32,
+        vy: f32,
+        vz: f32,
+    ) -> usize {
+        let idx = self.world.spawn_box(
+            Vec3::new(x, y, z),
+            Vec3::new(hx, hy, hz),
+            mass,
+            Vec3::new(vx, vy, vz),
+        );
+        let raw_q = Quat::from_xyzw(qx, qy, qz, qw);
+        let q = if raw_q.is_finite() && raw_q.length_squared() > 1e-6 {
+            raw_q.normalize()
+        } else {
+            Quat::IDENTITY
+        };
+        let body = &mut self.world.bodies[idx];
+        body.orientation = q;
+        body.prev_orientation = q;
+        body.update_world_inertia();
+        idx
     }
 
     /// Spawns a dynamic sphere and returns its body index.

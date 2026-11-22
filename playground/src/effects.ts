@@ -708,7 +708,7 @@ export class LabEffectsManager {
   }
 
   /**
-   * Spawns a ground campfire / fire-pit patch (25s lifetime, radius 0.85m, capped at 6 patches).
+   * Spawns a ground campfire / fire-pit patch (14s lifetime, radius 0.85m, capped at 6 patches).
    */
   public spawnGroundFirePatch(pos: THREE.Vector3): void {
     if (this.groundFirePatches.length >= MAX_GROUND_FIRE_PATCHES) {
@@ -752,8 +752,8 @@ export class LabEffectsManager {
       light,
       pos: pos.clone(),
       radius: 0.85,
-      remaining: 25.0,
-      maxDuration: 25.0,
+      remaining: 14.0,
+      maxDuration: 14.0,
       emitAccum: 0,
       phase: Math.random() * Math.PI * 2,
     });
@@ -804,6 +804,76 @@ export class LabEffectsManager {
       }
     }
     return sources;
+  }
+
+  /**
+   * Extinguishes any burning dynamic props whose Y position is submerged below `maxY`.
+   */
+  public extinguishPropsBelowY(maxY: number, transforms: Float32Array): void {
+    for (let i = this.burningProps.length - 1; i >= 0; i--) {
+      const prop = this.burningProps[i];
+      const pOff = prop.bodyIdx * 7;
+      const py =
+        pOff + 1 < transforms.length ? transforms[pOff + 1] : prop.pos.y;
+      if (py < maxY) {
+        this.burningProps.splice(i, 1);
+      }
+    }
+  }
+
+  /**
+   * Finds the nearest active ground fire patch or burning prop within `maxRadius` of `pos`.
+   */
+  public getNearestFireVisualSource(
+    pos: THREE.Vector3,
+    maxRadius: number
+  ): {
+    kind: 'patch' | 'prop';
+    index: number;
+    distSq: number;
+    pos: THREE.Vector3;
+  } | null {
+    const maxSq = maxRadius * maxRadius;
+    let best: {
+      kind: 'patch' | 'prop';
+      index: number;
+      distSq: number;
+      pos: THREE.Vector3;
+    } | null = null;
+
+    for (let i = 0; i < this.groundFirePatches.length; i++) {
+      const p = this.groundFirePatches[i];
+      if (p.remaining <= 0) continue;
+      const dSq = p.pos.distanceToSquared(pos);
+      if (dSq <= maxSq && (!best || dSq < best.distSq)) {
+        best = { kind: 'patch', index: i, distSq: dSq, pos: p.pos.clone() };
+      }
+    }
+
+    for (let i = 0; i < this.burningProps.length; i++) {
+      const prop = this.burningProps[i];
+      if (prop.remaining <= 0) continue;
+      const dSq = prop.pos.distanceToSquared(pos);
+      if (dSq <= maxSq && (!best || dSq < best.distSq)) {
+        best = { kind: 'prop', index: i, distSq: dSq, pos: prop.pos.clone() };
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Extinguishes a ground fire patch or burning prop by kind and array index.
+   */
+  public removeFireVisualSource(kind: 'patch' | 'prop', index: number): void {
+    if (kind === 'patch') {
+      if (index >= 0 && index < this.groundFirePatches.length) {
+        const [removed] = this.groundFirePatches.splice(index, 1);
+        this.disposeGroundFirePatch(removed);
+      }
+    } else if (index >= 0 && index < this.burningProps.length) {
+      this.burningProps.splice(index, 1);
+    }
   }
 
   /**
@@ -1305,7 +1375,7 @@ export class LabEffectsManager {
       }
     }
 
-    // Ground fire patches (25s lifetime, warm flickering PointLight + rising flames)
+    // Ground fire patches (14s lifetime, warm flickering PointLight + rising flames)
     for (let i = this.groundFirePatches.length - 1; i >= 0; i--) {
       const patch = this.groundFirePatches[i];
       patch.remaining -= simDt;
