@@ -1006,3 +1006,37 @@ kbd,
 .popover-item-danger.active .popover-item-meta {
   color: #fca5a5;
 }
+
+/* Sandbox Tools & Quick Actions (Taser, Ignite, Walk Forward) */
+.hud-btn[data-tool='taser'].active {
+  color: #ecfeff;
+  background: rgba(34, 211, 238, 0.2);
+  border-color: rgba(34, 211, 238, 0.65);
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.2);
+}
+
+.hud-btn[data-tool='ignite'].active {
+  color: #fff7ed;
+  background: rgba(249, 115, 22, 0.24);
+  border-color: rgba(251, 146, 60, 0.68);
+  box-shadow: 0 0 10px rgba(249, 115, 22, 0.22);
+}
+
+.walk-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hud-btn.walk-toggle.active {
+  color: #ecfdf5;
+  background: rgba(52, 211, 153, 0.16);
+  border-color: rgba(52, 211, 153, 0.55);
+}
+
+.hud-btn.walk-toggle.active .walk-dot {
+  background: var(--status-ok);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.75);
+}

@@ -7,13 +7,27 @@ import {
 } from './camera.ts';
 import {
   LabEffectsManager,
+  type ActiveFireSource,
   type DynamiteFuseTip,
   type ImpulseEffectVariant,
 } from './effects.ts';
 import { createBoneMesh, ShapeType } from './mannequin.ts';
 
-export type { CameraMode, CameraPresetName, ImpulseEffectVariant };
+export type {
+  ActiveFireSource,
+  CameraMode,
+  CameraPresetName,
+  ImpulseEffectVariant,
+};
 export type PlacerMode = 'ragdoll' | 'curb' | 'cube' | 'sphere' | 'dynamite';
+
+export interface DynamicRaycastHit {
+  bodyIdx: number;
+  ragdollId: number;
+  boneId: number;
+  point: THREE.Vector3;
+  distance: number;
+}
 
 export const DYNAMITE_BONE_ID = 250;
 
@@ -738,6 +752,10 @@ export class LabScene {
         this.bodyPool[i] = entry;
       }
 
+      entry.object.userData.bodyIdx = i;
+      entry.object.userData.ragdollId = ragdollId;
+      entry.object.userData.boneId = boneId;
+
       const tOff = i * 7;
       const py = transforms[tOff + 1];
       const fuseTip = entry.object.userData.fuseTip as DynamiteFuseTip | undefined;
@@ -1417,6 +1435,62 @@ export class LabScene {
   }
 
   /**
+   * Raycasts against visible dynamic bodies (accounting for static/terrain occlusion)
+   * and returns the closest hit body index, ragdoll ID, bone ID, and world point.
+   */
+  public raycastDynamicBody(
+    raycaster: THREE.Raycaster,
+    maxDistance = 25.0
+  ): DynamicRaycastHit | null {
+    const targets: THREE.Object3D[] = [];
+    for (const entry of this.bodyPool) {
+      if (entry.object.visible) {
+        targets.push(entry.object);
+      }
+    }
+    if (targets.length === 0) {
+      return null;
+    }
+
+    const hits = raycaster.intersectObjects(targets, true);
+    const meshHit = hits.find(
+      (h) => h.object instanceof THREE.Mesh && h.distance <= maxDistance
+    );
+    if (!meshHit) {
+      return null;
+    }
+
+    // Check if static obstacles or terrain occlude the dynamic body
+    const occluders: THREE.Object3D[] = [...this.staticGroup.children];
+    if (this.terrainSurfaceMesh) {
+      occluders.push(this.terrainSurfaceMesh);
+    }
+    if (occluders.length > 0) {
+      const staticHits = raycaster.intersectObjects(occluders, true);
+      const closestStatic = staticHits.find((h) => h.object instanceof THREE.Mesh);
+      if (closestStatic && closestStatic.distance < meshHit.distance) {
+        return null;
+      }
+    }
+
+    let root: THREE.Object3D | null = meshHit.object;
+    while (root && root.userData.bodyIdx === undefined) {
+      root = root.parent;
+    }
+    if (!root) {
+      return null;
+    }
+
+    return {
+      bodyIdx: root.userData.bodyIdx as number,
+      ragdollId: root.userData.ragdollId as number,
+      boneId: root.userData.boneId as number,
+      point: meshHit.point.clone(),
+      distance: meshHit.distance,
+    };
+  }
+
+  /**
    * Updates or hides the interactive spring grab tether line.
    */
   public setGrabTether(
@@ -1465,6 +1539,55 @@ export class LabScene {
     this.effects.spawnExplosionEffect(pos, radius);
   }
 
+  public computeTaserMuzzle(out?: THREE.Vector3): THREE.Vector3 {
+    return this.effects.computeTaserMuzzle(out);
+  }
+
+  public spawnTaserHit(
+    bodyIdx: number,
+    chestBodyIdx: number,
+    localProngA: THREE.Vector3,
+    localProngB: THREE.Vector3
+  ): void {
+    this.effects.spawnTaserHit(bodyIdx, chestBodyIdx, localProngA, localProngB);
+  }
+
+  public spawnTaserMiss(endA: THREE.Vector3, endB: THREE.Vector3): void {
+    this.effects.spawnTaserMiss(endA, endB);
+  }
+
+  public spawnGroundFirePatch(pos: THREE.Vector3): void {
+    this.effects.spawnGroundFirePatch(pos);
+  }
+
+  public igniteProp(bodyIdx: number, pos: THREE.Vector3): void {
+    this.effects.igniteProp(bodyIdx, pos);
+  }
+
+  public getActiveFireSources(): ActiveFireSource[] {
+    return this.effects.getActiveFireSources();
+  }
+
+  public emitFlameParticles(
+    pos: THREE.Vector3,
+    count: number,
+    spreadRadius?: number
+  ): void {
+    this.effects.emitFlameParticles(pos, count, spreadRadius);
+  }
+
+  public emitElectricSparks(
+    pos: THREE.Vector3,
+    count: number,
+    spreadRadius?: number
+  ): void {
+    this.effects.emitElectricSparks(pos, count, spreadRadius);
+  }
+
+  public clearEffects(): void {
+    this.effects.clearAll();
+  }
+
   public setEarthquakeIntensity(magnitude: number): void {
     this.cameraController.setEarthquakeIntensity(magnitude);
   }
@@ -1473,8 +1596,12 @@ export class LabScene {
     this.cameraController.setSimulationPaused(paused);
   }
 
-  public updateEffects(dt: number): void {
-    this.effects.update(dt, this.dynamiteFuseTips);
+  public updateEffects(
+    dt: number,
+    transforms?: Float32Array,
+    simDt = dt
+  ): void {
+    this.effects.update(dt, this.dynamiteFuseTips, transforms, simDt);
 
     // Pulse & billboard active wound rings
     if (this.telemetryGroup.visible) {

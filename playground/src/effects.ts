@@ -8,6 +8,11 @@ export interface DynamiteFuseTip {
   phase: number;
 }
 
+export interface ActiveFireSource {
+  pos: THREE.Vector3;
+  radius: number;
+}
+
 interface ImpulseFx {
   group: THREE.Group;
   ring: THREE.Mesh;
@@ -54,9 +59,66 @@ interface ExplosionFx {
   maxRingRadius: number;
 }
 
+const TASER_WIRE_SEGMENTS = 8;
+const TASER_WIRE_VERTS = TASER_WIRE_SEGMENTS + 1;
+const TASER_ARC_SEGMENTS = 6;
+const TASER_ARC_VERTS = TASER_ARC_SEGMENTS + 1;
+const MAX_GROUND_FIRE_PATCHES = 6;
+const MAX_FIRE_PARTICLES = 220;
+
+interface TaserShotFx {
+  wires: [THREE.Line, THREE.Line];
+  wirePos: [Float32Array, Float32Array];
+  arcs: [THREE.Line, THREE.Line] | null;
+  arcPos: [Float32Array, Float32Array] | null;
+  prongs: [THREE.Mesh, THREE.Mesh];
+  isHit: boolean;
+  bodyIdx: number;
+  chestBodyIdx: number;
+  localProngA: THREE.Vector3;
+  localProngB: THREE.Vector3;
+  missEndA: THREE.Vector3;
+  missEndB: THREE.Vector3;
+  age: number;
+  duration: number;
+  sparkAccum: number;
+}
+
+interface GroundFirePatch {
+  group: THREE.Group;
+  disc: THREE.Mesh;
+  ring: THREE.Mesh;
+  light: THREE.PointLight;
+  pos: THREE.Vector3;
+  radius: number;
+  remaining: number;
+  maxDuration: number;
+  emitAccum: number;
+  phase: number;
+}
+
+interface BurningPropFire {
+  bodyIdx: number;
+  pos: THREE.Vector3;
+  radius: number;
+  remaining: number;
+  emitAccum: number;
+}
+
+interface FireParticle {
+  mesh: THREE.Mesh;
+  velocity: THREE.Vector3;
+  age: number;
+  duration: number;
+  startScale: number;
+  endScale: number;
+  isEmber: boolean;
+}
+
 /**
  * Manages transient 3D visual FX: grab tether line & endpoints, impulse shockwaves,
- * ballistic tracers & spark bursts, Force Wave rings, 3D explosions, and fuse-tip flicker.
+ * ballistic tracers & spark bursts, Force Wave rings, 3D explosions, fuse-tip flicker,
+ * 2-wire Taser arcs, ground fire patches, and burning prop/body flames.
  */
 export class LabEffectsManager {
   private readonly scene: THREE.Scene;
@@ -75,15 +137,28 @@ export class LabEffectsManager {
   private readonly sparkParticles: SparkParticle[] = [];
   private readonly forceWaveEffects: ForceWaveFx[] = [];
   private readonly explosionEffects: ExplosionFx[] = [];
+  private readonly taserEffects: TaserShotFx[] = [];
+  private readonly groundFirePatches: GroundFirePatch[] = [];
+  private readonly burningProps: BurningPropFire[] = [];
+  private readonly fireParticles: FireParticle[] = [];
+
   private readonly tracerBeamGeo: THREE.CylinderGeometry;
   private readonly sparkGeo: THREE.BoxGeometry;
   private readonly forceWaveRingGeo: THREE.RingGeometry;
   private readonly explosionSphereGeo: THREE.SphereGeometry;
   private readonly explosionGroundRingGeo: THREE.RingGeometry;
+  private readonly taserProngGeo: THREE.SphereGeometry;
+  private readonly fireDiscGeo: THREE.CircleGeometry;
+  private readonly fireRingGeo: THREE.RingGeometry;
+  private readonly flameGeo: THREE.OctahedronGeometry;
+  private readonly emberGeo: THREE.BoxGeometry;
 
   private readonly tempVecA = new THREE.Vector3();
   private readonly tempVecB = new THREE.Vector3();
   private readonly tempVecC = new THREE.Vector3();
+  private readonly tempVecD = new THREE.Vector3();
+  private readonly tempVecE = new THREE.Vector3();
+  private readonly tempQuat = new THREE.Quaternion();
   private fxTime = 0;
 
   constructor(scene: THREE.Scene, camera: THREE.Camera) {
@@ -125,6 +200,13 @@ export class LabEffectsManager {
     this.forceWaveRingGeo = new THREE.RingGeometry(0.14, 0.195, 36);
     this.explosionSphereGeo = new THREE.SphereGeometry(1, 22, 16);
     this.explosionGroundRingGeo = new THREE.RingGeometry(0.68, 1.0, 40);
+    this.taserProngGeo = new THREE.SphereGeometry(0.018, 8, 6);
+    this.fireDiscGeo = new THREE.CircleGeometry(0.58, 24);
+    this.fireDiscGeo.rotateX(-Math.PI / 2);
+    this.fireRingGeo = new THREE.RingGeometry(0.45, 0.85, 32);
+    this.fireRingGeo.rotateX(-Math.PI / 2);
+    this.flameGeo = new THREE.OctahedronGeometry(0.075, 0);
+    this.emberGeo = new THREE.BoxGeometry(0.02, 0.02, 0.02);
   }
 
   public getElapsedTime(): number {
@@ -446,6 +528,461 @@ export class LabEffectsManager {
     }
   }
 
+  /**
+   * Computes the taser handheld muzzle origin slightly below-right of the camera:
+   * `origin + right*0.18 - up*0.14 + fwd*0.45`.
+   */
+  public computeTaserMuzzle(out = new THREE.Vector3()): THREE.Vector3 {
+    const fwd = this.tempVecA.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+    const right = this.tempVecB.set(1, 0, 0).applyQuaternion(this.camera.quaternion);
+    const up = this.tempVecC.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+    return out
+      .copy(this.camera.position)
+      .addScaledVector(right, 0.18)
+      .addScaledVector(up, -0.14)
+      .addScaledVector(fwd, 0.45);
+  }
+
+  /**
+   * Spawns a 3.0s twin-wire taser stun discharge attached to a live body (`bodyIdx`),
+   * with crackling cyan-white lightning arcs around `chestBodyIdx` (or `bodyIdx`).
+   */
+  public spawnTaserHit(
+    bodyIdx: number,
+    chestBodyIdx: number,
+    localProngA: THREE.Vector3,
+    localProngB: THREE.Vector3
+  ): void {
+    const wires = this.createTaserWirePair(0.95);
+    const arcs = this.createTaserArcPair();
+    const prongs = this.createTaserProngs();
+
+    this.taserEffects.push({
+      wires: wires.lines,
+      wirePos: wires.positions,
+      arcs: arcs.lines,
+      arcPos: arcs.positions,
+      prongs,
+      isHit: true,
+      bodyIdx,
+      chestBodyIdx: chestBodyIdx >= 0 ? chestBodyIdx : bodyIdx,
+      localProngA: localProngA.clone(),
+      localProngB: localProngB.clone(),
+      missEndA: new THREE.Vector3(),
+      missEndB: new THREE.Vector3(),
+      age: 0,
+      duration: 3.0,
+      sparkAccum: 0,
+    });
+  }
+
+  /**
+   * Spawns a brief 0.25s twin-wire spark miss effect.
+   */
+  public spawnTaserMiss(endA: THREE.Vector3, endB: THREE.Vector3): void {
+    const wires = this.createTaserWirePair(0.82);
+    const prongs = this.createTaserProngs();
+    prongs[0].position.copy(endA);
+    prongs[1].position.copy(endB);
+
+    this.emitElectricSparks(endA, 6, 0.35);
+    this.emitElectricSparks(endB, 6, 0.35);
+
+    this.taserEffects.push({
+      wires: wires.lines,
+      wirePos: wires.positions,
+      arcs: null,
+      arcPos: null,
+      prongs,
+      isHit: false,
+      bodyIdx: -1,
+      chestBodyIdx: -1,
+      localProngA: new THREE.Vector3(),
+      localProngB: new THREE.Vector3(),
+      missEndA: endA.clone(),
+      missEndB: endB.clone(),
+      age: 0,
+      duration: 0.25,
+      sparkAccum: 0,
+    });
+  }
+
+  private createTaserWirePair(opacity: number): {
+    lines: [THREE.Line, THREE.Line];
+    positions: [Float32Array, Float32Array];
+  } {
+    const colors = [0x38bdf8, 0xe0faff];
+    const lines: THREE.Line[] = [];
+    const positions: Float32Array[] = [];
+
+    for (let i = 0; i < 2; i++) {
+      const arr = new Float32Array(TASER_WIRE_VERTS * 3);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: colors[i],
+        transparent: true,
+        opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const line = new THREE.Line(geo, mat);
+      line.frustumCulled = false;
+      this.scene.add(line);
+      lines.push(line);
+      positions.push(arr);
+    }
+
+    return {
+      lines: lines as [THREE.Line, THREE.Line],
+      positions: positions as [Float32Array, Float32Array],
+    };
+  }
+
+  private createTaserArcPair(): {
+    lines: [THREE.Line, THREE.Line];
+    positions: [Float32Array, Float32Array];
+  } {
+    const colors = [0xe0faff, 0x22d3ee];
+    const lines: THREE.Line[] = [];
+    const positions: Float32Array[] = [];
+
+    for (let i = 0; i < 2; i++) {
+      const arr = new Float32Array(TASER_ARC_VERTS * 3);
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: colors[i],
+        transparent: true,
+        opacity: 0.96,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const line = new THREE.Line(geo, mat);
+      line.frustumCulled = false;
+      this.scene.add(line);
+      lines.push(line);
+      positions.push(arr);
+    }
+
+    return {
+      lines: lines as [THREE.Line, THREE.Line],
+      positions: positions as [Float32Array, Float32Array],
+    };
+  }
+
+  private createTaserProngs(): [THREE.Mesh, THREE.Mesh] {
+    const prongs: THREE.Mesh[] = [];
+    for (let i = 0; i < 2; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: i === 0 ? 0xe0faff : 0x38bdf8,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.taserProngGeo, mat);
+      this.scene.add(mesh);
+      prongs.push(mesh);
+    }
+    return prongs as [THREE.Mesh, THREE.Mesh];
+  }
+
+  private disposeTaserEffect(fx: TaserShotFx): void {
+    for (const line of fx.wires) {
+      this.scene.remove(line);
+      line.geometry.dispose();
+      (line.material as THREE.Material).dispose();
+    }
+    if (fx.arcs) {
+      for (const arc of fx.arcs) {
+        this.scene.remove(arc);
+        arc.geometry.dispose();
+        (arc.material as THREE.Material).dispose();
+      }
+    }
+    for (const prong of fx.prongs) {
+      this.scene.remove(prong);
+      (prong.material as THREE.Material).dispose();
+    }
+  }
+
+  /**
+   * Spawns a ground campfire / fire-pit patch (25s lifetime, radius 0.85m, capped at 6 patches).
+   */
+  public spawnGroundFirePatch(pos: THREE.Vector3): void {
+    if (this.groundFirePatches.length >= MAX_GROUND_FIRE_PATCHES) {
+      const oldest = this.groundFirePatches.shift()!;
+      this.disposeGroundFirePatch(oldest);
+    }
+
+    const group = new THREE.Group();
+    group.position.copy(pos);
+
+    const discMat = new THREE.MeshBasicMaterial({
+      color: 0xff5a12,
+      transparent: true,
+      opacity: 0.78,
+      depthWrite: false,
+    });
+    const disc = new THREE.Mesh(this.fireDiscGeo, discMat);
+    disc.position.y = 0.012;
+    group.add(disc);
+
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0xffa62b,
+      transparent: true,
+      opacity: 0.52,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const ring = new THREE.Mesh(this.fireRingGeo, ringMat);
+    ring.position.y = 0.018;
+    group.add(ring);
+
+    const light = new THREE.PointLight(0xff741c, 2.8, 6.2, 2.0);
+    light.position.set(0, 0.38, 0);
+    group.add(light);
+
+    this.scene.add(group);
+    this.groundFirePatches.push({
+      group,
+      disc,
+      ring,
+      light,
+      pos: pos.clone(),
+      radius: 0.85,
+      remaining: 25.0,
+      maxDuration: 25.0,
+      emitAccum: 0,
+      phase: Math.random() * Math.PI * 2,
+    });
+
+    this.emitFlameParticles(pos, 10, 0.42);
+  }
+
+  private disposeGroundFirePatch(patch: GroundFirePatch): void {
+    this.scene.remove(patch.group);
+    (patch.disc.material as THREE.Material).dispose();
+    (patch.ring.material as THREE.Material).dispose();
+  }
+
+  /**
+   * Attaches or refreshes a 20s burning fire onto a dynamic prop body.
+   */
+  public igniteProp(bodyIdx: number, pos: THREE.Vector3): void {
+    const existing = this.burningProps.find((p) => p.bodyIdx === bodyIdx);
+    if (existing) {
+      existing.remaining = 20.0;
+      existing.pos.copy(pos);
+    } else {
+      this.burningProps.push({
+        bodyIdx,
+        pos: pos.clone(),
+        radius: 0.65,
+        remaining: 20.0,
+        emitAccum: 0,
+      });
+    }
+    this.emitFlameParticles(pos, 8, 0.25);
+  }
+
+  /**
+   * Returns all currently active fire sources (ground patches + burning props)
+   * for automatic ragdoll contact ignition.
+   */
+  public getActiveFireSources(): ActiveFireSource[] {
+    const sources: ActiveFireSource[] = [];
+    for (const p of this.groundFirePatches) {
+      if (p.remaining > 0) {
+        sources.push({ pos: p.pos, radius: p.radius });
+      }
+    }
+    for (const prop of this.burningProps) {
+      if (prop.remaining > 0) {
+        sources.push({ pos: prop.pos, radius: prop.radius });
+      }
+    }
+    return sources;
+  }
+
+  /**
+   * Emits rising orange/yellow flame & ember particles around `pos`.
+   */
+  public emitFlameParticles(
+    pos: THREE.Vector3,
+    count: number,
+    spreadRadius = 0.22
+  ): void {
+    const flameColors = [0xfff3b0, 0xffae28, 0xff6214, 0xef3e18];
+    for (let i = 0; i < count; i++) {
+      if (this.fireParticles.length >= MAX_FIRE_PARTICLES) {
+        const dropped = this.fireParticles.shift()!;
+        this.scene.remove(dropped.mesh);
+        (dropped.mesh.material as THREE.Material).dispose();
+      }
+
+      const isEmber = i % 3 === 2;
+      const color = flameColors[(Math.random() * flameColors.length) | 0];
+      const mat = new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: isEmber ? 0.95 : 0.85,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(
+        isEmber ? this.emberGeo : this.flameGeo,
+        mat
+      );
+      const angle = Math.random() * Math.PI * 2;
+      const r = Math.random() * spreadRadius;
+      mesh.position.set(
+        pos.x + Math.cos(angle) * r,
+        pos.y + Math.random() * 0.08,
+        pos.z + Math.sin(angle) * r
+      );
+      mesh.rotation.set(
+        Math.random() * Math.PI,
+        Math.random() * Math.PI,
+        Math.random() * Math.PI
+      );
+
+      const startScale = isEmber
+        ? 0.65 + Math.random() * 0.55
+        : 0.7 + Math.random() * 0.85;
+      const endScale = isEmber ? 0.2 : 0.18;
+      mesh.scale.setScalar(startScale);
+      this.scene.add(mesh);
+
+      const velocity = new THREE.Vector3(
+        (Math.random() - 0.5) * (isEmber ? 0.85 : 0.42),
+        (isEmber ? 1.35 : 0.95) + Math.random() * 1.15,
+        (Math.random() - 0.5) * (isEmber ? 0.85 : 0.42)
+      );
+
+      this.fireParticles.push({
+        mesh,
+        velocity,
+        age: 0,
+        duration: isEmber
+          ? 0.45 + Math.random() * 0.45
+          : 0.34 + Math.random() * 0.3,
+        startScale,
+        endScale,
+        isEmber,
+      });
+    }
+  }
+
+  /**
+   * Emits crackling cyan-white electric spark particles around `pos`.
+   */
+  public emitElectricSparks(
+    pos: THREE.Vector3,
+    count: number,
+    spreadRadius = 0.24
+  ): void {
+    const colors = [0xe0faff, 0x67e8f9, 0x22d3ee, 0x38bdf8];
+    for (let i = 0; i < count; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: colors[i % colors.length],
+        transparent: true,
+        opacity: 0.98,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const mesh = new THREE.Mesh(this.sparkGeo, mat);
+      mesh.position.set(
+        pos.x + (Math.random() - 0.5) * spreadRadius,
+        pos.y + (Math.random() - 0.5) * spreadRadius,
+        pos.z + (Math.random() - 0.5) * spreadRadius
+      );
+
+      const velocity = new THREE.Vector3(
+        Math.random() - 0.5,
+        Math.random() * 0.85 - 0.15,
+        Math.random() - 0.5
+      )
+        .normalize()
+        .multiplyScalar(1.8 + Math.random() * 3.4);
+
+      mesh.lookAt(this.tempVecD.copy(mesh.position).add(velocity));
+      this.scene.add(mesh);
+
+      this.sparkParticles.push({
+        mesh,
+        velocity,
+        age: 0,
+        duration: 0.1 + Math.random() * 0.1,
+      });
+    }
+  }
+
+  /**
+   * Clears and disposes all active transient effects, taser wires, fire patches,
+   * burning props, and particle systems (called on scenario reset).
+   */
+  public clearAll(): void {
+    this.setGrabTether(false);
+
+    while (this.impulseEffects.length > 0) {
+      const fx = this.impulseEffects.pop()!;
+      this.scene.remove(fx.group);
+      (fx.ring.material as THREE.Material).dispose();
+      if (fx.flashCore) {
+        (fx.flashCore.material as THREE.Material).dispose();
+      }
+    }
+
+    while (this.tracerEffects.length > 0) {
+      const fx = this.tracerEffects.pop()!;
+      this.scene.remove(fx.beam);
+      this.scene.remove(fx.line);
+      (fx.beam.material as THREE.Material).dispose();
+      fx.line.geometry.dispose();
+      (fx.line.material as THREE.Material).dispose();
+    }
+
+    while (this.sparkParticles.length > 0) {
+      const spark = this.sparkParticles.pop()!;
+      this.scene.remove(spark.mesh);
+      (spark.mesh.material as THREE.Material).dispose();
+    }
+
+    while (this.forceWaveEffects.length > 0) {
+      const fx = this.forceWaveEffects.pop()!;
+      this.scene.remove(fx.mesh);
+      (fx.mesh.material as THREE.Material).dispose();
+    }
+
+    while (this.explosionEffects.length > 0) {
+      const fx = this.explosionEffects.pop()!;
+      this.scene.remove(fx.core);
+      this.scene.remove(fx.fireball);
+      this.scene.remove(fx.groundRing);
+      (fx.core.material as THREE.Material).dispose();
+      (fx.fireball.material as THREE.Material).dispose();
+      (fx.groundRing.material as THREE.Material).dispose();
+    }
+
+    while (this.taserEffects.length > 0) {
+      this.disposeTaserEffect(this.taserEffects.pop()!);
+    }
+
+    while (this.groundFirePatches.length > 0) {
+      this.disposeGroundFirePatch(this.groundFirePatches.pop()!);
+    }
+
+    this.burningProps.length = 0;
+
+    while (this.fireParticles.length > 0) {
+      const p = this.fireParticles.pop()!;
+      this.scene.remove(p.mesh);
+      (p.mesh.material as THREE.Material).dispose();
+    }
+  }
+
   private updateDynamiteFuseTips(
     dynamiteFuseTips: ReadonlySet<DynamiteFuseTip>
   ): void {
@@ -463,9 +1000,77 @@ export class LabEffectsManager {
     }
   }
 
+  private fillCatenaryWire(
+    arr: Float32Array,
+    start: THREE.Vector3,
+    end: THREE.Vector3,
+    sag: number,
+    jitter: number,
+    phaseOffset: number
+  ): void {
+    for (let s = 0; s < TASER_WIRE_VERTS; s++) {
+      const t = s / TASER_WIRE_SEGMENTS;
+      const arch = 4 * t * (1 - t);
+      const px = THREE.MathUtils.lerp(start.x, end.x, t);
+      const py = THREE.MathUtils.lerp(start.y, end.y, t) - sag * arch;
+      const pz = THREE.MathUtils.lerp(start.z, end.z, t);
+
+      const jScale = arch * jitter;
+      const jx =
+        jScale *
+        (Math.sin(this.fxTime * 68 + s * 2.1 + phaseOffset) +
+          (Math.random() - 0.5) * 0.7);
+      const jy =
+        jScale *
+        (Math.cos(this.fxTime * 82 + s * 1.7 + phaseOffset) +
+          (Math.random() - 0.5) * 0.7);
+      const jz =
+        jScale *
+        (Math.sin(this.fxTime * 74 + s * 2.9 + phaseOffset) +
+          (Math.random() - 0.5) * 0.7);
+
+      const o = s * 3;
+      arr[o] = px + jx;
+      arr[o + 1] = py + jy;
+      arr[o + 2] = pz + jz;
+    }
+  }
+
+  private fillLightningArc(
+    arr: Float32Array,
+    center: THREE.Vector3,
+    radius: number
+  ): void {
+    const aTheta = Math.random() * Math.PI * 2;
+    const bTheta = aTheta + (Math.random() * 1.6 + 1.0);
+    const startX = center.x + Math.cos(aTheta) * radius;
+    const startY = center.y + (Math.random() - 0.5) * radius * 1.2;
+    const startZ = center.z + Math.sin(aTheta) * radius;
+    const endX = center.x + Math.cos(bTheta) * radius;
+    const endY = center.y + (Math.random() - 0.5) * radius * 1.2;
+    const endZ = center.z + Math.sin(bTheta) * radius;
+
+    for (let s = 0; s < TASER_ARC_VERTS; s++) {
+      const t = s / TASER_ARC_SEGMENTS;
+      const midEnv = Math.sin(t * Math.PI);
+      const o = s * 3;
+      arr[o] =
+        THREE.MathUtils.lerp(startX, endX, t) +
+        (Math.random() - 0.5) * 0.14 * midEnv;
+      arr[o + 1] =
+        THREE.MathUtils.lerp(startY, endY, t) +
+        (Math.random() - 0.5) * 0.14 * midEnv;
+      arr[o + 2] =
+        THREE.MathUtils.lerp(startZ, endZ, t) +
+        (Math.random() - 0.5) * 0.14 * midEnv;
+    }
+  }
+
   public update(
     dt: number,
-    dynamiteFuseTips: ReadonlySet<DynamiteFuseTip>
+    dynamiteFuseTips: ReadonlySet<DynamiteFuseTip>,
+    transforms?: Float32Array,
+    simDt = dt
   ): void {
     this.fxTime += dt;
     this.updateDynamiteFuseTips(dynamiteFuseTips);
@@ -598,6 +1203,193 @@ export class LabEffectsManager {
         this.scene.remove(fx.mesh);
         (fx.mesh.material as THREE.Material).dispose();
         this.forceWaveEffects.splice(i, 1);
+      }
+    }
+
+    // Taser 2-wire & crackling arc updates
+    const muzzleOrigin = this.computeTaserMuzzle(new THREE.Vector3());
+    for (let i = this.taserEffects.length - 1; i >= 0; i--) {
+      const fx = this.taserEffects[i];
+      fx.age += fx.isHit ? simDt : dt;
+      const t = Math.min(1, fx.age / fx.duration);
+
+      let endA = fx.missEndA;
+      let endB = fx.missEndB;
+      let validHit = !fx.isHit;
+
+      if (fx.isHit && transforms && fx.bodyIdx * 7 + 6 < transforms.length) {
+        const bOff = fx.bodyIdx * 7;
+        const py = transforms[bOff + 1];
+        if (py > -20) {
+          this.tempVecD.set(transforms[bOff], py, transforms[bOff + 2]);
+          this.tempQuat.set(
+            transforms[bOff + 3],
+            transforms[bOff + 4],
+            transforms[bOff + 5],
+            transforms[bOff + 6]
+          );
+
+          endA = fx.localProngA
+            .clone()
+            .applyQuaternion(this.tempQuat)
+            .add(this.tempVecD);
+          endB = fx.localProngB
+            .clone()
+            .applyQuaternion(this.tempQuat)
+            .add(this.tempVecD);
+          fx.prongs[0].position.copy(endA);
+          fx.prongs[1].position.copy(endB);
+          validHit = true;
+
+          // Crackling lightning arcs around chest/torso
+          const cIdx =
+            fx.chestBodyIdx >= 0 && fx.chestBodyIdx * 7 + 2 < transforms.length
+              ? fx.chestBodyIdx
+              : fx.bodyIdx;
+          const cOff = cIdx * 7;
+          const chestPos = this.tempVecE.set(
+            transforms[cOff],
+            transforms[cOff + 1],
+            transforms[cOff + 2]
+          );
+
+          if (fx.arcs && fx.arcPos) {
+            for (let a = 0; a < 2; a++) {
+              this.fillLightningArc(fx.arcPos[a], chestPos, 0.24);
+              const attr = fx.arcs[a].geometry.getAttribute(
+                'position'
+              ) as THREE.BufferAttribute;
+              attr.needsUpdate = true;
+              (fx.arcs[a].material as THREE.LineBasicMaterial).opacity =
+                0.55 + Math.random() * 0.45;
+            }
+          }
+
+          if (simDt > 0) {
+            fx.sparkAccum += dt;
+            if (fx.sparkAccum >= 0.045) {
+              fx.sparkAccum = 0;
+              this.emitElectricSparks(chestPos, 3, 0.26);
+            }
+          }
+        }
+      }
+
+      if (!validHit || t >= 1) {
+        this.disposeTaserEffect(fx);
+        this.taserEffects.splice(i, 1);
+        continue;
+      }
+
+      const distA = muzzleOrigin.distanceTo(endA);
+      const distB = muzzleOrigin.distanceTo(endB);
+      const sagA = Math.min(0.45, distA * 0.085);
+      const sagB = Math.min(0.45, distB * 0.085);
+      const jitter = fx.isHit ? 0.014 : 0.022;
+      const wireFade = fx.isHit
+        ? THREE.MathUtils.clamp((1 - t) * 4.0, 0, 1)
+        : 1 - t;
+
+      this.fillCatenaryWire(fx.wirePos[0], muzzleOrigin, endA, sagA, jitter, 0);
+      this.fillCatenaryWire(fx.wirePos[1], muzzleOrigin, endB, sagB, jitter, 2.3);
+
+      for (let w = 0; w < 2; w++) {
+        const attr = fx.wires[w].geometry.getAttribute(
+          'position'
+        ) as THREE.BufferAttribute;
+        attr.needsUpdate = true;
+        (fx.wires[w].material as THREE.LineBasicMaterial).opacity =
+          (w === 0 ? 0.92 : 0.85) * wireFade;
+        (fx.prongs[w].material as THREE.MeshBasicMaterial).opacity =
+          0.95 * wireFade;
+      }
+    }
+
+    // Ground fire patches (25s lifetime, warm flickering PointLight + rising flames)
+    for (let i = this.groundFirePatches.length - 1; i >= 0; i--) {
+      const patch = this.groundFirePatches[i];
+      patch.remaining -= simDt;
+      if (patch.remaining <= 0) {
+        this.disposeGroundFirePatch(patch);
+        this.groundFirePatches.splice(i, 1);
+        continue;
+      }
+
+      const fade = THREE.MathUtils.clamp(patch.remaining / 2.5, 0, 1);
+      const flicker =
+        0.82 +
+        0.24 * Math.sin(this.fxTime * 21.0 + patch.phase) +
+        0.14 * Math.sin(this.fxTime * 47.0 + patch.phase * 1.9);
+
+      patch.light.intensity = 2.75 * flicker * fade;
+      patch.disc.scale.setScalar(0.95 + 0.08 * flicker);
+      patch.ring.scale.setScalar(0.92 + 0.14 * flicker);
+      (patch.disc.material as THREE.MeshBasicMaterial).opacity = 0.78 * fade;
+      (patch.ring.material as THREE.MeshBasicMaterial).opacity =
+        0.48 * flicker * fade;
+
+      if (simDt > 0) {
+        patch.emitAccum += dt;
+        if (patch.emitAccum >= 0.045) {
+          patch.emitAccum = 0;
+          this.emitFlameParticles(patch.pos, 3, 0.45);
+        }
+      }
+    }
+
+    // Burning dynamic props (20s lifetime, tracking live body position)
+    for (let i = this.burningProps.length - 1; i >= 0; i--) {
+      const prop = this.burningProps[i];
+      prop.remaining -= simDt;
+
+      if (
+        prop.remaining <= 0 ||
+        !transforms ||
+        prop.bodyIdx * 7 + 2 >= transforms.length
+      ) {
+        this.burningProps.splice(i, 1);
+        continue;
+      }
+
+      const pOff = prop.bodyIdx * 7;
+      const py = transforms[pOff + 1];
+      if (py < -20) {
+        this.burningProps.splice(i, 1);
+        continue;
+      }
+      prop.pos.set(transforms[pOff], py, transforms[pOff + 2]);
+
+      if (simDt > 0) {
+        prop.emitAccum += dt;
+        if (prop.emitAccum >= 0.05) {
+          prop.emitAccum = 0;
+          this.emitFlameParticles(prop.pos, 2, 0.22);
+        }
+      }
+    }
+
+    // Rising fire & ember particles
+    for (let i = this.fireParticles.length - 1; i >= 0; i--) {
+      const p = this.fireParticles[i];
+      p.age += dt;
+      const t = Math.min(1, p.age / p.duration);
+
+      p.velocity.x += (Math.random() - 0.5) * 1.4 * dt;
+      p.velocity.z += (Math.random() - 0.5) * 1.4 * dt;
+      p.velocity.y += (p.isEmber ? 0.5 : 0.9) * dt;
+      p.mesh.position.addScaledVector(p.velocity, dt);
+      p.mesh.rotation.y += 3.2 * dt;
+      p.mesh.rotation.x += 2.1 * dt;
+
+      const s = THREE.MathUtils.lerp(p.startScale, p.endScale, t);
+      p.mesh.scale.set(s, s * (p.isEmber ? 1.0 : 1.55), s);
+      (p.mesh.material as THREE.MeshBasicMaterial).opacity =
+        (1 - t) * (p.isEmber ? 0.95 : 0.8);
+
+      if (t >= 1) {
+        this.scene.remove(p.mesh);
+        (p.mesh.material as THREE.Material).dispose();
+        this.fireParticles.splice(i, 1);
       }
     }
   }

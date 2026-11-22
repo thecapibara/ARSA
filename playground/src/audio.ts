@@ -331,6 +331,91 @@ export class TacticalAudio {
   }
 
   /**
+   * Crisp 20-30 Hz electric taser probe snap + crackling arc bursts.
+   */
+  public playTaser(hit = true): void {
+    const ctx = this.activeContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+
+    // Initial twin-probe gas cartridge pop
+    this.triggerNoiseBurst(ctx, now, 0.042, {
+      filterType: 'highpass',
+      freqStart: 2400,
+      freqEnd: 850,
+      q: 1.1,
+      gain: 0.62,
+    });
+    this.triggerPitchSweep(ctx, now, 0.036, {
+      wave: 'triangle',
+      freqStart: 520,
+      freqEnd: 135,
+      gain: 0.36,
+    });
+
+    // 25 Hz crackling arc burst train
+    const pulses = hit ? 16 : 3;
+    const interval = 0.04; // 25 Hz
+    for (let i = 0; i < pulses; i++) {
+      const t = now + i * interval;
+      const decay = hit ? 1.0 - (i / pulses) * 0.35 : 0.7 - i * 0.18;
+      this.triggerNoiseBurst(ctx, t, 0.024, {
+        filterType: 'highpass',
+        freqStart: 3600 + (i % 3) * 450,
+        freqEnd: 1300,
+        q: 1.6,
+        gain: 0.34 * decay,
+      });
+      this.triggerPitchSweep(ctx, t, 0.026, {
+        wave: 'sawtooth',
+        freqStart: 175 + (i % 2) * 35,
+        freqEnd: 92,
+        gain: 0.22 * decay,
+      });
+    }
+  }
+
+  /**
+   * Subtle fiery ignition whoosh + warm ember crackle burst.
+   */
+  public playIgnite(): void {
+    const ctx = this.activeContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+
+    // Warm flame ignition whoosh
+    this.triggerNoiseBurst(ctx, now, 0.28, {
+      filterType: 'bandpass',
+      freqStart: 880,
+      freqEnd: 230,
+      q: 0.85,
+      gain: 0.52,
+    });
+
+    // Soft low-end combustion bloom
+    this.triggerPitchSweep(ctx, now, 0.18, {
+      wave: 'sine',
+      freqStart: 118,
+      freqEnd: 46,
+      gain: 0.3,
+    });
+
+    // Subtle ember crackle pops
+    const pops = [0.02, 0.075, 0.14];
+    for (let i = 0; i < pops.length; i++) {
+      this.triggerNoiseBurst(ctx, now + pops[i], 0.028, {
+        filterType: 'highpass',
+        freqStart: 2700 - i * 350,
+        freqEnd: 1100,
+        q: 1.4,
+        gain: 0.18,
+      });
+    }
+  }
+
+  /**
    * Smoothly fades in/out continuous low-pass seismic rumble (40-75 Hz brown noise
    * + sub-oscillator) proportional to Richter magnitude, silencing cleanly when
    * paused, muted, or set to 0.

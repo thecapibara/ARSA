@@ -9,6 +9,7 @@ import {
   LabScene,
   PlacerMode,
 } from './scene.ts';
+import { BoneId } from './mannequin.ts';
 
 type ArsaSimExt = ArsaSim & {
   spawn_dynamite?: (
@@ -35,6 +36,34 @@ type ArsaSimExt = ArsaSim & {
     reduced_dist: number,
     sleep_dist: number
   ) => void;
+  give_ragdoll_held_box?: (
+    ragdoll_id: number,
+    hx: number,
+    hy: number,
+    hz: number,
+    mass: number,
+    break_force: number
+  ) => number;
+  release_hand_hold?: (ragdoll_id: number, is_left: boolean) => void;
+  is_hand_holding?: (ragdoll_id: number, is_left: boolean) => boolean;
+  set_ragdoll_status?: (
+    ragdoll_id: number,
+    effect: number,
+    intensity: number,
+    duration_sec: number
+  ) => boolean;
+  set_all_ragdolls_status?: (
+    effect: number,
+    intensity: number,
+    duration_sec: number
+  ) => void;
+  get_ragdoll_status?: (ragdoll_id: number) => number;
+  set_ragdoll_desired_velocity?: (
+    ragdoll_id: number,
+    vx: number,
+    vz: number
+  ) => boolean;
+  set_all_ragdolls_desired_velocity?: (vx: number, vz: number) => void;
 };
 
 type WeaponToolMode = 'pistol' | 'shotgun' | 'rifle';
@@ -46,7 +75,9 @@ type ToolMode =
   | WeaponToolMode
   | 'placer'
   | 'thrower'
-  | 'force_wave';
+  | 'force_wave'
+  | 'taser'
+  | 'ignite';
 type ProfilePresetKey = 'light' | 'standard' | 'tall' | 'heavy';
 
 interface BodyProfile {
@@ -88,6 +119,8 @@ const TOOL_LABELS: Record<ToolMode, string> = {
   placer: 'TOOL: PLACER',
   thrower: 'TOOL: THROWER',
   force_wave: 'TOOL: FORCE WAVE',
+  taser: 'TOOL: TASER (ELECTROCUTE)',
+  ignite: 'TOOL: IGNITE (FIRE)',
 };
 
 const PLACER_LABELS: Record<PlacerMode, string> = {
@@ -139,9 +172,13 @@ class PlaygroundApp {
   private paused = false;
   private activeMuscleMode = true;
   private autoGetUpEnabled = true;
+  private walkForward = false;
   private earthquakeMagnitude = 0;
   private intoxicationLevel = 0;
   private debugTelemetry = true;
+  private statusFxAccum = 0;
+  private fireClockSec = 0;
+  private readonly fireContactRefreshMap = new Map<number, number>();
 
   private bodyProfile: BodyProfile = { ...PROFILE_PRESETS.standard };
 
@@ -225,6 +262,12 @@ class PlaygroundApp {
   private readonly throwerLabel = document.getElementById('label-tool-thrower')!;
   private readonly throwerChevron = document.getElementById('chevron-thrower')!;
   private readonly throwerPopover = document.getElementById('popover-thrower')!;
+  private readonly giveBoxBtn = document.getElementById(
+    'btn-give-box'
+  ) as HTMLButtonElement;
+  private readonly walkToggleBtn = document.getElementById(
+    'btn-walk-toggle'
+  ) as HTMLButtonElement;
 
   constructor() {
     this.canvas = document.getElementById('viewport') as HTMLCanvasElement;
@@ -237,6 +280,7 @@ class PlaygroundApp {
     this.syncProfileUi();
     this.setActiveMuscleMode(true);
     this.setAutoGetUp(true);
+    this.setWalkForward(false);
     this.setIntoxicationPercent(0);
     this.setEarthquakeMagnitude(0);
     this.setDebugTelemetry(true);
@@ -262,6 +306,10 @@ class PlaygroundApp {
   private loadScenario(scenario: number): void {
     if (!this.sim) return;
     this.releaseGrab();
+    this.lab.clearEffects();
+    this.fireContactRefreshMap.clear();
+    this.fireClockSec = 0;
+    this.setWalkForward(false);
     this.activeScenario = scenario;
 
     const heightM = this.bodyProfile.heightCm / 100;
@@ -448,6 +496,67 @@ class PlaygroundApp {
     }
     if (typeof this.sim.set_intoxication === 'function') {
       this.sim.set_intoxication(this.intoxicationLevel);
+    }
+    if (typeof this.sim.set_all_ragdolls_desired_velocity === 'function') {
+      this.sim.set_all_ragdolls_desired_velocity(
+        0.0,
+        this.walkForward ? 1.35 : 0.0
+      );
+    }
+  }
+
+  private setWalkForward(enabled: boolean): void {
+    this.walkForward = enabled;
+    if (
+      this.sim &&
+      typeof this.sim.set_all_ragdolls_desired_velocity === 'function'
+    ) {
+      this.sim.set_all_ragdolls_desired_velocity(0.0, enabled ? 1.35 : 0.0);
+    }
+    this.walkToggleBtn.classList.toggle('active', enabled);
+    this.walkToggleBtn.setAttribute('aria-pressed', String(enabled));
+  }
+
+  private giveBoxToRagdolls(): void {
+    if (!this.sim || typeof this.sim.give_ragdoll_held_box !== 'function') {
+      return;
+    }
+    const count = this.sim.body_count();
+    const descriptors = this.sim.get_body_descriptors();
+    const ragdollIds = new Set<number>();
+    for (let i = 0; i < count; i++) {
+      const id = Math.round(descriptors[i * 6 + 4]);
+      if (id >= 0) ragdollIds.add(id);
+    }
+
+    const sortedIds = Array.from(ragdollIds).sort((a, b) => a - b);
+    let given = 0;
+    for (const id of sortedIds) {
+      if (given >= 4) break;
+      const holdingLeft =
+        typeof this.sim.is_hand_holding === 'function' &&
+        this.sim.is_hand_holding(id, true);
+      const holdingRight =
+        typeof this.sim.is_hand_holding === 'function' &&
+        this.sim.is_hand_holding(id, false);
+      if (holdingLeft || holdingRight) continue;
+
+      const boxIdx = this.sim.give_ragdoll_held_box(
+        id,
+        0.18,
+        0.18,
+        0.18,
+        6.0,
+        320.0
+      );
+      if (boxIdx >= 0) {
+        given++;
+      }
+    }
+
+    if (given > 0) {
+      this.syncSimulationView();
+      this.audio.playBoxDrop();
     }
   }
 
@@ -885,6 +994,265 @@ class PlaygroundApp {
     return new THREE.Vector3(0, 1, 0);
   }
 
+  private findRagdollBoneBodyIdx(
+    descriptors: Float32Array,
+    count: number,
+    ragdollId: number,
+    targetBoneId: number
+  ): number {
+    for (let i = 0; i < count; i++) {
+      const dOff = i * 6;
+      if (
+        Math.round(descriptors[dOff + 4]) === ragdollId &&
+        Math.round(descriptors[dOff + 5]) === targetBoneId
+      ) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private fireTaser(ray: THREE.Ray): void {
+    if (!this.sim) return;
+
+    const hit = this.lab.raycastDynamicBody(this.raycaster, 25.0);
+    if (hit && hit.ragdollId >= 0) {
+      if (typeof this.sim.set_ragdoll_status === 'function') {
+        this.sim.set_ragdoll_status(hit.ragdollId, 2, 1.0, 3.0);
+      }
+      this.audio.playTaser(true);
+
+      const transforms = this.sim.get_transforms();
+      const descriptors = this.sim.get_body_descriptors();
+      const count = this.sim.body_count();
+
+      const tOff = hit.bodyIdx * 7;
+      let localProngA = new THREE.Vector3(0.035, 0.02, 0.0);
+      let localProngB = new THREE.Vector3(-0.035, -0.02, 0.0);
+
+      if (tOff + 6 < transforms.length) {
+        const bodyPos = new THREE.Vector3(
+          transforms[tOff],
+          transforms[tOff + 1],
+          transforms[tOff + 2]
+        );
+        const bodyQuat = new THREE.Quaternion(
+          transforms[tOff + 3],
+          transforms[tOff + 4],
+          transforms[tOff + 5],
+          transforms[tOff + 6]
+        );
+        const invQuat = bodyQuat.clone().invert();
+        const localHit = hit.point.clone().sub(bodyPos).applyQuaternion(invQuat);
+
+        const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(
+          this.lab.camera.quaternion
+        );
+        const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(
+          this.lab.camera.quaternion
+        );
+        const worldSep = camRight
+          .multiplyScalar(0.032)
+          .addScaledVector(camUp, 0.018);
+        const localSep = worldSep.applyQuaternion(invQuat);
+
+        localProngA = localHit.clone().add(localSep);
+        localProngB = localHit.clone().sub(localSep);
+      }
+
+      const chestIdx = this.findRagdollBoneBodyIdx(
+        descriptors,
+        count,
+        hit.ragdollId,
+        BoneId.Chest
+      );
+      this.lab.spawnTaserHit(hit.bodyIdx, chestIdx, localProngA, localProngB);
+      this.syncSimulationView();
+      return;
+    }
+
+    // Missed ragdoll — fire brief 0.25s twin-wire spark miss effect
+    this.audio.playTaser(false);
+    let endCenter: THREE.Vector3 | null = hit ? hit.point : null;
+    if (!endCenter) {
+      const surf = this.lab.raycastPlacementSurface(this.raycaster);
+      if (surf && ray.origin.distanceTo(surf.point) <= 20.0) {
+        endCenter = surf.point;
+      } else if (
+        ray.intersectPlane(this.groundPlane, this.groundHit) &&
+        ray.origin.distanceTo(this.groundHit) <= 20.0
+      ) {
+        endCenter = this.groundHit.clone();
+      } else {
+        endCenter = ray.origin.clone().addScaledVector(ray.direction, 12.0);
+      }
+    }
+
+    const camRight = new THREE.Vector3(1, 0, 0).applyQuaternion(
+      this.lab.camera.quaternion
+    );
+    const camUp = new THREE.Vector3(0, 1, 0).applyQuaternion(
+      this.lab.camera.quaternion
+    );
+    const spread = camRight
+      .multiplyScalar(0.11)
+      .addScaledVector(camUp, 0.04);
+    this.lab.spawnTaserMiss(
+      endCenter.clone().add(spread),
+      endCenter.clone().sub(spread)
+    );
+  }
+
+  private executeIgnite(ray: THREE.Ray): void {
+    if (!this.sim) return;
+
+    const hit = this.lab.raycastDynamicBody(this.raycaster, 28.0);
+    if (hit) {
+      if (hit.ragdollId >= 0) {
+        if (typeof this.sim.set_ragdoll_status === 'function') {
+          this.sim.set_ragdoll_status(hit.ragdollId, 1, 1.0, 6.0);
+        }
+        this.lab.emitFlameParticles(hit.point, 12, 0.24);
+        this.audio.playIgnite();
+        return;
+      }
+
+      if (hit.bodyIdx >= 0) {
+        const transforms = this.sim.get_transforms();
+        const tOff = hit.bodyIdx * 7;
+        const propPos =
+          tOff + 2 < transforms.length
+            ? new THREE.Vector3(
+                transforms[tOff],
+                transforms[tOff + 1],
+                transforms[tOff + 2]
+              )
+            : hit.point;
+        this.lab.igniteProp(hit.bodyIdx, propPos);
+        this.audio.playIgnite();
+        return;
+      }
+    }
+
+    // Otherwise raycast placement surface / ground plane for a Ground Fire Patch
+    const surf = this.lab.raycastPlacementSurface(this.raycaster);
+    let firePos: THREE.Vector3 | null = null;
+    if (surf && ray.origin.distanceTo(surf.point) <= 32.0) {
+      firePos = surf.point.clone();
+    } else if (
+      ray.intersectPlane(this.groundPlane, this.groundHit) &&
+      ray.origin.distanceTo(this.groundHit) <= 32.0
+    ) {
+      firePos = this.groundHit.clone();
+    }
+
+    if (firePos) {
+      firePos.x = Math.max(-14, Math.min(14, firePos.x));
+      firePos.z = Math.max(-14, Math.min(14, firePos.z));
+      this.lab.spawnGroundFirePatch(firePos);
+      this.audio.playIgnite();
+    }
+  }
+
+  private updateFireAndStatusEffects(
+    rawDt: number,
+    simDt: number,
+    transforms: Float32Array
+  ): void {
+    if (!this.sim) return;
+    if (simDt <= 0) return;
+
+    this.fireClockSec += simDt;
+    const count = this.sim.body_count();
+    const descriptors = this.sim.get_body_descriptors();
+    const fireSources = this.lab.getActiveFireSources();
+
+    const getStatus =
+      typeof this.sim.get_ragdoll_status === 'function'
+        ? (id: number) => this.sim!.get_ragdoll_status!(id)
+        : () => 0;
+
+    // Track per-ragdoll status & contact ignition
+    const ragdollStatusCache = new Map<number, number>();
+    const readStatus = (id: number): number => {
+      let s = ragdollStatusCache.get(id);
+      if (s === undefined) {
+        s = getStatus(id);
+        ragdollStatusCache.set(id, s);
+      }
+      return s;
+    };
+
+    const emitStatusVfx =
+      (this.statusFxAccum += rawDt) >= 0.045;
+    if (emitStatusVfx) {
+      this.statusFxAccum = 0;
+    }
+
+    const pos = new THREE.Vector3();
+    for (let i = 0; i < count; i++) {
+      const dOff = i * 6;
+      const ragdollId = Math.round(descriptors[dOff + 4]);
+      if (ragdollId < 0) continue;
+
+      const boneId = Math.round(descriptors[dOff + 5]);
+      const tOff = i * 7;
+      if (tOff + 2 >= transforms.length) continue;
+
+      const py = transforms[tOff + 1];
+      if (py < -15) continue;
+      pos.set(transforms[tOff], py, transforms[tOff + 2]);
+
+      // Automatic contact ignition against pelvis, chest, or feet
+      if (
+        fireSources.length > 0 &&
+        (boneId === BoneId.Pelvis ||
+          boneId === BoneId.Chest ||
+          boneId === BoneId.LeftFoot ||
+          boneId === BoneId.RightFoot)
+      ) {
+        for (let s = 0; s < fireSources.length; s++) {
+          const src = fireSources[s];
+          const dx = pos.x - src.pos.x;
+          const dy = pos.y - src.pos.y;
+          const dz = pos.z - src.pos.z;
+          if (dx * dx + dy * dy + dz * dz <= src.radius * src.radius) {
+            const curStatus = readStatus(ragdollId);
+            const lastRefresh = this.fireContactRefreshMap.get(ragdollId) ?? -10;
+            if (
+              curStatus !== 1 ||
+              this.fireClockSec - lastRefresh >= 0.4
+            ) {
+              if (typeof this.sim.set_ragdoll_status === 'function') {
+                this.sim.set_ragdoll_status(ragdollId, 1, 1.0, 5.5);
+                ragdollStatusCache.set(ragdollId, 1);
+                this.fireContactRefreshMap.set(ragdollId, this.fireClockSec);
+              }
+            }
+            break;
+          }
+        }
+      }
+
+      if (emitStatusVfx) {
+        const status = readStatus(ragdollId);
+        if (
+          status === 1 &&
+          (boneId === BoneId.Pelvis ||
+            boneId === BoneId.Chest ||
+            boneId === BoneId.Head)
+        ) {
+          this.lab.emitFlameParticles(pos, 1, 0.14);
+        } else if (
+          status === 2 &&
+          (boneId === BoneId.Chest || boneId === BoneId.Pelvis)
+        ) {
+          this.lab.emitElectricSparks(pos, 2, 0.18);
+        }
+      }
+    }
+  }
+
   private readonly loop = (now: number): void => {
     requestAnimationFrame(this.loop);
 
@@ -937,7 +1305,13 @@ class PlaygroundApp {
       this.syncSimulationView();
     }
 
-    this.lab.updateEffects(rawDt);
+    const simDt = this.sim && !this.paused ? rawDt * this.timeScale : 0;
+    const transforms = this.sim ? this.sim.get_transforms() : undefined;
+    if (transforms) {
+      this.updateFireAndStatusEffects(rawDt, simDt, transforms);
+    }
+
+    this.lab.updateEffects(rawDt, transforms, simDt);
     this.lab.render();
   };
 
@@ -1291,6 +1665,15 @@ class PlaygroundApp {
       this.spawnRagdoll();
       (e.currentTarget as HTMLElement).blur();
     });
+    this.giveBoxBtn.addEventListener('click', () => {
+      this.audio.unlock();
+      this.giveBoxToRagdolls();
+      this.giveBoxBtn.blur();
+    });
+    this.walkToggleBtn.addEventListener('click', () => {
+      this.setWalkForward(!this.walkForward);
+      this.walkToggleBtn.blur();
+    });
   }
 
   private bindCollapsible(btnId: string, bodyId: string): void {
@@ -1455,6 +1838,10 @@ class PlaygroundApp {
         this.lab.spawnForceWaveEffect(ray.origin, ray.direction);
         this.audio.playForceWave();
         this.syncSimulationView();
+      } else if (this.activeTool === 'taser') {
+        this.fireTaser(ray);
+      } else if (this.activeTool === 'ignite') {
+        this.executeIgnite(ray);
       }
     });
 
